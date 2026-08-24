@@ -67,18 +67,35 @@ it is the only one there with all four.
 PowerShell, one command per line. `\` is not a continuation character
 there, and bare `python` is the wrong interpreter (see above).
 
+Build the target — **X1**, then **X2**:
+
 ```powershell
 C:\ProgramData\anaconda3\python.exe make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
 ```
 
 ```powershell
+C:\ProgramData\anaconda3\python.exe make_target.py --channel EO2 --peak-hv 5200 --step 2 --out waveforms\target_MKJX2.csv
+```
+
+Model-based first shot:
+
+```powershell
 C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MKJX1.csv --channel EO1 --name MKJX1 --out run\drive_MKJX1_iter0.csv
 ```
 
-Play `run\drive_MKJX1_iter0_awg.csv`, capture at least 256 averages, then:
+```powershell
+C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MKJX2.csv --channel EO2 --name MKJX2 --out run\drive_MKJX2_iter0.csv
+```
+
+Play `run\drive_MKJX<n>_iter0_awg.csv`, capture at least 256 averages,
+then update. Note the monitor column differs: **X1 is CH3, X2 is CH4**.
 
 ```powershell
 C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "run\MKJX1_i00*.csv" --mon-col CH3 --t-offset 250
+```
+
+```powershell
+C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX2.state.npz --measured "run\MKJX2_i00*.csv" --mon-col CH4 --t-offset 250
 ```
 
 ## Calibration lives in `eomilc/config.py`
