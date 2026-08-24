@@ -144,9 +144,13 @@ record's own peak, which silently rescales the correction the loop just computed
 it once and leave it alone. Re-fitted per iteration, the loop chases its own
 alignment and stops converging.
 
-**Averaging.** A single 8-bit trace has an LSB worth ~31 mV on the monitor — 31 V
-at the EOM. 256 averages puts the floor near 5 V; 1024 gets you to 2.5 V. Below
-that you need a higher-resolution scope, not more averages.
+**Averaging.** A single 8-bit trace has a code worth ~40 mV on the monitor — 40 V
+at the EOM. Averaging alone does not fix that: the staircase only softens where
+analog noise dithers the codes, and the old BYTE readback rounded the average
+back to 8 bits anyway. Scope Grab reads WORD as of 24 Aug (157 µV word steps for
+an averaged record, measured); with that, 256 averages put the quantisation
+residual somewhere between ~3 and ~15 V at the EOM depending on how much the
+input noise dithers. Measure it with `Trace.lsb` on a real capture.
 
 **The Q filter.** `--f-cut` (default 20 kHz) keeps ILC from learning noise. Do
 **not** lower it to cure divergence — it filters the whole drive, not just the

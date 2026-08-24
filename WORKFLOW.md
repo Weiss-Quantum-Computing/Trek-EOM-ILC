@@ -47,24 +47,34 @@ anything longer.
   boxcar engages, at a ×3 rather than ×12.
 - Channel name on the monitor channel, so the CSV column is self-describing
 
-### Averaging: GRAB accumulates it natively (since 24 Aug)
+### Averaging: what GRAB does, and what it actually buys
 
-With the scope set to AVER, **GRAB now builds the full average itself**: it
-runs the scope, clears the display so the average restarts from zero rather
-than continuing an average of the previous drive, and reads back only once the
-count is full. The phase line shows `averaging k of 256` while it builds —
-about 13 s at the 50 ms trigger. The "Wait for trigger" field acts as a stall
-limit: it resets whenever the count advances, so it only fires if the triggers
-actually stop.
+With the scope set to AVER, **GRAB builds the full average itself**: it runs
+the scope in bursts, reads the true hit count while stopped, and shows
+`averaging k of 256` as it climbs. The "Wait for trigger" field is a stall
+limit on the trigger itself — it only fires if triggers stop arriving. If the
+count comes back short, the log says so; check `averages taken` in the `.txt`
+sidecar before feeding any capture to `step`.
 
-Scope Grab from before 24 Aug armed `:SINGle`, which takes exactly one
-acquisition — the early day-4 captures say `averages taken : +1 of 256`, and
-that single 8-bit shot is what filled iteration 1 with 127 mV rms of grass.
+An averaged record reads back with **7680 points** (the scope serves nothing
+longer from a record stopped out of RUN) — 1.95 µs spacing on the 15 ms
+window, which lands right on the 2 µs loop grid.
 
-Still check `averages taken` in the `.txt` sidecar before feeding a capture to
-`step` — it is the one number that says whether the measurement is real. A
-shallow value now means the triggers dried up mid-build (the log will have
-said so), not that the tooling took a single shot.
+**What averaging does and does not fix.** Watching the screen tells the truth:
+averaging beats down random noise but the quantisation staircase on the
+display does not soften, because the display and the old BYTE readback are
+8-bit — 40 mV per code at 1 V/div, 40 V at the EOM. The average accumulator
+underneath is finer, and since 24 Aug Scope Grab reads WORD, which on this
+scope serves **157 µV word steps for an averaged record — 16× under the
+display code**.
+
+How much of that resolution is real signal depends on the analog noise at the
+scope input (a few mV against the 40 mV code): noise dithers the codes near
+each boundary and averaging recovers real sub-code detail there, while the
+middle of each code stays frozen. Expect the residual quantisation error at
+the EOM somewhere between ~3 V and ~15 V in the slow parts of the ramp —
+measure it on the first real capture with `eomilc.scope.load(...)` and
+`Trace.lsb("CH3")` rather than trusting either bound.
 ### The trigger offset
 
 **Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the
