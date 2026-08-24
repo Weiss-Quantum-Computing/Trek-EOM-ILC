@@ -1,4 +1,8 @@
-# Working state and measurements from a bench run
+# run/ is the scratch directory for an actual bench session -- drives, captures
+# and loop state for one run. The committed waveforms live in waveforms/.
+run/
+
+# ... and the same artefacts wherever else they land
 *.state.npz
 meas_*.npy
 drive_*_iter*.csv
