@@ -64,12 +64,21 @@ it is the only one there with all four.
 
 ## Quick start
 
-```bash
-python make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms/target_MKJX1.csv
-python run_ilc.py init --target waveforms/target_MKJX1.csv --channel EO1 --name MKJX1
-# play drive_MKJX1_iter0_awg.csv, capture >=256 averages, then:
-python run_ilc.py step --state drive_MKJX1.state.npz --measured "MKJX1_i00*.csv" \
-       --mon-col CH3 --t-offset <measured once>
+PowerShell, one command per line. `\` is not a continuation character
+there, and bare `python` is the wrong interpreter (see above).
+
+```powershell
+C:\ProgramData\anaconda3\python.exe make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
+```
+
+```powershell
+C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MKJX1.csv --channel EO1 --name MKJX1 --out run\drive_MKJX1_iter0.csv
+```
+
+Play `run\drive_MKJX1_iter0_awg.csv`, capture at least 256 averages, then:
+
+```powershell
+C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "run\MKJX1_i00*.csv" --mon-col CH3 --t-offset 250
 ```
 
 ## Calibration lives in `eomilc/config.py`

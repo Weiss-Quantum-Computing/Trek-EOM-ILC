@@ -50,8 +50,13 @@ on. Do not re-measure it per iteration.
 
 ## Building the target
 
-    python make_target.py --channel EO1 --peak-hv 5200 --step 2 --out target_MKJX1.csv
-    python make_target.py --channel EO2 --peak-hv 5200 --step 2 --out target_MKJX2.csv
+```powershell
+C:\ProgramData\anaconda3\python.exe make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
+```
+
+```powershell
+C:\ProgramData\anaconda3\python.exe make_target.py --channel EO2 --peak-hv 5200 --step 2 --out waveforms\target_MKJX2.csv
+```
 
 The target is in volts **at the EOM**, which is what makes two channels with
 different Trek gains directly comparable: ask both for 5200 V and each gets
@@ -64,28 +69,35 @@ floor that 256-average 8-bit capture sets anyway.
 
 ## The manual loop
 
-    python run_ilc.py init --target target_MKJX1.csv --channel EO1 \
-        --name MKJX1 --out drive_MKJX1_iter0.csv
+```powershell
+C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MKJX1.csv --channel EO1 --name MKJX1 --out run\drive_MKJX1_iter0.csv
+```
 
 That writes two files per iteration:
 
-- `drive_MKJX1_iter0.csv` — `time_us,voltage_V`, the loop's own record
-- `drive_MKJX1_iter0_awg.csv` — **the one to upload**, single column, already
+- `run\drive_MKJX1_iter0.csv` — `time_us,voltage_V`, the loop's own record
+- `run\drive_MKJX1_iter0_awg.csv` — **the one to upload**, single column, already
   normalised to ±1 against the ±10 V full scale
 
 Then:
 
-1. AWG GUI: **Load waveform** → `drive_MKJX1_iter0_awg.csv` → name it `MKJX1_i00`
+1. AWG GUI: **Load waveform** → `run\drive_MKJX1_iter0_awg.csv` → name it `MKJX1_i00`
    → confirm **Normalise is unticked** → **Upload**
 2. Scope Grab: set the prefix to `MKJX1_i00`, press **GRAB**
-3. `python run_ilc.py step --state drive_MKJX1.state.npz --measured "MKJX1_i00*.csv" \
-   --mon-col CH3 --t-offset <your number>` → `drive_MKJX1_iter1{,_awg}.csv`
+3. Update. One line, and substitute the `--t-offset` you measured:
+
+   ```powershell
+   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "run\MKJX1_i00*.csv" --mon-col CH3 --t-offset 250
+   ```
+
+   That writes `run\drive_MKJX1_iter1.csv` and its `_awg.csv` pair.
 4. Repeat from 1 with the new file. Three or four rounds.
 
 ## The automatic loop
 
-    python ilc_bench.py --channel EO1 --target target_MKJX1.csv --name MKJX1 \
-        --awg-ch 1 --scope-ch 3 --t-offset 250 --iterations 4
+```powershell
+C:\ProgramData\anaconda3\python.exe ilc_bench.py --channel EO1 --target waveforms\target_MKJX1.csv --name MKJX1 --awg-ch 1 --scope-ch 3 --t-offset 250 --iterations 4
+```
 
 It imports `Scope` and `Awg` straight out of your two programs, so there is no
 second copy of the SCPI to keep in step. It uploads, arms, captures, updates,
