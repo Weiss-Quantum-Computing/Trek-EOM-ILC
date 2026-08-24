@@ -78,13 +78,12 @@ underneath is finer, and since 24 Aug Scope Grab reads WORD, which on this
 scope serves **157 µV word steps for an averaged record — 16× under the
 display code**.
 
-How much of that resolution is real signal depends on the analog noise at the
-scope input (a few mV against the 40 mV code): noise dithers the codes near
-each boundary and averaging recovers real sub-code detail there, while the
-middle of each code stays frozen. Expect the residual quantisation error at
-the EOM somewhere between ~3 V and ~15 V in the slow parts of the ramp —
-measure it on the first real capture with `eomilc.scope.load(...)` and
-`Trace.lsb("CH3")` rather than trusting either bound.
+**Measured on the first real averaged capture (24 Aug, 19:48): the slow parts
+of the ramp step at 2.513 mV — 2.5 V at the EOM — against 40.2 V for the
+single-shot file taken two hours earlier.** The analog noise dithers enough
+that the full 16× shows up across the whole record, not just near code
+boundaries. That puts the measurement floor at ~2.5 V at the EOM, better than
+the 5 V the original package documentation hoped for.
 ### The trigger offset
 
 **Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the
