@@ -47,31 +47,24 @@ anything longer.
   boxcar engages, at a ×3 rather than ×12.
 - Channel name on the monitor channel, so the CSV column is self-describing
 
-### GRAB does not accumulate averages
+### Averaging: GRAB accumulates it natively (since 24 Aug)
 
-**Setting `AVER` and `COUNt 256` is not enough.** The 24 Aug captures have
-`acquisition type : AVER`, `averages : 256`, and then:
+With the scope set to AVER, **GRAB now builds the full average itself**: it
+runs the scope, clears the display so the average restarts from zero rather
+than continuing an average of the previous drive, and reads back only once the
+count is full. The phase line shows `averaging k of 256` while it builds —
+about 13 s at the 50 ms trigger. The "Wait for trigger" field acts as a stall
+limit: it resets whenever the count advances, so it only fires if the triggers
+actually stop.
 
-```
-averages taken     : +1 of 256   (hits actually in the trace that was read out)
-```
+Scope Grab from before 24 Aug armed `:SINGle`, which takes exactly one
+acquisition — the early day-4 captures say `averages taken : +1 of 256`, and
+that single 8-bit shot is what filled iteration 1 with 127 mV rms of grass.
 
-One hit. `Scope.single()` issues `:SINGle`, which arms exactly one acquisition, so
-the averager never accumulates. The trace read back is a single 8-bit shot with a
-40 mV monitor LSB — **40 V per code at the EOM** — against the ~2.4 V floor a real
-256-average capture gives. The ILC error signal would be almost entirely
-quantisation noise, and the loop would faithfully learn it.
-
-Use the path Scope Grab already has for this instead:
-
-1. Put the scope in **RUN**, so triggers accumulate into the averager
-2. Wait for `averages taken` to reach 256 — 12.8 s at a 50 ms trigger period
-3. Tick **use existing capture** and press **GRAB**. That stops the scope and reads
-   the accumulated trace rather than arming a fresh one.
-
-Check `averages taken` in the `.txt` sidecar of every capture before feeding it to
-`step`. It is the one number that says whether the measurement is real.
-
+Still check `averages taken` in the `.txt` sidecar before feeding a capture to
+`step` — it is the one number that says whether the measurement is real. A
+shallow value now means the triggers dried up mid-build (the log will have
+said so), not that the tooling took a single shot.
 ### The trigger offset
 
 **Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the
