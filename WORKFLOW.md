@@ -49,12 +49,22 @@ anything longer.
 
 ### Averaging: what GRAB does, and what it actually buys
 
-With the scope set to AVER, **GRAB builds the full average itself**: it runs
-the scope in bursts, reads the true hit count while stopped, and shows
-`averaging k of 256` as it climbs. The "Wait for trigger" field is a stall
-limit on the trigger itself — it only fires if triggers stop arriving. If the
-count comes back short, the log says so; check `averages taken` in the `.txt`
-sidecar before feeding any capture to `step`.
+With the scope set to AVER, **GRAB acquires a fresh block of exactly 256
+sweeps** (via `:DIGitize`) — **12.8 s at the 20 Hz trigger** — and reads the
+record back afterwards. The phase line shows elapsed seconds while it builds.
+The "Wait for trigger" field is a stall limit on the trigger itself — it only
+fires if triggers stop arriving. If the build comes back short, the log says
+so; check `averages taken` in the `.txt` sidecar before feeding any capture to
+`step`.
+
+**Never trust the scope's free-running average for ILC.** Under plain RUN this
+scope's averager is a *running* average — each sweep folds in at weight 1/256,
+so the record keeps an exponential memory of whatever played before, with a
+12.8 s time constant at 20 Hz: after a new drive is uploaded, the on-screen
+average carries the previous iteration's waveform for a minute or more (a
+full-scale change takes ~128 s to fade completely — measured). A digitized
+block only ever contains the waveform that played during it, which is why GRAB
+uses it.
 
 An averaged record reads back with **7680 points** (the scope serves nothing
 longer from a record stopped out of RUN) — 1.95 µs spacing on the 15 ms
