@@ -1,0 +1,22 @@
+Add an averaging-count control to Scope Grab.
+
+The panel already exposes :ACQuire:TYPE, so AVER can be selected -- but the
+number of averages is not reachable, which makes AVER mean "whatever count the
+scope happened to be left on". For ILC the count is the single number that sets
+the convergence floor, and it belongs in the metadata file with everything else.
+
+The settings panel is generic, so this is one line in each of two lists.
+
+--- a/scope_grab.py
++++ b/scope_grab.py
+@@ GLOBAL_SETTINGS
+     ("Acquisition", ":ACQuire:TYPE", "choice", ("NORM", "AVER", "HRES", "PEAK")),
++    ("Averages", ":ACQuire:COUNt", "num", None),
+ ]
+
+--- a/scope_grab.py
++++ b/scope_grab.py
+@@ Scope.metadata
+             f"acquisition type   : {s(':ACQuire:TYPE')}",
++            f"acquisition count  : {s(':ACQuire:COUNt')}",
+             f"timebase s/div     : {s(':TIMebase:SCALe')}",

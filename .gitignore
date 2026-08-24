@@ -1,0 +1,13 @@
+# Working state and measurements from a bench run
+*.state.npz
+meas_*.npy
+drive_*_iter*.csv
+!waveforms/*.csv
+
+# The raw scope captures live outside the repo (~260 MB); see EOM_RAMPS_DIR
+cache/
+*.npy
+
+__pycache__/
+*.pyc
+.DS_Store
