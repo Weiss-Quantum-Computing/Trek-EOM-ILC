@@ -30,8 +30,15 @@ one_pole  gamma=0.6       84.3    33.9    16.5    11.9    13.5    16.8    23.5  
 ```
 
 Peak error in volts at the EOM, against the measured plant perturbed by +1% gain,
-+6% fₙ and +10% ζ, with 256-average scope noise. Reproduce with
-`simulate.py --target waveforms/target_MKJX1.csv`.
++6% fₙ and +10% ζ, with 256-average scope noise. Reproduce the numbers with
+`simulate.py --target waveforms/target_MKJX1.csv`, or the figure below with
+`make_validation_fig.py`.
+
+![ILC convergence against the measured second-order plant](ilc_validation.png)
+
+Note the floor those curves flatten onto is a **peak** quantity: 256 averages of
+a 31 mV LSB give 0.56 V rms, but the peak of 5301 samples of that noise is 2.4 V.
+A converged trace sitting at 2.4 V peak is at the measurement floor, not above it.
 
 Seed with `fn`/`zeta` via `Channel.plant()`, never with `tau`. Gain accuracy is
 what dominates the first shot — the 1% gain error alone is 55 V of that 58.6 —
