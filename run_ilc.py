@@ -32,6 +32,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eomilc import scope, plant as plantmod, ilc, outputs
 from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
 
+# The AWG GUI lists and previews whatever lives in its Waveforms folder, so a
+# drive written there shows up in the memory list without being moved by hand.
+# WAVE_CACHE in bk4063b_awg_gui.py is <that repo>/Waveforms; keep these in step.
+AWG_WAVEFORMS = os.environ.get(
+    "BK4063B_WAVEFORMS",
+    r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms")
+
 
 # --------------------------------------------------------------------- utils
 def load_target(path: str):
@@ -100,8 +107,10 @@ def cmd_init(a):
 
     out = a.out or f"drive_{ch.name}_iter0.csv"
     outputs.write_awg_csv(out, t, u, comment=f"{ch.name} ILC iteration 0 (model-based)\n{p}")
-    gui = os.path.splitext(out)[0] + "_awg.csv"
-    outputs.write_bk_waveform(gui, u, f"{a.name or ch.name}_i00", a.full_scale)
+    wname = f"{a.name or ch.name}_i00"
+    gui = os.path.join(a.awg_dir, wname + ".csv")
+    os.makedirs(a.awg_dir, exist_ok=True)
+    outputs.write_bk_waveform(gui, u, wname, a.full_scale)
     st = os.path.splitext(out)[0].rsplit("_iter", 1)[0] + ".state.npz"
     save_state(st, t=t, target=v, u=u, dt=dt, channel=ch.name, gain=gain, tau=tau,
                offset=0.0, tau2=0.0, fn=p.fn, zeta=p.zeta,
@@ -154,8 +163,10 @@ def cmd_step(a):
     out = a.out or f"drive_{st['channel']}_iter{it+1}.csv"
     outputs.write_awg_csv(out, t, u_next,
                           comment=f"{st['channel']} ILC iteration {it+1}\n{loop.plant}")
-    gui = os.path.splitext(out)[0] + "_awg.csv"
-    outputs.write_bk_waveform(gui, u_next, f'{st["name"]}_i{it+1:02d}', float(st["full_scale"]))
+    wname = f'{st["name"]}_i{it+1:02d}'
+    gui = os.path.join(a.awg_dir, wname + ".csv")
+    os.makedirs(a.awg_dir, exist_ok=True)
+    outputs.write_bk_waveform(gui, u_next, wname, float(st["full_scale"]))
     save_state(a.state, t=t, target=st["target"], u=u_next, dt=loop.dt, channel=str(st["channel"]),
                gain=loop.plant.gain, tau=loop.plant.tau, offset=loop.plant.offset,
                tau2=loop.plant.tau2, fn=loop.plant.fn, zeta=loop.plant.zeta,
@@ -211,6 +222,11 @@ def main():
                         "Diagnostic only -- it makes the loop diverge at fn.")
     i.add_argument("--gamma", type=float, default=0.6)
     i.add_argument("--f-cut", type=float, default=20e3)
+    i.add_argument("--awg-dir", default=AWG_WAVEFORMS,
+                   help="where to write the upload-ready waveform. Defaults "
+                        "to the AWG GUI's Waveforms folder, so it shows up in "
+                        "its memory list directly. Override with the "
+                        "BK4063B_WAVEFORMS environment variable.")
     i.add_argument("--full-scale", type=float, default=10.0,
                    help="AWG volts at DAC full scale; AMP must be twice this "
                         "with OFST 0 (default 10.0 -> AMP 20 Vpp)")
@@ -226,7 +242,13 @@ def main():
     s.add_argument("--mon-col", default="CH3")
     s.add_argument("--out")
     s.add_argument("--t-offset", type=float, default=None)
-    s.add_argument("--refit", action="store_true", help="re-identify the plant from this iteration")
+    s.add_argument("--awg-dir", default=AWG_WAVEFORMS,
+                   help="where to write the upload-ready waveform. Defaults "
+                        "to the AWG GUI's Waveforms folder, so it shows up in "
+                        "its memory list directly. Override with the "
+                        "BK4063B_WAVEFORMS environment variable.")
+    s.add_argument("--refit", action="store_true",
+                   help="re-identify the plant from this iteration")
     s.add_argument("--model", default="resonant", choices=plantmod.MODELS,
                    help="model form for --refit")
     s.add_argument("--zero-baseline", action=argparse.BooleanOptionalAction, default=False,

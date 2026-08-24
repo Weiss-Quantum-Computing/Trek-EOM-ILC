@@ -75,11 +75,38 @@ def resample(t_src: np.ndarray, y: np.ndarray, t_dst: np.ndarray,
     return np.interp(t_dst, t_src - t_offset, y)
 
 
+def measure_t_offset(t: np.ndarray, y: np.ndarray, u_ref: np.ndarray,
+                     dt_ref: float) -> float:
+    """Delay from the scope trigger to the START of the played waveform.
+
+    This is the number `--t-offset` wants.  It cross-correlates the captured
+    trace against the drive record that produced it, so it uses the whole
+    waveform rather than one threshold crossing -- which matters here because
+    MKJ leaves zero with almost no slope, so any threshold sits hundreds of
+    microseconds late and moves with the noise.
+
+    Feed it the AWG channel (CH1/CH2) rather than a monitor: the drive is the
+    reference exactly, while the monitor has the plant's own lag in it.
+
+    Measure ONCE and hard-code the result.  Re-fitting per iteration makes the
+    loop chase its own alignment instead of converging.
+    """
+    y = np.asarray(y, float)
+    dt = float(np.median(np.diff(t)))
+    n = int(round(len(u_ref) * dt_ref / dt))
+    ref = np.interp(np.linspace(0, len(u_ref) - 1, n),
+                    np.arange(len(u_ref)), np.asarray(u_ref, float))
+    c = np.correlate(y - y.mean(), ref - ref.mean(), mode="valid")
+    return float(t[int(np.argmax(c))])
+
+
 def find_trigger_offset(t: np.ndarray, y: np.ndarray, frac: float = 0.5) -> float:
     """Time at which y first crosses `frac` of its settled span.
 
-    Use ONCE to calibrate the fixed offset, then hard-code it.  Do not re-fit
-    per iteration.
+    NOT the same thing as `--t-offset`, despite what this docstring used to
+    imply: it returns a mid-ramp crossing, not the waveform start, and on a
+    waveform that leaves zero slowly the two are milliseconds apart.  Use
+    `measure_t_offset` for alignment; this is only a rough landmark finder.
     """
     base = y[t < t[0] + 0.2 * (0 - t[0])].mean() if t[0] < 0 else y[:100].mean()
     span = np.percentile(y, 99.5) - base

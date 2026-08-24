@@ -37,16 +37,55 @@ anything longer.
 - Trigger source and level to match whatever fires the shot
 - Timebase so the whole 10.602 ms ramp plus its settle is on screen — 1.5 ms/div
   gives a 15 ms window, which is right
-- **Acquisition: AVER, count 256.** At a 50 ms trigger period that is 12.8 s per
-  capture, so a four-iteration run costs about a minute of averaging.
-- Transfer points: 10000–20000 for a 10.6 ms record on a 2 µs grid. Keeps each
-  CSV near 100 kB instead of 6.6 MB, and 20000 puts the scope grid fine enough
-  that `scope.resample` boxcars rather than bare-interpolates.
+- **Acquisition: AVER, count 256** — and see the warning below, because setting
+  it is not sufficient. At a 50 ms trigger period a full 256 takes 12.8 s.
+- Transfer points: **leave it at max**. On the 24 Aug captures the scope returned
+  93750 points across a 15 ms window — 160 ns per sample — which `scope.resample`
+  boxcars ×12 down to the 2 µs grid, a free √12 noise reduction. Setting a smaller
+  number would *reduce* that. 20000 is the compromise if the 6.6 MB files become a
+  nuisance: still 0.75 µs per sample, still above the 1 µs threshold where the
+  boxcar engages, at a ×3 rather than ×12.
 - Channel name on the monitor channel, so the CSV column is self-describing
 
-Then measure the trigger-to-waveform offset **once**: grab a trace, find where
-the ramp starts relative to t=0, and use that number as `--t-offset` from then
-on. Do not re-measure it per iteration.
+### GRAB does not accumulate averages
+
+**Setting `AVER` and `COUNt 256` is not enough.** The 24 Aug captures have
+`acquisition type : AVER`, `averages : 256`, and then:
+
+```
+averages taken     : +1 of 256   (hits actually in the trace that was read out)
+```
+
+One hit. `Scope.single()` issues `:SINGle`, which arms exactly one acquisition, so
+the averager never accumulates. The trace read back is a single 8-bit shot with a
+40 mV monitor LSB — **40 V per code at the EOM** — against the ~2.4 V floor a real
+256-average capture gives. The ILC error signal would be almost entirely
+quantisation noise, and the loop would faithfully learn it.
+
+Use the path Scope Grab already has for this instead:
+
+1. Put the scope in **RUN**, so triggers accumulate into the averager
+2. Wait for `averages taken` to reach 256 — 12.8 s at a 50 ms trigger period
+3. Tick **use existing capture** and press **GRAB**. That stops the scope and reads
+   the accumulated trace rather than arming a fresh one.
+
+Check `averages taken` in the `.txt` sidecar of every capture before feeding it to
+`step`. It is the one number that says whether the measurement is real.
+
+### The trigger offset
+
+**Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the
+captured CH1 and CH2 against the drive records that produced them puts the
+waveform start at −1.4 µs on both, which on a 2 µs grid is zero. That is what
+you would expect: the burst delay is 1.26 µs and the scope triggers off the
+same external pulse.
+
+Re-measure only if the trigger wiring changes, with
+`scope.measure_t_offset(t, ch1, u_drive, 2e-6)`. Do **not** use
+`find_trigger_offset` for this — it returns a mid-ramp 50% crossing, and MKJ
+leaves zero so slowly that the two differ by more than a millisecond. And do
+not re-fit it per iteration: the loop then chases its own alignment instead of
+converging.
 
 ## Building the target
 
@@ -79,9 +118,20 @@ C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MK
 
 Each writes two files per iteration — below, `<n>` is 1 or 2:
 
-- `run\drive_MKJX<n>_iter0.csv` — `time_us,voltage_V`, the loop's own record
-- `run\drive_MKJX<n>_iter0_awg.csv` — **the one to upload**, single column, already
-  normalised to ±1 against the ±10 V full scale
+| file | where | what |
+|---|---|---|
+| `drive_MKJX<n>_iter0.csv` | `EOM-ILC\run\` | `time_us,voltage_V`, the loop's own record |
+| `MKJX<n>_i00.csv` | **the AWG GUI's `Waveforms\`** | **the one to upload** — single column, normalised to ±1 |
+
+The upload file goes straight into the generator's own library at
+
+```
+C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms
+```
+
+named exactly as the AWG waveform it becomes, so it appears in the GUI's
+memory list and previews like any other stored waveform — no copying by hand.
+Change it with `--awg-dir`, or the `BK4063B_WAVEFORMS` environment variable.
 
 ### Which channel is which
 
@@ -100,15 +150,28 @@ Then, per channel:
 
 1. AWG GUI: **Load waveform** → `run\drive_MKJX<n>_iter0_awg.csv` → name it
    `MKJX<n>_i00` → confirm **Normalise is unticked** → **Upload** to that channel
-2. Scope Grab: set the prefix to `MKJX<n>_i00`, press **GRAB**
-3. Update. One line each, and substitute the `--t-offset` you measured:
+2. Scope Grab: **one grab serves both channels.** The capture already holds
+   all four channels — CH1/CH2 the two drives, CH3/CH4 the two monitors — so
+   set the prefix to `ilc_i00` (not per-channel), press **GRAB**, and both
+   `step` commands below read the same file with a different `--mon-col`.
+
+   Leave the output directory where you already have it:
+
+   ```
+   C:\Users\mzd416\Desktop\scope_data\EOM ramps day 4
+   ```
+
+   That keeps raw captures out of the repo, which is what `run/` being
+   gitignored is for, and matches how every previous session was filed.
+3. Update — one line each. Both read the **same capture**, differing only in
+   `--mon-col`:
 
    ```powershell
-   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "run\MKJX1_i00*.csv" --mon-col CH3 --t-offset 250
+   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "C:\Users\mzd416\Desktop\scope_data\EOM ramps day 4\ilc_i00*.csv" --mon-col CH3 --t-offset 0
    ```
 
    ```powershell
-   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX2.state.npz --measured "run\MKJX2_i00*.csv" --mon-col CH4 --t-offset 250
+   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX2.state.npz --measured "C:\Users\mzd416\Desktop\scope_data\EOM ramps day 4\ilc_i00*.csv" --mon-col CH4 --t-offset 0
    ```
 
    Each writes `run\drive_MKJX<n>_iter1.csv` and its `_awg.csv` pair.
