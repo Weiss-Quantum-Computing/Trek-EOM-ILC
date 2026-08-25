@@ -147,6 +147,30 @@ def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
 
 
 # ------------------------------------------------------------------- scope
+def verify_alignment(scope, drive_ch, u, t_grid, t_off, wait_s):
+    """One shot of the DRIVE channel, cross-correlated against the drive we
+    just uploaded. A stale --t-offset poisons every measurement invisibly -- a
+    250 us leftover once sent a ten-iteration run chasing its own alignment --
+    and the capture can simply check, so it does."""
+    got = scope.single(wait_s=wait_s)
+    if got is not True:
+        sys.exit("alignment check: no trigger -- is the burst running?")
+    ts, vs = scope.waveform(drive_ch)
+    scope.run()
+    if float(np.ptp(vs)) < 0.5:
+        sys.exit(f"alignment check: scope CH{drive_ch} is flat -- is the AWG "
+                 f"output on, and is the drive really on that channel?")
+    dt = float(np.median(np.diff(t_grid)))
+    meas = scopeio.measure_t_offset(ts, vs, u, dt)
+    if abs(meas - t_off) > 10e-6:
+        sys.exit(f"alignment check: the drive on scope CH{drive_ch} starts at "
+                 f"{meas*1e6:+.1f} us, but t-offset says {t_off*1e6:+.1f} us. "
+                 f"Fix --t-offset (measured 0 on this bench) or the trigger "
+                 f"wiring before iterating.")
+    print(f"       alignment: drive starts {meas*1e6:+.1f} us, "
+          f"t-offset {t_off*1e6:+.1f} us -- OK")
+
+
 def capture(scope, channels, mon_col, t_grid, t_offset,
             repeats=64, wait_s=30.0, points=None, settle=0.5):
     """Take `repeats` single shots and average them on the waveform grid.
@@ -229,6 +253,11 @@ def main():
                         r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms"),
                     help="where the GUI-previewable copy of each uploaded drive "
                          "is written, like the manual loop does")
+    ap.add_argument("--overwrite-state", action="store_true",
+                    help="allow a fresh run to replace an existing state file")
+    ap.add_argument("--drive-scope-ch", type=int, default=None,
+                    help="scope channel carrying the AWG drive, for the alignment "
+                         "check (default: same number as --awg-ch)")
     ap.add_argument("--skip-checks", action="store_true",
                     help="upload without verifying the channel setup. Don't.")
     a = ap.parse_args()
@@ -278,6 +307,11 @@ def main():
         full_scale = a.full_scale
         t_off = a.t_offset * 1e-6
         state_path = os.path.join(a.outdir, f"drive_{stem}.state.npz")
+        if os.path.exists(state_path) and not a.overwrite_state:
+            sys.exit(f"{state_path} already exists. A fresh run would destroy it "
+                     f"- it did once, taking a four-iteration manual state with "
+                     f"it. Use --resume {state_path} to continue it, or "
+                     f"--overwrite-state to discard it deliberately.")
 
     limit = getattr(_AWGMOD, "MAX_ARB_NAME", 11)
     if len(stem) + 4 > limit:                        # "_i00" is four more
@@ -346,6 +380,11 @@ def main():
             os.makedirs(a.awg_dir, exist_ok=True)
             outputs.write_bk_waveform(os.path.join(a.awg_dir, f"{name}.csv"),
                                       u, name, full_scale)
+
+            if k == k0:
+                time.sleep(0.5)          # let the new upload start playing
+                verify_alignment(scope, a.drive_scope_ch or a.awg_ch,
+                                 u, t, t_off, a.wait)
 
             y = capture(scope, [a.scope_ch], f"CH{a.scope_ch}", t, t_off,
                         repeats=a.repeats, wait_s=a.wait, points=a.points)
