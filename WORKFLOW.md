@@ -116,6 +116,30 @@ No new tooling needed:
 Sixteen singles take well under a minute at the 20 Hz trigger. Push M to 32-64
 and the floor approaches ~0.5 V before 60 Hz pickup and drift take over.
 
+### The model is only trusted below ~5 kHz — keep the Q filter there
+
+Measured 2026-08-24 with the drive's own grass as a broadband probe (coherence
+0.93–0.97): **above ~6 kHz the real chain passes 4–8× more than the
+second-order model predicts.** The inverse-model update then diverges in that
+band — contraction factor 2.6 at 12 kHz — which showed up as drive grass
+tripling per iteration (0.4 → 46 → 130 mV rms) while every capture looked
+clean. The default 20 kHz Q filter is too wide for this bench.
+
+**Run `step` with `--f-cut 5e3` once; it persists in the state.** Because the
+update low-passes the outgoing drive too, the first 5 kHz step also strips any
+grass a previous iteration injected (46 → 0.8 mV rms when it was applied).
+The real correction lives below 3 kHz and is untouched.
+
+### Sequence prefixes are glob prefixes — keep them unique
+
+`step --measured` averages **every** file the glob matches. A sequence named
+`ilc_i01` once swept in two earlier one-off captures *and a 200 µs/div zoomed
+capture* that shared the prefix; the zoomed record, extrapolated flat over
+81% of the grid, manufactured 172 V of fake error out of a real 26 V. `step`
+now refuses any capture that does not span the whole waveform and lists every
+file it averages — read that list. Give each sequence a prefix nothing else
+uses, and give zoomed inspection grabs prefixes the ILC globs can never match.
+
 ### The trigger offset
 
 **Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the

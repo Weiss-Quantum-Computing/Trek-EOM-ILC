@@ -124,15 +124,35 @@ def cmd_init(a):
 def cmd_step(a):
     st = load_state(a.state)
     loop = build_loop(st)
+    if a.f_cut:
+        # Confining learning to where the model is trusted. Measured on this
+        # bench (24 Aug): above ~6 kHz the real chain passes 4-8x more than the
+        # second-order model says, and the inverse-model update then DIVERGES -
+        # contraction factor 2.6 at 12 kHz, seen as drive grass tripling per
+        # iteration. The new value persists in the state.
+        loop.f_cut = a.f_cut
     t = st["t"]; u_k = st["u"]; it = int(st["iteration"])
     t_off = float(st["t_offset"]) if a.t_offset is None else a.t_offset * 1e-6
 
     files = sorted(glob.glob(a.measured))
     if not files:
         sys.exit(f"no scope files matched {a.measured!r}")
+    print(f"averaging {len(files)} capture(s):")
     traces = []
     for f in files:
         tr = scope.load(f)
+        # A capture that does not span the whole waveform poisons the average:
+        # resample extrapolates it FLAT outside its own record, so one zoomed
+        # file pulls the mean toward garbage over most of the grid. This is not
+        # hypothetical - a 200 us/div capture sharing the glob prefix once
+        # manufactured 172 V of fake error out of a 26 V real one.
+        lo, hi = tr.t[0] - t_off, tr.t[-1] - t_off
+        if lo > t[0] + 1e-4 or hi < t[-1] - 1e-4:
+            sys.exit(f"  {os.path.basename(f)} spans {lo*1e3:.2f}..{hi*1e3:.2f} ms "
+                     f"but the waveform runs {t[0]*1e3:.2f}..{t[-1]*1e3:.2f} ms. "
+                     f"A zoomed or mismatched capture matched the glob - tighten "
+                     f"--measured so only full-window captures of THIS iteration match.")
+        print(f"   {os.path.basename(f)}")
         traces.append(scope.resample(tr.t, tr[a.mon_col], t, t_offset=t_off))
     y = ilc.averaged(traces)
     if a.zero_baseline:
@@ -242,6 +262,10 @@ def main():
     s.add_argument("--mon-col", default="CH3")
     s.add_argument("--out")
     s.add_argument("--t-offset", type=float, default=None)
+    s.add_argument("--f-cut", type=float, default=None,
+                   help="override the Q filter corner for this and later steps. "
+                        "5e3 is right on this bench - the model is only trusted "
+                        "below ~5 kHz (measured 2026-08-24).")
     s.add_argument("--awg-dir", default=AWG_WAVEFORMS,
                    help="where to write the upload-ready waveform. Defaults "
                         "to the AWG GUI's Waveforms folder, so it shows up in "
