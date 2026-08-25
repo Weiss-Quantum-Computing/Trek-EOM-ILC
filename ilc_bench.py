@@ -6,9 +6,22 @@ Reuses the instrument layers already written for Scope Grab and the AWG GUI --
 rather than reimplementing SCPI that has already been debugged against the
 hardware.
 
-    python ilc_bench.py --channel EO1 \
-        --target waveform_tuned_10kHz_4p8ms.csv \
-        --awg-ch 1 --mon-col CH3 --iterations 4
+    python ilc_bench.py --channel EO1 --target waveforms/target_MKJX1.csv \
+        --name MKJX1 --awg-ch 1 --scope-ch 3 --t-offset 0 --iterations 3
+
+    python ilc_bench.py --resume run/drive_MKJX1.state.npz --awg-ch 1 \
+        --scope-ch 3 --iterations 2      # continue where the manual loop left off
+
+MEASUREMENT SCHEME (measured on this bench, 2026-08-24)
+-------------------------------------------------------
+Set the scope to HRES and let --repeats (default 64) average the single shots
+in software.  Do NOT use the scope's AVER mode here: :SINGle takes exactly one
+acquisition, so an AVER capture through this script carries one hit while
+claiming the full depth.  Averaged HRES singles also dither the instrument's
+2.5 mV word lattice away (per-shot noise 3.5 mV rms), putting the measurement
+floor near 0.5-1 V at the EOM -- below what hardware averaging can deliver.
+
+Both GUIs hold their own VISA sessions; close or disconnect them first.
 
 SAFETY POSTURE
 --------------
@@ -73,8 +86,13 @@ def check_awg_channel(awg, ch, expect_rate=None, expect_clock="DDS",
     if amp is None or abs(amp - want_amp) > tol * want_amp:
         problems.append(f"BSWV AMP is {amp} Vpp; this drive file assumes "
                         f"{want_amp:g} Vpp (full scale +/-{full_scale:g} V)")
-    if ofst is None or abs(ofst - want_ofst) > 0.02:
-        problems.append(f"BSWV OFST is {ofst} V; this drive file assumes 0 V")
+    # 60 mV rather than a tight zero: the generator's zero-code output sits
+    # -12 mV (CH1) / -40 mV (CH2) off true zero at 20 Vpp (measured 24 Aug from
+    # the inter-burst idle), and trimming OFST to cancel that is the sanctioned
+    # fix for the EOM idling off zero. Anything bigger is a real setup error.
+    if ofst is None or abs(ofst - want_ofst) > 0.06:
+        problems.append(f"BSWV OFST is {ofst} V; this drive file assumes ~0 V "
+                        f"(idle-trim offsets up to 60 mV are fine)")
 
     clock = srate.get("MODE")
     if expect_clock and clock != expect_clock:
@@ -130,11 +148,16 @@ def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
 
 # ------------------------------------------------------------------- scope
 def capture(scope, channels, mon_col, t_grid, t_offset,
-            repeats=1, wait_s=30.0, points=None, settle=0.5):
-    """Arm, wait for a trigger, read back, resample onto the waveform grid."""
+            repeats=64, wait_s=30.0, points=None, settle=0.5):
+    """Take `repeats` single shots and average them on the waveform grid.
+
+    The settle wait happens ONCE, not per shot -- it exists to let the chain
+    settle after a new upload, and each shot already waits for its own trigger.
+    64 HRES singles at the 20 Hz trigger cost ~25 s, transfer included.
+    """
+    time.sleep(settle)
     traces = []
     for i in range(repeats):
-        time.sleep(settle)
         got = scope.single(wait_s=wait_s)
         if got is not True:
             raise RuntimeError(f"no trigger within {wait_s:g} s on repeat {i+1} "
@@ -153,21 +176,33 @@ def capture(scope, channels, mon_col, t_grid, t_offset,
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--channel", required=True, choices=list(CHANNELS))
+    ap.add_argument("--channel", choices=list(CHANNELS),
+                    help="required unless --resume carries it")
+    ap.add_argument("--resume", default=None, metavar="STATE.NPZ",
+                    help="continue from a run_ilc state file instead of starting "
+                         "at the model first shot. Target, drive, plant, gamma, "
+                         "f_cut and t-offset all come from the state, and the "
+                         "state is re-saved after every iteration, so the manual "
+                         "and automatic loops interleave freely.")
     ap.add_argument("--name", default=None,
                     help="waveform name stem for the upload (default: the channel "
                          "name). Iteration suffix is appended, and the total must "
                          "fit MAX_ARB_NAME = 11 characters.")
-    ap.add_argument("--target", required=True, help="target waveform CSV, volts at the EOM")
+    ap.add_argument("--target", help="target waveform CSV, volts at the EOM "
+                                     "(required unless --resume)")
     ap.add_argument("--awg-ch", type=int, default=1, choices=(1, 2))
     ap.add_argument("--scope-ch", type=int, default=3, help="scope channel carrying the monitor")
     ap.add_argument("--iterations", type=int, default=4)
-    ap.add_argument("--repeats", type=int, default=1,
-                    help="software averages per iteration; leave at 1 and let the "
-                         "scope average in hardware (ACQuire:TYPE AVER)")
-    ap.add_argument("--t-offset", type=float, required=True,
-                    help="fixed trigger-to-waveform offset in microseconds -- "
-                         "measure once, then never change it")
+    ap.add_argument("--repeats", type=int, default=64,
+                    help="HRES single shots averaged in software per iteration. "
+                         "64 dithers the scope's 2.5 mV word lattice to the 0.16 mV "
+                         "floor and takes ~25 s at the 20 Hz trigger. Do NOT drop "
+                         "this and lean on scope-side AVER instead -- :SINGle takes "
+                         "one hit of an average, measured.")
+    ap.add_argument("--t-offset", type=float, default=None,
+                    help="fixed trigger-to-waveform offset in microseconds. "
+                         "Measured 0 on this bench (2026-08-24). Required unless "
+                         "--resume supplies it.")
     ap.add_argument("--full-scale", type=float, default=10.0)
     ap.add_argument("--sample-rate", type=float, default=None,
                     help="expected SRATE, only meaningful under TrueArb; under DDS "
@@ -179,9 +214,21 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.6)
     # 5 kHz: the model is only trusted below ~5 kHz on this bench (see run_ilc)
     ap.add_argument("--f-cut", type=float, default=5e3)
-    ap.add_argument("--outdir", default=".")
-    ap.add_argument("--scope-grab", default="scope_grab.py")
-    ap.add_argument("--awg-gui", default="bk4063b_awg_gui.py")
+    ap.add_argument("--outdir", default="run")
+    ap.add_argument("--scope-grab",
+                    default=os.environ.get(
+                        "SCOPE_GRAB",
+                        r"C:\Users\mzd416\Desktop\scope-grab\scope_grab.py"))
+    ap.add_argument("--awg-gui",
+                    default=os.environ.get(
+                        "AWG_GUI",
+                        r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\bk4063b_awg_gui.py"))
+    ap.add_argument("--awg-dir",
+                    default=os.environ.get(
+                        "BK4063B_WAVEFORMS",
+                        r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms"),
+                    help="where the GUI-previewable copy of each uploaded drive "
+                         "is written, like the manual loop does")
     ap.add_argument("--skip-checks", action="store_true",
                     help="upload without verifying the channel setup. Don't.")
     a = ap.parse_args()
@@ -190,27 +237,65 @@ def main():
     scopemod = load_module(a.scope_grab, "scope_grab")
     _AWGMOD = load_module(a.awg_gui, "bk4063b_awg_gui")
 
-    # ---- target
-    df = pd.read_csv(a.target, comment="#")
-    t = df.iloc[:, 0].to_numpy(float)
-    t = t * 1e-6 if "us" in df.columns[0].lower() else t
-    v = df.iloc[:, 1].to_numpy(float) / HV_PER_MON      # monitor volts
-    dt = float(np.median(np.diff(t)))
-    ch = CHANNELS[a.channel]
-    amp = float(np.ptp(v))
+    # ---- target and loop: fresh from the model, or resumed from a state file
+    if a.resume:
+        st = {k: z for k, z in np.load(a.resume, allow_pickle=True).items()}
+        ch = CHANNELS[str(st["channel"])]
+        t, v = st["t"], st["target"]
+        dt = float(st["dt"])
+        model = plantmod.Plant(gain=float(st["gain"]), tau=float(st["tau"]),
+                               offset=float(st["offset"]), tau2=float(st["tau2"]),
+                               fn=float(st.get("fn", 0.0)),
+                               zeta=float(st.get("zeta", 0.0)), dt=dt)
+        loop = ilc.Loop(plant=model, target=v, dt=dt, channel=ch,
+                        gamma=float(st["gamma"]), f_cut=float(st["f_cut"]))
+        loop.history = list(st["history"])
+        u = st["u"]
+        k0 = int(st["iteration"])
+        stem = a.name or str(st["name"])
+        full_scale = float(st["full_scale"])
+        t_off = (float(st["t_offset"]) if a.t_offset is None
+                 else a.t_offset * 1e-6)
+        state_path = a.resume
+        print(f"resuming {ch.name} at iteration {k0}, f_cut {loop.f_cut/1e3:g} kHz")
+    else:
+        if not (a.channel and a.target and a.t_offset is not None):
+            sys.exit("--channel, --target and --t-offset are required "
+                     "unless --resume supplies them")
+        df = pd.read_csv(a.target, comment="#")
+        t = df.iloc[:, 0].to_numpy(float)
+        t = t * 1e-6 if "us" in df.columns[0].lower() else t
+        v = df.iloc[:, 1].to_numpy(float) / HV_PER_MON      # monitor volts
+        dt = float(np.median(np.diff(t)))
+        ch = CHANNELS[a.channel]
+        amp = float(np.ptp(v))
+        model = ch.plant(amp, dt, model=a.model)
+        loop = ilc.Loop(plant=model, target=v, dt=dt, channel=ch,
+                        gamma=a.gamma, f_cut=a.f_cut)
+        u = loop.first_shot()
+        k0 = 0
+        stem = a.name or ch.name
+        full_scale = a.full_scale
+        t_off = a.t_offset * 1e-6
+        state_path = os.path.join(a.outdir, f"drive_{stem}.state.npz")
 
-    model = ch.plant(amp, dt, model=a.model)
-    loop = ilc.Loop(plant=model, target=v, dt=dt, channel=ch,
-                    gamma=a.gamma, f_cut=a.f_cut)
-    stem = a.name or ch.name
     limit = getattr(_AWGMOD, "MAX_ARB_NAME", 11)
     if len(stem) + 4 > limit:                        # "_i00" is four more
         sys.exit(f"--name {stem!r} is {len(stem)} chars; with the '_i00' suffix "
                  f"that is {len(stem)+4}, past the {limit}-character cap.")
     print(f"channel {ch.name}: {model}")
-    print(f"uploads as  : {stem}_i00 ... {stem}_i{a.iterations:02d}")
+    print(f"uploads as  : {stem}_i{k0:02d} ... {stem}_i{k0+a.iterations:02d}")
     print(f"target  {np.ptp(v)*HV_PER_MON:.0f} V over {t[-1]*1e3:.2f} ms, "
           f"{len(v)} points at {dt*1e6:.3f} us")
+
+    def save_state(iteration, u_now):
+        np.savez(state_path, t=t, target=v, u=u_now, dt=dt, channel=ch.name,
+                 gain=loop.plant.gain, tau=loop.plant.tau,
+                 offset=loop.plant.offset, tau2=loop.plant.tau2,
+                 fn=loop.plant.fn, zeta=loop.plant.zeta,
+                 full_scale=full_scale, name=stem, gamma=loop.gamma,
+                 f_cut=loop.f_cut, iteration=iteration, t_offset=t_off,
+                 history=np.array(loop.history, dtype=object))
 
     # ---- instruments
     awg = _AWGMOD.Awg()
@@ -223,12 +308,19 @@ def main():
     for n in notes:
         print("      ", n)
     acq = scope.get(":ACQuire:TYPE")
-    count = scope.get(":ACQuire:COUNt") if acq.upper().startswith("AVER") else None
-    print(f"       scope acquisition {acq}" + (f", {count} averages" if count else ""))
-    if acq.upper().startswith("NORM") and a.repeats < 8:
-        problems.append("scope is in NORM with few software repeats -- one 8-bit "
-                        "trace has an LSB worth ~40 V at the EOM. Set ACQuire:TYPE "
-                        "to AVER with COUNt 256, or raise --repeats.")
+    print(f"       scope acquisition {acq}, {a.repeats} software repeats")
+    if acq.upper().startswith("AVER"):
+        problems.append("scope is in AVER, and :SINGle takes exactly ONE hit of "
+                        "an average (measured) -- every capture here would be a "
+                        "single unaveraged shot claiming full depth. Set the "
+                        "scope to HRES; --repeats does the averaging.")
+    elif not acq.upper().startswith("HRES"):
+        problems.append(f"scope is in {acq}; use HRES -- its intra-sweep boxcar "
+                        f"plus software repeats is the measured best scheme "
+                        f"(0.5-1 V floor at the EOM).")
+    if a.repeats < 16:
+        problems.append(f"--repeats {a.repeats} is too few to dither the scope's "
+                        f"2.5 mV word lattice (16 reaches the 0.16 mV floor).")
     if problems:
         print("\nSetup problems:")
         for p in problems:
@@ -237,21 +329,23 @@ def main():
             sys.exit("\nRefusing to upload. Fix the setup in the GUI, or pass --skip-checks.")
 
     os.makedirs(a.outdir, exist_ok=True)
-    t_off = a.t_offset * 1e-6
-    u = loop.first_shot()
 
     try:
-        for k in range(a.iterations + 1):
+        for k in range(k0, k0 + a.iterations + 1):
             rep = loop.check(u)
             if not rep:
                 print("\nlimit check FAILED:", rep)
                 break
 
             name = f"{stem}_i{k:02d}"                    # <= MAX_ARB_NAME
-            n, frac = upload_drive(awg, a.awg_ch, name, u, a.full_scale)
+            n, frac = upload_drive(awg, a.awg_ch, name, u, full_scale)
             print(f"\niter {k}: uploaded {name} ({n} pts, {100*frac:.1f}% of DAC range, "
                   f"peak {np.abs(u).max():.4f} V)")
             outputs.write_awg_csv(os.path.join(a.outdir, f"drive_{name}.csv"), t, u)
+            # the GUI-previewable copy, same as the manual loop leaves behind
+            os.makedirs(a.awg_dir, exist_ok=True)
+            outputs.write_bk_waveform(os.path.join(a.awg_dir, f"{name}.csv"),
+                                      u, name, full_scale)
 
             y = capture(scope, [a.scope_ch], f"CH{a.scope_ch}", t, t_off,
                         repeats=a.repeats, wait_s=a.wait, points=a.points)
@@ -261,8 +355,9 @@ def main():
             print(f"         error: peak {m['peak_err_hv']:7.1f} V   "
                   f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
 
-            if k < a.iterations:
+            if k < k0 + a.iterations:
                 u = loop.update(u, y)
+                save_state(k + 1, u)
     finally:
         scope.close()
         awg.close()

@@ -276,28 +276,37 @@ Then, per channel:
 
 ## The automatic loop
 
+Scope in **HRES** (never AVER — `:SINGle` takes one hit of an average),
+full window, outputs on, both GUIs closed (they hold the VISA sessions).
+
+Continue from where the manual loop left off — everything (target, drive,
+plant, gamma, f_cut, t-offset) comes from the state, and the state is saved
+back every iteration, so manual and automatic runs interleave freely:
+
 ```powershell
-C:\ProgramData\anaconda3\python.exe ilc_bench.py --channel EO1 --target waveforms\target_MKJX1.csv --name MKJX1 --awg-ch 1 --scope-ch 3 --t-offset 250 --iterations 4
+C:\ProgramData\anaconda3\python.exe ilc_bench.py --resume run\drive_MKJX1.state.npz --awg-ch 1 --scope-ch 3 --iterations 2
 ```
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe ilc_bench.py --channel EO2 --target waveforms\target_MKJX2.csv --name MKJX2 --awg-ch 2 --scope-ch 4 --t-offset 250 --iterations 4
+C:\ProgramData\anaconda3\python.exe ilc_bench.py --resume run\drive_MKJX2.state.npz --awg-ch 2 --scope-ch 4 --iterations 2
 ```
 
-Run them one at a time, not concurrently — they each open their own VISA
-session to the same two instruments.
+Or from scratch (model first shot, then iterate):
 
-It imports `Scope` and `Awg` straight out of your two programs, so there is no
-second copy of the SCPI to keep in step. It uploads, arms, captures, updates,
-and writes every drive and measurement as it goes.
+```powershell
+C:\ProgramData\anaconda3\python.exe ilc_bench.py --channel EO1 --target waveforms\target_MKJX1.csv --name MKJX1 --awg-ch 1 --scope-ch 3 --t-offset 0 --iterations 3
+```
 
-It deliberately does **not** set amplitude, offset, load, clock or output state
-— you do that in the GUI and confirm on the monitor. Before the first upload it
-checks the channel is set up the way the drive file assumes and refuses to run
-if it is not.
+Each iteration: upload (fixed ±10 V mapping, never normalised), then
+**--repeats 64 HRES singles averaged in software** (~25 s at the 20 Hz
+trigger, dithers the 2.5 mV word lattice to its 0.16 mV floor), update,
+save state. Drives land in `run\` and the GUI-previewable copies in the AWG
+library, exactly like the manual loop.
 
-Both GUIs hold their own VISA sessions, so disconnect them before starting this.
-
+It deliberately does **not** set amplitude, offset, load, clock or output
+state — set those in the GUI and confirm on the monitor. Before the first
+upload it verifies the channel against the drive file's assumptions and
+refuses on a mismatch (OFST up to ±60 mV is allowed for the idle trim).
 ## Uploading by hand: two traps, one file
 
 `Awg.upload_arb(..., normalize=True)` divides the samples by their own peak.
