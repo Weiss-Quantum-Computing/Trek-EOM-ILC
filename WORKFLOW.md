@@ -37,8 +37,10 @@ anything longer.
 - Trigger source and level to match whatever fires the shot
 - Timebase so the whole 10.602 ms ramp plus its settle is on screen — 1.5 ms/div
   gives a 15 ms window, which is right
-- **Acquisition: AVER, count 256** — and see the warning below, because setting
-  it is not sufficient. At a 50 ms trigger period a full 256 takes 12.8 s.
+- **Acquisition: HRES** — the standard scheme since 24 Aug is 64 HRES single
+  shots averaged in software (see below). AVER is retired for loop captures;
+  the section after next records why, and the traps still apply to anyone
+  using AVER for anything else.
 - Transfer points: **leave it at max**. On the 24 Aug captures the scope returned
   93750 points across a 15 ms window — 160 ns per sample — which `scope.resample`
   boxcars ×12 down to the 2 µs grid, a free √12 noise reduction. Setting a smaller
@@ -47,7 +49,44 @@ anything longer.
   boxcar engages, at a ×3 rather than ×12.
 - Channel name on the monitor channel, so the CSV column is self-describing
 
-### Averaging: what GRAB does, and what it actually buys
+### The standard scheme: averaged HRES singles
+
+A digitized hardware average bottoms out on a hard 2.5 mV word lattice
+(12-bit, an instrument cap — 1024 averages do not refine it), and a lattice is
+a *systematic* error the loop learns as real. The scheme that measures finer
+exploits the fact that a **single HRES shot carries the same lattice plus
+3.5 mV rms of per-shot analog noise** (measured 24 Aug, slow regions of the
+real ramp) — noise larger than the lattice step is exactly the dither
+condition, so the mean of M separate shots walks off the lattice and beats
+down the noise:
+
+| | lattice step | shot noise | floor at the EOM |
+|---|---|---|---|
+| 1 HRES shot | 2.51 mV | 3.5 mV | ~4 V |
+| mean of 8 | 0.31 mV | 1.2 mV | ~1.3 V |
+| mean of 16 | 0.157 mV (the WORD floor) | 0.9 mV | ~1 V |
+| **mean of 64 (the campaign standard)** | **0.157 mV** | **~0.4 mV** | **~0.5–1 V** |
+| digitized AVER-256, for comparison | 2.51 mV systematic | ~0.2 mV | ~2.5 V |
+
+No new tooling needed:
+
+1. Scope: **Acquisition HRES** (not AVER), timebase the full window
+   (1.5 ms/div, position +5.3 ms)
+2. Scope Grab: transfer points ~20000, then **Sequence** — runs 64, interval
+   0, prefix e.g. `ilch_i01`. Sixteen runs is a usable quick check (~1 V
+   floor); 64 takes ~25 s at the 20 Hz trigger and is what every campaign
+   measurement used.
+3. `run_ilc.py step --measured "...ilch_i01*.csv"` — the glob matches all the
+   files and `step` averages them on the grid before updating
+
+`ilc_bench.py` does exactly this automatically (`--repeats`, default 64).
+Beyond M ≈ 64 the returns diminish — 60 Hz pickup and drift take over.
+
+### AVER, retired: what GRAB did, and where hardware averaging stops
+
+This was the scheme before 24 Aug; it is kept because the free-running-average
+trap below still bites anyone who touches AVER, and because its numbers say
+where the hardware path ceilings out.
 
 With the scope set to AVER, **GRAB acquires a fresh block of exactly 256
 sweeps** (via `:DIGitize`) — **12.8 s at the 20 Hz trigger** — and reads the
@@ -82,39 +121,9 @@ display code**.
 of the ramp step at 2.513 mV — 2.5 V at the EOM — against 40.2 V for the
 single-shot file taken two hours earlier.** The analog noise dithers enough
 that the full 16× shows up across the whole record, not just near code
-boundaries. That puts the measurement floor at ~2.5 V at the EOM, better than
-the 5 V the original package documentation hoped for.
-### Below the 2.5 V lattice: averaged HRES singles
-
-The digitized 256-average delivers a hard 2.5 mV lattice (12-bit, an
-instrument cap — 1024 averages do not refine it). To measure finer, exploit
-the fact that a **single HRES shot carries the same lattice plus 3.5 mV rms of
-per-shot analog noise** (measured 24 Aug, slow regions of the real ramp) —
-noise larger than the lattice step is exactly the dither condition, so the
-mean of M separate shots walks off the lattice and beats down the noise:
-
-| | lattice step | shot noise | floor at the EOM |
-|---|---|---|---|
-| 1 HRES shot | 2.51 mV | 3.5 mV | ~4 V |
-| mean of 8 | 0.31 mV | 1.2 mV | ~1.3 V |
-| **mean of 16** | **0.157 mV** (the WORD floor) | **0.9 mV** | **~1 V** |
-| digitized AVER-256, for comparison | 2.51 mV systematic | ~0.2 mV | ~2.5 V |
-
-The lattice error is the dangerous kind — systematic, so the loop learns it as
-real error — while shot noise is random and mostly harmless. The HRES route
-trades a little random noise for an order of magnitude less systematic error.
-
-No new tooling needed:
-
-1. Scope: **Acquisition HRES** (not AVER), timebase back to the full window
-   (1.5 ms/div, position +5.3 ms)
-2. Scope Grab: transfer points ~20000, then **Sequence** — runs 16, interval 0,
-   prefix e.g. `ilch_i01`
-3. `run_ilc.py step --measured "...ilch_i01*.csv"` — the glob matches all 16
-   files and `step` averages them on the grid before updating
-
-Sixteen singles take well under a minute at the 20 Hz trigger. Push M to 32-64
-and the floor approaches ~0.5 V before 60 Hz pickup and drift take over.
+boundaries. That put the hardware-average floor at ~2.5 V at the EOM, better
+than the 5 V the original package documentation hoped for — and it is exactly
+that 2.5 mV lattice that the HRES scheme above dithers away.
 
 ### The model is only trusted below ~5 kHz — keep the Q filter there
 
@@ -129,6 +138,12 @@ clean. The default 20 kHz Q filter is too wide for this bench.
 update low-passes the outgoing drive too, the first 5 kHz step also strips any
 grass a previous iteration injected (46 → 0.8 mV rms when it was applied).
 The real correction lives below 3 kHz and is untouched.
+
+This confinement applies to the **parametric** update only. With `--frf` the
+code filters the error at the FRF's own band edge instead of `f_cut` — the
+measured inverse is trusted across its whole measured band, and pre-filtering
+at 5 kHz in front of it is the integration bug that once left a repeatable
+2 V rms residual untouched at 5–15 kHz. See "The measured inverse" below.
 
 ### Sequence prefixes are glob prefixes — keep them unique
 
@@ -179,7 +194,7 @@ recipe, per channel:
 
 Landed 25 Aug, after the 80 kHz probe (`sysid_make --f-hi 80e3`, both chains
 coherent at every tone) and extended-band iterations
-(`--frf runrf_WIDE_<ch>.csv --frf-use 50e3 --frf-max 75e3`):
+(`--frf run\frf_WIDE_<ch>.csv --frf-use 50e3 --frf-max 75e3`):
 
 **X1 and X2 both at 2.4 V peak / 0.33-0.48 V rms on the 5.2 kV ramp —
 0.046% / 0.006-0.009%.** The ">24 kHz distortion" turned out to be mostly
@@ -220,9 +235,13 @@ different Trek gains directly comparable: ask both for 5200 V and each gets
 whatever drive its own chain needs. At 5200 V that is 9.312 V on X1 and 8.558 V
 on X2, leaving 6.9% and 14.4% headroom against the ±10 V full scale.
 
-The 2 µs grid costs nothing: decimating MKJ_full 20:1 from its native 0.1 µs
-departs from the source by 3.2 V peak / 1.3 V rms at the EOM, well under the ~5 V
-floor that 256-average 8-bit capture sets anyway.
+The 2 µs grid: decimating MKJ_full 20:1 from its native 0.1 µs departs from
+the source by 3.2 V peak / 1.3 V rms at the EOM — 0.06% of full scale. That
+was negligible against the old ~5 V hardware-average floor; against the ~0.5–1 V
+HRES floor and the 2.4 V final residual it is no longer free, but note the loop
+tracks the decimated target *exactly* — the departure is versus the 0.1 µs
+source shape, not an error the loop sees. `MKJ_FULL_NOTES.md` has the grid
+arithmetic if a finer grid ever looks worth it.
 
 ## The manual loop
 
