@@ -104,7 +104,7 @@ class Loop:
     def first_shot(self) -> np.ndarray:
         """Model-based pre-distortion. This alone should get you to ~1%."""
         u = self.plant.inverse(self.target)
-        return smooth(u, self.dt, self.f_cut)
+        return _pin_ends(smooth(u, self.dt, self.f_cut))
 
     def update(self, u_k: np.ndarray, y_k: np.ndarray) -> np.ndarray:
         """One ILC step.  y_k is the measured monitor trace, already aligned
@@ -122,7 +122,7 @@ class Loop:
         e = smooth(self.target - y_k, self.dt, self.f_cut)
         u_next = smooth(u_k + self.gamma * self.plant.lead(e), self.dt, self.f_cut)
         self.history.append(self.metrics(y_k))
-        return u_next
+        return _pin_ends(u_next)
 
     # --------------------------------------------------------------- metrics
     def metrics(self, y: np.ndarray) -> dict:
@@ -146,6 +146,24 @@ class Loop:
         for i, m in enumerate(self.history):
             w.append(f"{i:>4}   {m['peak_err_hv']:7.1f} V   {m['rms_err_hv']:7.2f} V   {m['peak_pct']:6.2f}%")
         return "\n".join(w)
+
+
+def _pin_ends(u: np.ndarray) -> np.ndarray:
+    """Force the first and last samples to exactly zero.
+
+    Between bursts the AWG holds the record's FIRST sample, so anything nonzero
+    there is a standing DC level on the EOM for the whole inter-burst gap - and
+    these EOMs should not be parked off zero. The last sample gets the same
+    treatment so the burst's end does not step when the hold resumes. The lead
+    and the zero-phase Q filter both nudge the endpoints by ~a millivolt
+    (filtfilt edge effects included), so this is a sub-mV correction on a
+    waveform that starts and ends at zero by construction; the plant low-passes
+    the one-sample step into nothing.
+    """
+    u = np.asarray(u, float).copy()
+    u[0] = 0.0
+    u[-1] = 0.0
+    return u
 
 
 def averaged(traces: list) -> np.ndarray:

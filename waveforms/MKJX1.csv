@@ -1,6 +1,6 @@
 # BK4063B-AWG-GUI waveform 'MKJX1_i00', 5301 points, one sample per line, fixed mapping 1.000 = 10 V (peak 0.9312 = 9.3123 V)
 # set AMP 20 Vpp, OFST 0, and UNTICK normalise on upload
-0.0001275011
+0
 0.0001748178
 0.0002215788
 0.0002677649
@@ -5300,4 +5300,4 @@
 -2.732009e-05
 -6.496385e-05
 -0.0001005165
--0.0001335469
+0

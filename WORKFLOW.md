@@ -191,6 +191,13 @@ Each writes two files per iteration — below, `<n>` is 1 or 2:
 | `drive_MKJX<n>_iter0.csv` | `EOM-ILC\run\` | `time_us,voltage_V`, the loop's own record |
 | `MKJX<n>_i00.csv` | **the AWG GUI's `Waveforms\`** | **the one to upload** — single column, normalised to ±1 |
 
+Every drive starts and ends at **exactly zero**: between bursts the AWG holds
+the record's first sample, so a nonzero first point would park the EOM at a
+standing DC level for the whole inter-burst gap. The loop pins both endpoints
+on every drive it emits (sub-mV nudges from the filter edges; DAC code 0
+exactly). If a drive file from anywhere else is uploaded, check its first
+line is 0 before letting the burst idle on it.
+
 The upload file goes straight into the generator's own library at
 
 ```
