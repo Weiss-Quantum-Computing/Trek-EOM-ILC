@@ -162,6 +162,27 @@ either or both:
 
 Re-measure the idle from any sequence's pre-trigger data after either change.
 
+### The measured inverse: how both channels got below 0.1%
+
+The parametric model's resonance does not exist at operating signal levels
+(SYSID multitone, 24 Aug) — the chain is a smooth rolloff, nonlinear in
+amplitude, and it *drifts on hour scales* (a converged drive re-measured
+~15–20 V off at the next session's start, shape not gain). The working
+recipe, per channel:
+
+1. `C:\ProgramData\anaconda3\python.exe sysid_make.py --peak 2.0 --name <NAME>` and upload it
+   (normalise OFF); 64-shot HRES sequence; then `sysid_fit.py` with that
+   channel's drive/monitor columns -> `run\frf_<NAME>.csv`.
+2. Iterate with the inverse:
+   `ilc_bench.py --resume <state> --frf run\frf_<NAME>.csv --frf-use 20e3 --frf-max 24e3`
+3. Budget 2–3 warm-up iterations at every session start for the drift.
+
+Landed 25 Aug: X1 4.6 V peak / 1.13 V rms, X2 3.7 / 0.69 on the 5.2 kV ramp
+(0.07–0.09% / 0.013–0.022%), sub-15 kHz error ~0.2 V rms on both. What
+remains is +0.99-repeatable >24 kHz texture, uniform through the record —
+the chain's own distortion products, beyond any linear correction. A wider
+probe (`--f-hi 80e3`) is the first thing to try if that ever matters.
+
 ### The trigger offset
 
 **Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the
