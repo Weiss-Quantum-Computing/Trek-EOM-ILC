@@ -84,6 +84,38 @@ single-shot file taken two hours earlier.** The analog noise dithers enough
 that the full 16× shows up across the whole record, not just near code
 boundaries. That puts the measurement floor at ~2.5 V at the EOM, better than
 the 5 V the original package documentation hoped for.
+### Below the 2.5 V lattice: averaged HRES singles
+
+The digitized 256-average delivers a hard 2.5 mV lattice (12-bit, an
+instrument cap — 1024 averages do not refine it). To measure finer, exploit
+the fact that a **single HRES shot carries the same lattice plus 3.5 mV rms of
+per-shot analog noise** (measured 24 Aug, slow regions of the real ramp) —
+noise larger than the lattice step is exactly the dither condition, so the
+mean of M separate shots walks off the lattice and beats down the noise:
+
+| | lattice step | shot noise | floor at the EOM |
+|---|---|---|---|
+| 1 HRES shot | 2.51 mV | 3.5 mV | ~4 V |
+| mean of 8 | 0.31 mV | 1.2 mV | ~1.3 V |
+| **mean of 16** | **0.157 mV** (the WORD floor) | **0.9 mV** | **~1 V** |
+| digitized AVER-256, for comparison | 2.51 mV systematic | ~0.2 mV | ~2.5 V |
+
+The lattice error is the dangerous kind — systematic, so the loop learns it as
+real error — while shot noise is random and mostly harmless. The HRES route
+trades a little random noise for an order of magnitude less systematic error.
+
+No new tooling needed:
+
+1. Scope: **Acquisition HRES** (not AVER), timebase back to the full window
+   (1.5 ms/div, position +5.3 ms)
+2. Scope Grab: transfer points ~20000, then **Sequence** — runs 16, interval 0,
+   prefix e.g. `ilch_i01`
+3. `run_ilc.py step --measured "...ilch_i01*.csv"` — the glob matches all 16
+   files and `step` averages them on the grid before updating
+
+Sixteen singles take well under a minute at the 20 Hz trigger. Push M to 32-64
+and the floor approaches ~0.5 V before 60 Hz pickup and drift take over.
+
 ### The trigger offset
 
 **Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the
