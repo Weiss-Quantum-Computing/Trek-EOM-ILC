@@ -21,5 +21,10 @@ Two traps this code exists to avoid:
 - The -0.7 %/decade gain tilt vs amplitude is scope V/div range error, not the circuit.
   It shows up identically on the passive divider, which cannot have one.
 
-Fitted plant, Trek 610E + EOM (use this to seed eomilc):
+Fitted plant, Trek 610E + EOM (large-signal ramp fits):
   2nd order, zeta = 0.222 +/- 0.019, fn = 2.2 - 3.0 kHz (falls with drive amplitude)
+
+Superseded 25 Aug 2026: the 2 V FRF probes found no resonance at probe level -
+the peak was an artifact of these large-signal fits (the group delay they imply,
+~28 us, was right). The fit still seeds the model-based first shot, but the loop
+runs on the measured FRF (--frf); see ../REPORT.md sections 4-5.
