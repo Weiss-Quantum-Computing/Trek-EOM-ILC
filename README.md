@@ -67,6 +67,7 @@ iteration 1.
 | `eomilc/` | the library: `config` (calibration), `plant` (models + fitting), `ilc` (the loop), `outputs` (file emission), `scope` (capture reader) |
 | `run_ilc.py` | manual driver — `init` / `step` / `emit-ni` |
 | `ilc_bench.py` | closed-loop driver, upload → capture → update with no hands |
+| `ilc_gui.py` | panel front end for both drivers, with per-iteration plots (waveforms, error, spectrum, convergence, FRF); same state files as the CLIs, so GUI and CLI steps interleave. `ilc_gui.bat` launches it with the Anaconda interpreter |
 | `sysid_make.py` | build a Schroeder multitone probe for FRF measurement |
 | `sysid_fit.py` | probe captures → `run/frf_<name>.csv` (magnitude, phase, coherence) |
 | `make_target.py` | build a target from the MKJ waveform at any peak and grid |
