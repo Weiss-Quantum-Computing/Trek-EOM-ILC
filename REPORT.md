@@ -2,22 +2,27 @@
 
 *Weiss Quantum Computing · EOM drive bench · 24–25 August 2026*
 
-How the high-voltage ramp drive went from 2.4% tracking error to 0.05% in one
-bench day: fixing the measurement, learning the drive iteratively, discovering
-the model was wrong, and replacing it with the amplifier's own measured
-response.
+Over two bench days — on top of characterization work from the week before —
+the high-voltage ramp drive went from 2.4% tracking error to below 0.05%. Three
+things had to change, in order: the measurement (an 8-bit scope had been
+feeding the loop its own quantization), the correction loop itself (iterative
+learning against a parametric model, which converged and then stalled), and
+finally the model (replaced by the amplifier's own measured frequency
+response). The sections below follow that logic — loop first, then measurement,
+then models — which is close to, but not exactly, the order it happened on the
+bench.
 
-| **126 → 2.4 V** | **0.046%** | **0.006%** | **53×** |
+| **126 → 2.4 V** | **0.046%** | **0.009% / 0.006%** | **53×** |
 |:---|:---|:---|:---|
-| peak error, 5.2 kV ramp | final peak error | final rms error (X2) | improvement, fully automated |
+| peak error, 5.2 kV ramp | end-of-campaign peak error, both channels | end-of-campaign rms error, X1 / X2 | peak-error reduction |
 
-![The whole day in one chart](report/figures/report_convergence.png)
+![The campaign in one chart](report/figures/report_convergence.png)
 
-***The whole day in one chart.** Peak tracking error per iteration for both
+***The campaign in one chart.** Peak tracking error per iteration for both
 channels, on the from-scratch automated runs. Three eras: the parametric
 second-order model converges to a ~7 V floor; the measured inverse (to 24 kHz)
 breaks through the floor the model could not; extending the inverse to 75 kHz
-claims most of what remained. The spikes are session-start drift — the chain's
+claimed most of what remained. The spikes are session-start drift — the chain's
 dynamics wander on hour scales, and each new session opens 15–30 V off before
 the loop re-converges in two or three iterations. Era bands follow X1's
 iteration numbering; X2's inverse era began at its own iteration 10.*
@@ -48,88 +53,13 @@ drive amplitudes for the same output (the Treks' gains differ by 12%).
 
 The correction strategy is **iterative learning control** (ILC): play the
 drive, measure the monitor, compute a correction from the error, upload the
-corrected drive, repeat. Nothing about the strategy is exotic — everything
-difficult about this day lived in two places: *measuring the error honestly*
-(§2) and *knowing the amplifier well enough to convert error into correction*
-(§3–5).
+corrected drive, repeat. Nothing about the strategy is exotic — most of what
+was difficult in this campaign lived in two places: *measuring the error
+honestly* (§3) and *knowing the amplifier well enough to convert error into
+correction* (§4–5). The loop itself comes first (§2), because its one-line
+convergence condition is the lens every later failure is read through.
 
-## 2. Seeing a 2 V error on a 5,200 V ramp
-
-The scope digitizes 8 bits over 8 divisions. At the 1 V/div needed to see the
-whole monitor waveform, one code is **40 mV — 40 V at the EOM**. A single
-capture cannot resolve errors much below half a code, and worse, the
-quantization error is not noise: on the slow parts of the ramp the trace crawls
-across each code, producing a deterministic ±20 V sawtooth.
-
-![Three capture schemes on the same knee of the ramp](report/figures/report_quant3.png)
-
-***Three capture schemes on the same knee of the ramp.** Left: the single 8-bit
-sweep is a 40 mV staircase; the 64-shot HRES software average (blue) resolves
-the ramp continuously; the inset (40 µs) shows the 256-average's 2.5 mV word
-lattice — green steps — against the HRES continuum. Right, the decisive
-comparison: measurement error alone, each scheme against the best truth
-estimate. The single sweep hands the loop a ±20 V sawtooth (11.7 mV rms); the
-256-average leaves a 0.72 mV rms lattice error; the 64-shot HRES floor, from a
-split-half comparison, is **0.32 mV rms with no systematic lattice at all** — a
-2.3× cleaner floor than hardware averaging, and free of the deterministic
-component the loop would otherwise learn. (The lattice trace is reconstructed
-at its measured 2.5126 mV pitch; the original averaged capture files were
-pruned from disk during cleanup.)*
-
-### Why the final scheme wins, and what else was tried or considered
-
-Averaging *N* sweeps reduces random noise as 1/√N, but it only removes
-quantization where analog noise dithers the trace across a code boundary. Three
-ladders of improvement were climbed in sequence:
-
-- **Hardware averaging (AVER 256) + 16-bit WORD readback.** The averaged record
-  is stored deeper than the 8-bit display; WORD readback recovers 2.5 mV steps
-  — but that 2.5 mV is a hard 12-bit delivery lattice of the instrument,
-  identical at any average depth and in HRES mode. A lattice is still a
-  systematic, deterministic error.
-- **64 single HRES shots, averaged in software.** Each HRES shot (the scope's
-  internal high-resolution boxcar of its 2 GSa/s stream) carries the same
-  2.5 mV lattice *plus 3.5 mV rms of per-shot analog noise*. Noise larger than
-  the lattice step is precisely the dither condition: the mean of 64 shots
-  walks off the lattice entirely (0.157 mV steps measured — the WORD format
-  floor) while random noise falls to ~0.4 mV. This is the scheme behind every
-  measurement in this report: floor ≈ 0.5–1 V at the EOM, ~25 s per iteration
-  at the 20 Hz trigger.
-- **Alternatives considered and why they lose here:** lowering V/div shrinks
-  the code but the full 5.2 V monitor swing must stay on screen, capping the
-  gain at ~1.4×; a hardware error measurement (subtracting the commanded shape
-  before digitizing) would be the right instrument but doesn't exist on this
-  bench; deliberate sub-code dither injected by the AWG between captures would
-  substitute for the analog noise, but the chain's own noise turned out
-  sufficient; a deeper digitizer solves it by fiat, with money.
-
-### Conditioning after capture — what helps and what cannot
-
-Three conditioning steps are applied to measured data, all after capture:
-resampling onto the 2 µs waveform grid boxcar-averages any finer-grained
-samples; the 64 traces are averaged per-iteration; and the error is passed
-through a zero-phase low-pass (the Q-filter of §3) before the correction is
-computed. What deliberately was *not* attempted is smoothing away the staircase
-of an unaveraged capture: a low-pass hides the steps but preserves their
-in-band content — the sawtooth's power below the filter corner remains in the
-error signal, is treated as real, and gets corrected into the drive.
-Information destroyed by a quantizer is not recoverable from one record; it is
-only recoverable across records, via dither and averaging. That distinction is
-the defense of the measurement scheme.
-
-![What happens when the loop is fed quantization](report/figures/i01_grass_diagnosis.png)
-
-***What happens when the loop is fed quantization.** The first bench iteration
-ran on a single unaveraged capture (an instrument trap, §7). Top: the monitor
-staircase. Bottom: the computed drive correction — the real 44 mV correction
-buried under 127 mV rms of high-frequency "grass", the model inverse's double
-derivative amplifying the staircase edges. The grass bursts sit exactly where
-the monitor crosses codes slowly. Measurement quality, model choice, and
-Q-filtering are one coupled decision: the filter corner must exclude the band
-where the error signal is measurement artifact, and the artifact level decides
-how much band survives.*
-
-## 3. The iteration, in the simplest case
+## 2. The iteration, in the simplest case
 
 Model the chain as a gain and a single pole — a first-order lag:
 
@@ -183,8 +113,91 @@ $$
 If the model were exact, L·P_true = 1 and the error shrinks by (1−γ) per
 iteration at every frequency. When the model is wrong the bracket grows, and
 wherever |1 − γLP_true| > 1 the loop doesn't merely stall — it **amplifies**
-its own correction, iteration after iteration. That single quantity, evaluated
-with the *true* plant, decided every failure and every fix in this project.
+its own correction, iteration after iteration.
+
+So the update has two inputs it cannot do without: an error measurement that is
+signal rather than artifact, and an L that matches the real chain. The first is
+§3; the second is §4 and §5.
+
+## 3. Seeing a 2 V error on a 5,200 V ramp
+
+The scope digitizes 8 bits over 8 divisions. At the 1 V/div needed to see the
+whole monitor waveform, one code is **40 mV — 40 V at the EOM**. A single
+capture cannot resolve errors much below half a code, and worse, the
+quantization error is not noise: on the slow parts of the ramp the trace crawls
+across each code, producing a deterministic ±20 V sawtooth. Fed to the update
+law, that sawtooth is indistinguishable from tracking error — the loop will
+learn it into the drive.
+
+### The ladder of capture schemes
+
+Averaging *N* sweeps reduces random noise as 1/√N, but it only removes
+quantization where analog noise dithers the trace across a code boundary. Three
+rungs were climbed in sequence:
+
+- **Hardware averaging (AVER 256) + 16-bit WORD readback.** The averaged record
+  is stored deeper than the 8-bit display; WORD readback recovers 2.5 mV steps
+  — but that 2.5 mV is a hard 12-bit delivery lattice of the instrument,
+  identical at any average depth and in HRES mode. A lattice is still a
+  systematic, deterministic error.
+- **64 single HRES shots, averaged in software.** Each HRES shot (the scope's
+  internal high-resolution boxcar of its 2 GSa/s stream) carries the same
+  2.5 mV lattice *plus 3.5 mV rms of per-shot analog noise*. Noise larger than
+  the lattice step is precisely the dither condition: the mean of 64 shots
+  walks off the lattice (steps of 0.157 mV measured — the WORD format floor)
+  while random noise falls to ~0.4 mV. This is the scheme behind every
+  measurement in this report: floor ≈ 0.5–1 V at the EOM, ~25 s per iteration
+  at the 20 Hz trigger.
+- **Alternatives considered and why they lose here:** lowering V/div shrinks
+  the code but the full 5.2 V monitor swing must stay on screen, capping the
+  gain at ~1.4×; a hardware error measurement (subtracting the commanded shape
+  before digitizing) would be the right instrument but doesn't exist on this
+  bench; deliberate sub-code dither injected by the AWG between captures would
+  substitute for the analog noise, but the chain's own noise turned out
+  sufficient; a deeper digitizer solves it by fiat, with money.
+
+![Three capture schemes on the same knee of the ramp](report/figures/report_quant3.png)
+
+***Three capture schemes on the same knee of the ramp.** Left: the single 8-bit
+sweep is a 40 mV staircase; the 64-shot HRES software average (blue) resolves
+the ramp continuously; the inset (40 µs) shows the 256-average's 2.5 mV word
+lattice — green steps — against the HRES continuum. Right, the comparison that
+matters: measurement error alone, each scheme against the best truth estimate.
+The single sweep hands the loop a ±20 V sawtooth (11.7 mV rms); the 256-average
+leaves a 0.72 mV rms lattice error; the 64-shot HRES scheme reaches
+**0.32 mV rms with no lattice structure resolvable** — 2.3× below the hardware
+average, and free of the lattice's deterministic component down to the 0.157 mV
+WORD floor. Two caveats on that number: it comes from a split-half comparison,
+which bounds the random floor but would not reveal a systematic common to both
+halves; and the lattice trace is reconstructed at its measured 2.5126 mV pitch,
+the original averaged capture files having been pruned from disk during
+cleanup.*
+
+### Conditioning after capture — what helps and what cannot
+
+Three conditioning steps are applied to measured data, all after capture:
+resampling onto the 2 µs waveform grid boxcar-averages any finer-grained
+samples; the 64 traces are averaged per-iteration; and the error is passed
+through the zero-phase Q-filter of §2 before the correction is computed. What
+deliberately was *not* attempted is smoothing away the staircase of an
+unaveraged capture: a low-pass hides the steps but preserves their in-band
+content — the sawtooth's power below the filter corner remains in the error
+signal, is treated as real, and gets corrected into the drive. Information
+destroyed by a quantizer is not recoverable from one record; it is only
+recoverable across records, via dither and averaging. That distinction is the
+defense of the measurement scheme.
+
+![What happens when the loop is fed quantization](report/figures/i01_grass_diagnosis.png)
+
+***What happens when the loop is fed quantization.** The first bench iteration
+ran on a single unaveraged capture (an instrument trap, §7). Top: the monitor
+staircase. Bottom: the computed drive correction — the real 44 mV correction
+buried under 127 mV rms of high-frequency "grass". The amplification is the
+work of the parametric inverse's derivative terms (§4), which boost exactly the
+staircase edges; the grass bursts sit where the monitor crosses codes slowly.
+Measurement quality, model choice, and Q-filtering are one coupled decision:
+the filter corner must exclude the band where the error signal is measurement
+artifact, and the artifact level decides how much band survives.*
 
 ## 4. The second-order model and its failure band
 
@@ -200,11 +213,11 @@ $$
 u = \frac{v^* + (2\zeta/\omega_n)\,\dot v^* + \ddot v^*/\omega_n^2}{g} \qquad \text{(its inverse)}
 $$
 
-The figures below make the two practical consequences concrete. The inverse
+The figure below makes the two practical consequences concrete. The inverse
 differentiates *twice*: content in the error at frequency f is amplified by
-(f/fₙ)² — a factor ~70 at 20 kHz — which is why §2's measurement floor and the
+(f/fₙ)² — a factor ~70 at 20 kHz — which is why §3's measurement floor and the
 Q-filter corner are part of the same decision, and why the error is low-passed
-before the lead ever sees it. And the one-pole model of §3 is secretly a
+before the lead ever sees it. And the one-pole model of §2 is secretly a
 special case of this one: its τ equals the resonance's group delay 2ζ/ωₙ to
 within 1.5%, so it reproduces the lag while knowing nothing of the peak.
 
@@ -213,26 +226,26 @@ within 1.5%, so it reproduces the lag while knowing nothing of the peak.
 ***Predistortion made visible.** Left: what each inverse adds to the plain
 scaled drive on the upper knee — the one-pole lead is a slope-proportional
 boost; the resonant inverse adds the curvature kick (its fuzz is the double
-derivative amplifying the target's own 2 µs grid — the noise-sensitivity of §2
+derivative amplifying the target's own 2 µs grid — the noise-sensitivity of §3
 in miniature). Middle: driving the resonant plant with each: no predistortion
 costs ~100 V at the corner, the one-pole inverse leaves the ring it cannot see,
 the matched inverse tracks. Right: the Q-filter |Q(f)| at its shipped 20 kHz
 corner and at the 5 kHz "trusted band" corner this bench required, with the
 model fₙ and the 3–6 kHz band where the stalled residual lived.*
 
-On the real bench the same mathematics appeared one octave higher. With the
-resonant model and the Q-filter at its 20 kHz default, drive grass above 5 kHz
-*tripled every iteration* (0.4 → 46 → 130 → 246 mV rms) while every capture
-looked clean — the plant attenuates the grass ~8× on its way to the monitor.
-Using one iteration's grass as a broadband probe revealed why: above ~6 kHz the
-real chain passes **4–8× more** than the second-order model predicts, putting
-the contraction factor near 2.6 at 12 kHz. The interim cure was pulling f_cut
-to 5 kHz — the band the model could actually be trusted in — which froze the
-divergence and, because the update also low-passes the outgoing drive, stripped
-the accumulated grass in one step. But it left a symptom: a repeatable ±3–4 V
-oscillation at 3–6 kHz, present even with a perfectly smooth drive, that the
-loop could not remove. The model was wrong exactly there, and no amount of
-iteration fixes a wrong inverse.
+On the real bench the contraction mathematics of §2 appeared one octave higher
+than the model said it should. With the resonant model and the Q-filter at its
+20 kHz default, drive grass above 5 kHz *tripled every iteration* (0.4 → 46 →
+130 → 246 mV rms) while every capture looked clean — the plant attenuates the
+grass ~8× on its way to the monitor. Using one iteration's grass as a broadband
+probe revealed why: above ~6 kHz the real chain passes **4–8× more** than the
+second-order model predicts, putting the contraction factor near 2.6 at 12 kHz.
+The interim cure was pulling f_cut to 5 kHz — the band the model could actually
+be trusted in — which froze the divergence and, because the update also
+low-passes the outgoing drive, stripped the accumulated grass in one step. But
+it left a symptom: a repeatable ±3–4 V oscillation at 3–6 kHz, present even
+with a perfectly smooth drive, that the loop could not remove. The model was
+wrong exactly there, and no amount of iteration fixes a wrong inverse.
 
 ## 5. The measured inverse
 
@@ -279,13 +292,15 @@ probes were coherent at every tone on both channels).
 ![The pivotal measurement](report/figures/report_frf_wide.png)
 
 ***The pivotal measurement.** Both chains, probed to 80 kHz at 2 V: a smooth,
-gentle rolloff with phase easing to ~−140°. The second-order model's resonance
-— the premise of the whole parametric approach — is not there at these signal
-levels; it was a large-signal artifact of the original ramp fits (the observed
-ringing lived in fast edges near the Trek's slew limit). The model's fictitious
-peak and −180° phase plunge are exactly why the loop diverged above 5 kHz. The
-two chains are near-twins, and a repeat of X1's narrow probe agrees with the
-wide one to 1.2%.*
+gentle rolloff with phase easing to ~−140°. The second-order resonance — the
+premise of the whole parametric approach — is absent at this probe level. The
+ringing that the original ramp fits turned into a ζ ≈ 0.21 peak was a
+large-signal phenomenon, observed in fast edges near the Trek's slew limit, and
+the chain is measurably amplitude-dependent (§ below); at the levels the probe
+reaches, the model's peak and −180° phase plunge simply are not in the data —
+and they are exactly the features that made the parametric loop diverge above
+5 kHz. The two chains are near-twins, and a repeat of X1's narrow probe agrees
+with the wide one to 1.2%.*
 
 ### Applying it to the iteration
 
@@ -303,16 +318,18 @@ $$
 
 Convergence now depends on |1 − γ·T·H_true/H_meas|. The chain is measurably
 nonlinear in amplitude — H probed at 6 V is 0.6–0.8× the 2 V measurement with
-~30° phase shifts at 1–2 kHz — so no single H is exact at operating amplitude;
-but a ratio of 0.6–0.8 keeps the bracket well inside 1, and the bench confirmed
-contraction everywhere the taper was open. Two integration lessons cost bench
-time and are worth recording. The error handed to the measured inverse must
-span the *whole* measured band — the first implementation reused the parametric
-path's 5 kHz pre-filter, so the inverse only ever saw sub-5 kHz error, and a
-perfectly repeatable (r = +0.99) 2 V rms residual sat untouched at 5–15 kHz
-inside the supposedly corrected band. And the taper edge deserves respect: the
-inverse boost 1/|H| reaches ~100× at 80 kHz, so the correction is run at full
-strength only to 50 kHz on first attempts.
+~30° phase shifts at 1–2 kHz — so no single H is exact at operating amplitude.
+But a ratio of 0.6–0.8 keeps the bracket well inside 1, and on the bench the
+loop contracted everywhere the taper was open.
+
+Two integration lessons cost bench time and are worth recording. First, the
+error handed to the measured inverse must span the *whole* measured band: the
+first implementation reused the parametric path's 5 kHz pre-filter, so the
+inverse only ever saw sub-5 kHz error, and a perfectly repeatable (r = +0.99)
+2 V rms residual sat untouched at 5–15 kHz — inside the supposedly corrected
+band. Second, the taper edge deserves respect: the inverse boost 1/|H| reaches
+~100× at 80 kHz, so the correction was run at full strength only to 50 kHz on
+first attempts.
 
 ### Would the one-pole model have worked?
 
@@ -330,13 +347,13 @@ which point one may as well divide by the FRF itself.
 ![All three inverses judged against the measured chain](report/figures/report_modelform.png)
 
 ***All three inverses judged against the measured chain.** Every panel uses the
-wide-probe FRF as the truth, so nothing here rests on the fictitious resonance.
-The resonant inverse diverges ×3 per iteration — reproducing the bench; the
-one-pole inverse converges, because the 20 kHz Q-filter masks its unstable
-region above 30 kHz; the measured inverse contracts uniformly. Bottom row:
-neither parametric form has the right magnitude, and the phase is decisive —
-the measured chain passes −90°, which no single pole can do, while the resonant
-model plunges to −180° through a peak that does not exist.*
+wide-probe FRF as the truth, so nothing here rests on the discredited
+resonance. The resonant inverse diverges ×3 per iteration — reproducing the
+bench; the one-pole inverse converges, because the 20 kHz Q-filter masks its
+unstable region above 30 kHz; the measured inverse contracts uniformly. Bottom
+row: neither parametric form has the right magnitude, and the phase is decisive
+— the measured chain passes −90°, which no single pole can do, while the
+resonant model plunges to −180° through a peak the probe does not see.*
 
 Quantitatively, the per-band contraction factor |1 − γ·L·H_meas| (worst tone
 per band):
@@ -364,11 +381,11 @@ simulation against the day-3 resonant fits, then believed. Given the
 information held, that rejection was correct; against a genuinely resonant
 plant a one-pole loop does diverge. The actual error sat one level up: **both
 parametric forms were children of the same characterization method** —
-large-signal ramp fits taken near the Trek's slew limit — which manufactured a
-resonance that small-signal reality does not have. The one-pole τ was that
-method's group-delay estimate, and group delay is the one thing the fits got
-right. The FRF did not merely correct the model's parameters; it corrected the
-characterization method.
+large-signal ramp fits taken near the Trek's slew limit — which extrapolated a
+resonance to signal levels where the probe later found none. The one-pole τ was
+that method's group-delay estimate, and group delay is the one thing the fits
+got right. The FRF did not merely correct the model's parameters; it corrected
+the characterization method.
 
 ## 6. Results
 
@@ -390,15 +407,17 @@ high-frequency texture with no corner structure, no wiggles, and no entry spike
 — at this stage 0.2 V rms below 15 kHz. Extending the inverse to 75 kHz then
 claimed most of what this panel still shows.*
 
-The final accounting, 64-shot measurements, both channels at the end of their
-extended-band campaigns:
+The accounting at the end of the campaign, 64-shot measurements, both channels
+at the last iteration of their extended-band runs. "End of campaign" is not
+"converged": the 50–80 kHz band was still shrinking when the bench time ran
+out, and the open threads in §7 would move these numbers.
 
 | band | X1 (iter 26) | X2 (iter 18) | status |
 |:---|---:|---:|:---|
 | < 24 kHz rms | 0.27 V | 0.19 V | measurement floor |
 | 24–50 kHz rms | 0.12 V | 0.13 V | corrected by the wide inverse |
 | 50–80 kHz rms | 0.32 V | 0.18 V | taper region, still shrinking |
-| > 80 kHz rms | 0.16 V | 0.09 V | beyond the probe — the true floor |
+| > 80 kHz rms | 0.16 V | 0.09 V | beyond the probe — uncorrected |
 | **total rms** | **0.48 V** | **0.33 V** | **0.009% / 0.006%** |
 | **total peak** | **2.4 V** | **2.4 V** | **0.046% of 5.2 kV** |
 
@@ -411,15 +430,14 @@ structure is a broad shoulder where the correction tapers off (50–75 kHz)
 against content just beyond it. Mains harmonics cannot be resolved within a
 10.6 ms record (94 Hz bin spacing), but the 64 shots span minutes, so
 incoherent mains pickup averages into the broadband floor rather than aliasing
-to a line. The residual is broadband and featureless where it matters: any
-future resonance of the optical system will not find a matching drive line to
-excite it.*
+to a line. The practical consequence: the residual offers no narrow drive line
+for a future resonance of the optical system to sit on — though the broadband
+floor itself still excites every band at the ~0.1 V scale.*
 
 One hypothesis about the residual also fell to measurement: the ">24 kHz
-distortion" story was mostly wrong in the best way. The 80 kHz probe showed
-that band to be largely unmeasured *linear* response, which the extended
-inverse then corrected — the genuinely nonlinear remainder is the ~0.1 V rms
-above 80 kHz.
+distortion" story was mostly wrong. The 80 kHz probe showed that band to be
+largely unmeasured *linear* response, which the extended inverse then corrected
+— the genuinely nonlinear remainder is the ~0.1 V rms above 80 kHz.
 
 ### The session-start drift, decomposed
 
@@ -450,16 +468,18 @@ a −1.35 µs delay drift.*
 
 Two corollaries follow. The idle-offset trim and the drift are unrelated
 problems — the freed first sample handles the standing offset, and only
-re-iteration handles the drift. And no cheap per-session recalibration exists:
-since the change lives in the transfer function rather than in any low-order
-correction, the warm-up iterations *are* the efficient fix. Killing it at the
-source would mean characterizing the chain's FRF against temperature and
-warm-up time, not its offsets.
+re-iteration handles the drift. And in the three events decomposed, no
+low-order per-session recalibration would have helped: the change lives in the
+transfer function, not in any offset, gain, or delay, so the warm-up iterations
+are the efficient fix available today. Killing the drift at the source would
+mean characterizing the chain's FRF against temperature and warm-up time, not
+its offsets.
 
 ## 7. The instrument, for the record
 
-Half of this day was learning what the instruments actually do, as opposed to
-what their manuals imply. The catalog, all established by direct measurement:
+Half of the campaign was learning what the instruments actually do, as opposed
+to what their manuals imply. The catalog, all established by direct
+measurement:
 
 | fact | consequence |
 |:---|:---|
@@ -481,9 +501,9 @@ probe past 80 kHz; and characterizing the thermal drift at its source.
 
 ---
 
-*Prepared 25 August 2026 from the day's bench data (`scope_data/EOM ramps day
-4`, states and measurements in `EOM-ILC/run`). All errors quoted in volts at
-the EOM; all measurements 64-shot software-averaged HRES captures unless noted.
-Figure sources: `run/make_report_figs*.py`, `run/make_quant_fig.py`. This file
-is the repository copy of the published report artifact; the figures are the
-same PNGs, committed under `report/figures/`.*
+*Prepared 25 August 2026 from the campaign's bench data (`scope_data/EOM ramps
+day 4`, states and measurements in `EOM-ILC/run`). All errors quoted in volts
+at the EOM; all measurements 64-shot software-averaged HRES captures unless
+noted. Figure sources: `run/make_report_figs*.py`, `run/make_quant_fig.py`.
+This file is the repository copy of the published report artifact; the figures
+are the same PNGs, committed under `report/figures/`.*
