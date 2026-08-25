@@ -257,6 +257,11 @@ def main():
                     help="use a measured transfer function (sysid_fit output) as "
                          "the update's inverse -- corrects the 3-6 kHz band the "
                          "parametric model stalls in")
+    ap.add_argument("--frf-use", type=float, default=15e3,
+                    help="full-strength band edge of the measured inverse; "
+                         "24 kHz tones were coherent, so up to ~20e3 is backed "
+                         "by measurement (taper reaches --frf-max)")
+    ap.add_argument("--frf-max", type=float, default=22e3)
     ap.add_argument("--overwrite-state", action="store_true",
                     help="allow a fresh run to replace an existing state file")
     ap.add_argument("--drive-scope-ch", type=int, default=None,
@@ -318,7 +323,7 @@ def main():
                      f"--overwrite-state to discard it deliberately.")
 
     if a.frf:
-        loop.frf = ilc.FRF(a.frf)
+        loop.frf = ilc.FRF(a.frf, f_use=a.frf_use, f_max=a.frf_max)
         print(f"update uses the measured inverse from {a.frf}")
 
     limit = getattr(_AWGMOD, "MAX_ARB_NAME", 11)

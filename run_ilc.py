@@ -125,7 +125,7 @@ def cmd_step(a):
     st = load_state(a.state)
     loop = build_loop(st)
     if a.frf:
-        loop.frf = ilc.FRF(a.frf)
+        loop.frf = ilc.FRF(a.frf, f_use=a.frf_use, f_max=a.frf_max)
         print(f"update uses the measured inverse from {a.frf} "
               f"({loop.frf.f[0]:.0f}-{loop.frf.f[-1]:.0f} Hz, "
               f"tapered off {loop.frf.f_use/1e3:g}-{loop.frf.f_max/1e3:g} kHz)")
@@ -275,6 +275,10 @@ def main():
                    help="use a measured transfer function (from sysid_fit) as "
                         "the update's inverse instead of the parametric model. "
                         "This is what corrects the 3-6 kHz wiggle band.")
+    s.add_argument("--frf-use", type=float, default=15e3,
+                   help="frequency up to which the measured inverse acts at "
+                        "full strength; tapers to zero at --frf-max")
+    s.add_argument("--frf-max", type=float, default=22e3)
     s.add_argument("--f-cut", type=float, default=None,
                    help="override the Q filter corner for this and later steps. "
                         "5e3 is right on this bench - the model is only trusted "
