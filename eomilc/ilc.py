@@ -127,12 +127,18 @@ class Loop:
         inverse differentiates twice, and unfiltered 8-bit scope noise through
         d2/dt2 is larger than the correction it is meant to carry.
         """
-        e = smooth(self.target - y_k, self.dt, self.f_cut)
         if self.frf is not None:
-            # measured inverse: its own taper bounds the band, so the Q filter
-            # does not have to strangle the update to protect a wrong model
+            # The measured inverse carries its own band limit (the taper up to
+            # f_max), so the error must NOT be pre-filtered at f_cut here --
+            # that mistake fed the inverse only the sub-5 kHz error and left a
+            # perfectly repeatable 5-15 kHz residual sitting untouched, 2 V rms
+            # of it, while the band below converged to nothing. Smooth only at
+            # the top of the measured band to keep out-of-band noise from
+            # aliasing into the correction.
+            e = smooth(self.target - y_k, self.dt, self.frf.f_max)
             u_next = u_k + self.frf.lead(e, self.dt, self.gamma)
         else:
+            e = smooth(self.target - y_k, self.dt, self.f_cut)
             u_next = smooth(u_k + self.gamma * self.plant.lead(e),
                             self.dt, self.f_cut)
         self.history.append(self.metrics(y_k))
