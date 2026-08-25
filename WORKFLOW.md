@@ -177,11 +177,18 @@ recipe, per channel:
    `ilc_bench.py --resume <state> --frf run\frf_<NAME>.csv --frf-use 20e3 --frf-max 24e3`
 3. Budget 2–3 warm-up iterations at every session start for the drift.
 
-Landed 25 Aug: X1 4.6 V peak / 1.13 V rms, X2 3.7 / 0.69 on the 5.2 kV ramp
-(0.07–0.09% / 0.013–0.022%), sub-15 kHz error ~0.2 V rms on both. What
-remains is +0.99-repeatable >24 kHz texture, uniform through the record —
-the chain's own distortion products, beyond any linear correction. A wider
-probe (`--f-hi 80e3`) is the first thing to try if that ever matters.
+Landed 25 Aug, after the 80 kHz probe (`sysid_make --f-hi 80e3`, both chains
+coherent at every tone) and extended-band iterations
+(`--frf runrf_WIDE_<ch>.csv --frf-use 50e3 --frf-max 75e3`):
+
+**X1 and X2 both at 2.4 V peak / 0.33-0.48 V rms on the 5.2 kV ramp —
+0.046% / 0.006-0.009%.** The ">24 kHz distortion" turned out to be mostly
+unmeasured linear response; the true floor is the >80 kHz remainder
+(0.09-0.16 V rms) plus measurement noise. Uncorrected, the chain was 2.4%:
+the loop is worth 53x on peak and >100x on rms.
+
+Session-start drift is real and growing in the record books (up to 32 V on a
+converged drive): always budget 2-3 warm-up iterations.
 
 ### The trigger offset
 
