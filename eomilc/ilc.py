@@ -73,7 +73,14 @@ def check_limits(u_awg: np.ndarray, v_mon: np.ndarray, dt: float,
         msgs.append(f"peak current {i_pk*1e3:.2f} mA of {lim.current*1e3:.1f} mA "
                     f"(assumes {lim.load_capacitance*1e12:.0f} pF -- measure it)")
 
-    msgs.append(f"AWG peak {peak:.3f} V, Trek input {trek_in:.3f} V, "
+    idle = float(u_awg[0])
+    if abs(idle) > lim.idle_awg + 1e-9:
+        ok = False
+        msgs.append(f"first sample {idle*1e3:+.1f} mV exceeds the "
+                    f"{lim.idle_awg*1e3:.0f} mV idle cap - the AWG holds it "
+                    f"between bursts")
+    msgs.append(f"AWG peak {peak:.3f} V, idle (first sample) {idle*1e3:+.1f} mV "
+                f"of the {lim.idle_awg*1e3:.0f} mV cap, Trek input {trek_in:.3f} V, "
                 f"output {hv_pk:.0f} V, slew {slew/1e6:.2f} V/us")
     return GuardReport(ok, msgs)
 
@@ -104,7 +111,7 @@ class Loop:
     def first_shot(self) -> np.ndarray:
         """Model-based pre-distortion. This alone should get you to ~1%."""
         u = self.plant.inverse(self.target)
-        return _pin_ends(smooth(u, self.dt, self.f_cut))
+        return _limit_ends(smooth(u, self.dt, self.f_cut))
 
     def update(self, u_k: np.ndarray, y_k: np.ndarray) -> np.ndarray:
         """One ILC step.  y_k is the measured monitor trace, already aligned
@@ -122,7 +129,7 @@ class Loop:
         e = smooth(self.target - y_k, self.dt, self.f_cut)
         u_next = smooth(u_k + self.gamma * self.plant.lead(e), self.dt, self.f_cut)
         self.history.append(self.metrics(y_k))
-        return _pin_ends(u_next)
+        return _limit_ends(u_next)
 
     # --------------------------------------------------------------- metrics
     def metrics(self, y: np.ndarray) -> dict:
@@ -148,21 +155,27 @@ class Loop:
         return "\n".join(w)
 
 
-def _pin_ends(u: np.ndarray) -> np.ndarray:
-    """Force the first and last samples to exactly zero.
+def _limit_ends(u: np.ndarray, cap: float = LIMITS.idle_awg) -> np.ndarray:
+    """Clamp the first and last samples to the idle cap - NOT to zero.
 
-    Between bursts the AWG holds the record's FIRST sample, so anything nonzero
-    there is a standing DC level on the EOM for the whole inter-burst gap - and
-    these EOMs should not be parked off zero. The last sample gets the same
-    treatment so the burst's end does not step when the hold resumes. The lead
-    and the zero-phase Q filter both nudge the endpoints by ~a millivolt
-    (filtfilt edge effects included), so this is a sub-mV correction on a
-    waveform that starts and ends at zero by construction; the plant low-passes
-    the one-sample step into nothing.
+    Between bursts the AWG holds the record's FIRST sample, so sample 0 sets
+    the standing level on the EOM for the whole inter-burst gap. Forcing it to
+    file-zero (the previous rule) turned out to fight the loop: the chain has
+    its own idle offsets - the generator's zero-code error plus the
+    preconditioning network's - so file-zero still parked the EOMs at -9 V
+    (X1) and -41 V (X2), and every burst opened with a transient the pinned
+    drive could never remove. Left free, the update walks the first sample to
+    whatever value parks the CHAIN at zero, which kills both the standing
+    level and the entry transient.
+
+    The cap bounds how far it may walk: 100 mV at the AWG is ~35-55 V at the
+    EOM worst case, a safe idle by the bench's own judgement (2026-08-24).
+    The last sample gets the same clamp - the post-burst hold returns to the
+    first sample, and keeping the two comparable keeps that hand-off small.
     """
     u = np.asarray(u, float).copy()
-    u[0] = 0.0
-    u[-1] = 0.0
+    u[0] = float(np.clip(u[0], -cap, cap))
+    u[-1] = float(np.clip(u[-1], -cap, cap))
     return u
 
 

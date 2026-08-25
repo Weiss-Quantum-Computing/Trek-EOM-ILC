@@ -125,5 +125,10 @@ class Limits:
     current: float = 2.0e-3           # A, 610E output current limit
     load_capacitance: float = 200e-12 # F, EOM + HV cable + strays -- MEASURE THIS
     hv_max: float = 6000.0            # EOM safe working voltage
+    idle_awg: float = 0.100           # V, cap on the record's first/last sample.
+                                      # The AWG holds the first sample between
+                                      # bursts, so this bounds the standing level
+                                      # on the EOM while letting the loop trim
+                                      # the chain's own idle offsets to zero.
 
 LIMITS = Limits()

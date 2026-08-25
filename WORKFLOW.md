@@ -213,12 +213,16 @@ Each writes two files per iteration — below, `<n>` is 1 or 2:
 | `drive_MKJX<n>_iter0.csv` | `EOM-ILC\run\` | `time_us,voltage_V`, the loop's own record |
 | `MKJX<n>_i00.csv` | **the AWG GUI's `Waveforms\`** | **the one to upload** — single column, normalised to ±1 |
 
-Every drive starts and ends at **exactly zero**: between bursts the AWG holds
-the record's first sample, so a nonzero first point would park the EOM at a
-standing DC level for the whole inter-burst gap. The loop pins both endpoints
-on every drive it emits (sub-mV nudges from the filter edges; DAC code 0
-exactly). If a drive file from anywhere else is uploaded, check its first
-line is 0 before letting the burst idle on it.
+Between bursts the AWG holds the record's **first sample**, so sample 0 sets
+the standing level on the EOM for the whole inter-burst gap. The rule here
+changed on 24 Aug: forcing it to file-zero turned out to fight the loop — the
+chain's own idle offsets (generator zero-code error + the preconditioning
+network) parked the EOMs at −9/−41 V anyway, and the entry transient could
+never converge. The loop now sets the first sample **freely within a ±100 mV
+cap at the AWG** (`Limits.idle_awg`), letting it trim the chain to a true-zero
+idle; the limit check prints the idle level on every drive. The last sample
+carries the same clamp. A drive file from anywhere else should keep its first
+line within the same ±100 mV before the burst idles on it.
 
 The upload file goes straight into the generator's own library at
 
