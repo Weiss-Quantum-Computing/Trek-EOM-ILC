@@ -10,6 +10,10 @@ Built around the two bench programs that already exist —
 whose instrument layers this imports rather than reimplementing, so there is no
 second copy of SCPI to keep in step.
 
+**Campaign write-up:** [REPORT.md](REPORT.md) — the 24–25 Aug 2026 report:
+fixing the measurement, the parametric era and its failure, the measured
+inverse, the final numbers, and the instrument catalog.
+
 ## The plant is second order
 
 This is the thing to know before anything else. The Trek 610E + EOM is a lightly
