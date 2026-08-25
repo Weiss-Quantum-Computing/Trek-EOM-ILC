@@ -94,6 +94,24 @@ TARGET_COLOUR = "#222222"
 PRED_COLOUR = "#8a8a8a"
 GHOST_ALPHA = 0.35
 
+# The model ladder: what the update divides the error by, in increasing order
+# of how much of the chain it knows about.  The first three are parametric
+# (eomilc.plant.Plant with the unused terms zeroed -- a gain-only Plant IS the
+# zeroth-order case); the last is the measured inverse, whose reach is set by
+# the taper band rather than by f_cut.
+MODEL_LABELS = (
+    ("gain only (0th order)", "static"),
+    ("one pole (1st order)", "one_pole"),
+    ("second order (resonant)", "resonant"),
+    ("measured FRF (nonparametric)", "frf"),
+)
+LABEL2KEY = dict(MODEL_LABELS)
+KEY2LABEL = {k: l for l, k in MODEL_LABELS}
+PARAMS_FOR = {"static": ("gain",), "one_pole": ("gain", "tau"),
+              "resonant": ("gain", "fn", "zeta"), "frf": ()}
+DESC_FOR = {"static": "gain only", "one_pole": "one pole",
+            "resonant": "2nd order"}
+
 
 # ---------------------------------------------------------------- session
 class Session:
@@ -207,6 +225,7 @@ class App:
                  state=self.state_var.get(), target=self.target_var.get(),
                  measured=self.meas_var.get(), frf=self.frf_var.get(),
                  f_use=self.fuse_var.get(), f_max=self.fmax_var.get(),
+                 model=self.model_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -285,29 +304,62 @@ class App:
         self.summary.grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 0))
         sf.columnconfigure(1, weight=1)
 
-        # ---- inverse -------------------------------------------------
-        vf = ttk.LabelFrame(left, text="Update inverse", padding=4)
+        # ---- inverse model -------------------------------------------
+        vf = ttk.LabelFrame(left, text="Inverse model (what the update "
+                                       "divides the error by)", padding=4)
         vf.pack(fill="x", pady=(0, 4))
-        self.use_frf_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(vf, text="use measured FRF (else parametric lead, "
-                                 "confined to f_cut)",
-                        variable=self.use_frf_var).grid(
-            row=0, column=0, columnspan=4, sticky="w")
+        self.model_var = tk.StringVar(
+            value=self.cfg.get("model", KEY2LABEL["frf"]))
+        if self.model_var.get() not in LABEL2KEY:
+            self.model_var.set(KEY2LABEL["frf"])
+        r0 = ttk.Frame(vf); r0.grid(row=0, column=0, columnspan=4, sticky="ew")
+        ttk.Label(r0, text="Model").pack(side="left")
+        mc = ttk.Combobox(r0, textvariable=self.model_var, state="readonly",
+                          width=30, values=[l for l, _ in MODEL_LABELS])
+        mc.pack(side="left", padx=(2, 0))
+        mc.bind("<<ComboboxSelected>>", lambda e: self._update_model_fields())
+
+        r1 = ttk.Frame(vf); r1.grid(row=1, column=0, columnspan=4,
+                                    sticky="ew", pady=1)
+        self.pgain_var = tk.StringVar()
+        self.ptau_var = tk.StringVar()
+        self.pfn_var = tk.StringVar()
+        self.pzeta_var = tk.StringVar()
+        self._param_vars = {"gain": self.pgain_var, "tau": self.ptau_var,
+                            "fn": self.pfn_var, "zeta": self.pzeta_var}
+        self._param_entries = {}
+        for lab, key, w in (("gain", "gain", 7), ("tau us", "tau", 6),
+                            ("fn Hz", "fn", 6), ("zeta", "zeta", 6)):
+            ttk.Label(r1, text=lab).pack(side="left", padx=(0, 2))
+            e = ttk.Entry(r1, textvariable=self._param_vars[key], width=w)
+            e.pack(side="left", padx=(0, 8))
+            self._param_entries[key] = e
+
+        r2 = ttk.Frame(vf); r2.grid(row=2, column=0, columnspan=4,
+                                    sticky="ew", pady=(2, 1))
+        b = ttk.Button(r2, text="From calibration", command=self.do_calib)
+        b.pack(side="left", fill="x", expand=True)
+        self._actions.append(b)
+        b = ttk.Button(r2, text="Fit from measurement", command=self.do_fit)
+        b.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self._actions.append(b)
+
         self.frf_var = tk.StringVar(value=self.cfg.get("frf", ""))
-        self._path_row(vf, 1, "FRF", self.frf_var,
+        self._path_row(vf, 3, "FRF", self.frf_var,
                        lambda: self._browse(self.frf_var, "FRF CSV",
                                             "frf_*.csv", RUN_DIR))
-        r2 = ttk.Frame(vf); r2.grid(row=2, column=0, columnspan=4, sticky="ew")
+        r4 = ttk.Frame(vf); r4.grid(row=4, column=0, columnspan=4, sticky="ew")
         self.fuse_var = tk.StringVar(value=self.cfg.get("f_use", "50e3"))
         self.fmax_var = tk.StringVar(value=self.cfg.get("f_max", "75e3"))
-        ttk.Label(r2, text="full strength to Hz").pack(side="left")
-        ttk.Entry(r2, textvariable=self.fuse_var, width=7).pack(side="left", padx=(2, 8))
-        ttk.Label(r2, text="taper to zero at Hz").pack(side="left")
-        ttk.Entry(r2, textvariable=self.fmax_var, width=7).pack(side="left", padx=2)
-        b = ttk.Button(r2, text="Show FRF", command=self.do_show_frf)
+        ttk.Label(r4, text="full strength to Hz").pack(side="left")
+        ttk.Entry(r4, textvariable=self.fuse_var, width=7).pack(side="left", padx=(2, 8))
+        ttk.Label(r4, text="taper to zero at Hz").pack(side="left")
+        ttk.Entry(r4, textvariable=self.fmax_var, width=7).pack(side="left", padx=2)
+        b = ttk.Button(r4, text="Show FRF", command=self.do_show_frf)
         b.pack(side="right")
         self._actions.append(b)
         vf.columnconfigure(1, weight=1)
+        self._update_model_fields()
 
         # ---- manual step ---------------------------------------------
         mf = ttk.LabelFrame(left, text="Step from captured files", padding=4)
@@ -511,6 +563,130 @@ class App:
             p = os.path.join(RUN_DIR, d["frf"])
             self.frf_var.set(p if os.path.exists(p) else "")
 
+    # -------------------------------------------------------- model ladder
+    def _model_key(self):
+        return LABEL2KEY.get(self.model_var.get(), "frf")
+
+    def _update_model_fields(self):
+        """Only the parameters the selected model actually has are editable --
+        a greyed box says 'this model does not know about that'."""
+        need = PARAMS_FOR[self._model_key()]
+        for key, e in self._param_entries.items():
+            e.configure(state="normal" if key in need else "disabled")
+
+    def _set_param_entries(self, p):
+        """Plant -> panel entries (blank = the term is absent from p)."""
+        self.pgain_var.set(f"{p.gain:.4f}")
+        self.ptau_var.set(f"{p.tau*1e6:.2f}" if p.tau > 0 else "")
+        self.pfn_var.set(f"{p.fn:.0f}" if p.fn > 0 else "")
+        self.pzeta_var.set(f"{p.zeta:.3f}" if p.zeta > 0 else "")
+
+    def _entry_params(self, key, strict):
+        """Panel entries for model `key` -> dict.  strict=False returns None
+        on any blank entry (caller falls back to calibration); strict=True
+        raises with a hint at the two fill buttons."""
+        vals = {}
+        for k in PARAMS_FOR[key]:
+            txt = self._param_vars[k].get().strip()
+            if not txt:
+                if not strict:
+                    return None
+                raise RuntimeError(
+                    f"'{k}' is blank for the {KEY2LABEL[key]} model -- type a "
+                    f"value, or use From calibration / Fit from measurement")
+            try:
+                vals[k] = float(txt)
+            except ValueError:
+                raise RuntimeError(f"{k} is not a number: {txt!r}")
+        if "gain" in vals and vals["gain"] <= 0:
+            raise RuntimeError("gain must be positive")
+        if "tau" in vals and vals["tau"] <= 0:
+            raise RuntimeError("tau must be positive (it is in microseconds)")
+        if "fn" in vals and vals["fn"] <= 0:
+            raise RuntimeError("fn must be positive")
+        if "zeta" in vals and vals["zeta"] <= 0:
+            raise RuntimeError("zeta must be positive")
+        return vals
+
+    def _plant_from(self, params, dt, offset=0.0):
+        return plantmod.Plant(gain=params["gain"],
+                              tau=params.get("tau", 0.0) * 1e-6,
+                              fn=params.get("fn", 0.0),
+                              zeta=params.get("zeta", 0.0),
+                              offset=offset, dt=dt)
+
+    def do_calib(self):
+        """Fill the parameter boxes from the measured calibration tables at
+        the amplitude actually in use -- fn falls with drive (the EOM
+        capacitance is voltage dependent), so the amplitude matters."""
+        try:
+            if self.session is not None:
+                ch = CHANNELS[self.session.channel]
+                amp = float(np.ptp(self.session.loop.target))
+            else:
+                tpath = self.target_var.get().strip()
+                if not os.path.exists(tpath):
+                    raise RuntimeError(
+                        "load a session or set a target file first -- the "
+                        "tables are amplitude-dependent, so the target sets "
+                        "which row applies")
+                _, v = run_ilc.load_target(tpath)
+                ch = CHANNELS[self.channel_var.get()]
+                amp = float(np.ptp(v))
+        except RuntimeError as e:
+            return messagebox.showerror("From calibration", str(e))
+        self.pgain_var.set(f"{ch.gain(amp):.4f}")
+        self.ptau_var.set(f"{ch.tau(amp)*1e6:.2f}")
+        self.pfn_var.set(f"{ch.fn(amp):.0f}")
+        self.pzeta_var.set(f"{ch.zeta(amp):.3f}")
+        self.log(f"calibration at {amp*HV_PER_MON:.0f} V pk-pk ({ch.name}): "
+                 f"gain {ch.gain(amp):.4f}, tau {ch.tau(amp)*1e6:.2f} us "
+                 f"(one-pole), fn {ch.fn(amp):.0f} Hz, zeta {ch.zeta(amp):.3f} "
+                 f"(tables measured 2026-08-20/21)")
+
+    def do_fit(self):
+        """Identify the selected parametric model from real data: the last
+        measured iteration if there is one, else the capture glob."""
+        key = self._model_key()
+        if key == "frf":
+            return messagebox.showinfo(
+                "Fit from measurement",
+                "The measured FRF is not fitted here -- build one with "
+                "tools/sysid_make.py (Schroeder probe) and tools/sysid_fit.py "
+                "(64-shot sequence -> run\\frf_<name>.csv), then browse to it.")
+        if self.session is None:
+            return messagebox.showerror("Fit", "load or init a session first")
+        pattern = self.meas_var.get().strip()
+        mon = self.moncol_var.get()
+        self.run_worker(lambda: self._fit_work(key, pattern, mon),
+                        "fitting plant from measurement...")
+
+    def _fit_work(self, model_key, pattern, mon):
+        s = self.session
+        if s.snapshots:
+            snap = s.snapshots[-1]
+            y, src = snap["y"], f"the iteration-{snap['it']} measurement"
+        elif pattern:
+            y, files = read_captures(pattern, mon, s.t, s.t_off)
+            src = f"{len(files)} capture(s) matching the glob"
+        else:
+            raise RuntimeError(
+                "nothing to fit from: run an iteration, load a state with "
+                "meas_*.npy beside it, or set the capture glob")
+        p2, info = plantmod.identify(s.u, y, s.loop.dt, model=model_key)
+        print(f"fit ({KEY2LABEL[model_key]}) from {src}:")
+        print(f"  {p2}")
+        print(f"  residual {info['resid_peak_pct']:.2f}% peak / "
+              f"{info['resid_rms_pct']:.2f}% rms of span -- what this model "
+              f"form cannot explain about the measured response")
+        it = s.snapshots[-1]["it"] if s.snapshots else s.iteration
+        self.msgs.put(("call", lambda: self._after_fit(p2, y, it)))
+
+    def _after_fit(self, p, y, it):
+        self._set_param_entries(p)
+        self._plot_waveforms(self.session.u, y, p.forward(self.session.u), it)
+        self.nb.select(0)
+
     def do_load(self):
         path = self.state_var.get().strip()
         if not path:
@@ -526,6 +702,7 @@ class App:
         self.fcut_var.set(f"{s.loop.f_cut:g}")
         self.toff_var.set(f"{s.t_off*1e6:g}")
         self.fs_var.set(f"{s.full_scale:g}")
+        self._set_param_entries(s.loop.plant)
         self._apply_channel_defaults(s.channel)
         self.log(f"loaded {path}")
         self.log(f"  {s.channel} iteration {s.iteration}, stem {s.stem}, "
@@ -575,7 +752,21 @@ class App:
         t, v = run_ilc.load_target(target)
         dt = float(np.median(np.diff(t)))
         ch = CHANNELS[chname]
-        plant = ch.plant(float(np.ptp(v)), dt, model="resonant")
+        # The first shot needs a parametric plant even when the loop will run
+        # on the measured FRF -- the campaign recipe: resonant seed (its group
+        # delay is right), FRF takes over from the first step.
+        mode = self._model_key()
+        seed_key = "resonant" if mode == "frf" else mode
+        try:
+            params = self._entry_params(seed_key, strict=False)
+        except RuntimeError as e:
+            return messagebox.showerror("Init", str(e))
+        if params is not None:
+            plant = self._plant_from(params, dt)
+            seed_src = "from the panel entries"
+        else:
+            plant = ch.plant(float(np.ptp(v)), dt, model=seed_key)
+            seed_src = "from the calibration tables"
         loop = ilc.Loop(plant=plant, target=v, dt=dt, channel=ch,
                         gamma=f["gamma"], f_cut=f["f_cut"])
         u = loop.first_shot()
@@ -597,7 +788,12 @@ class App:
         self.state_var.set(state_path)
         self._apply_channel_defaults(chname)
 
-        self.log(f"init {chname}: {plant}")
+        self._set_param_entries(plant)
+        self.log(f"init {chname} ({KEY2LABEL[seed_key]} seed {seed_src}): "
+                 f"{plant}")
+        if mode == "frf":
+            self.log("  first shot is parametric; the measured FRF takes "
+                     "over at the first step")
         self.log(f"  target {np.ptp(v)*HV_PER_MON:.0f} V pk-pk over "
                  f"{t[-1]*1e3:.2f} ms, {len(v)} points at {dt*1e6:.3f} us")
         self.log(f"  uncorrected : peak error "
@@ -636,14 +832,17 @@ class App:
         worker needs is collected here and handed over as floats and strings."""
         cfg = self._floats(gamma=self.gamma_var, f_cut=self.fcut_var,
                            t_offset_us=self.toff_var)
-        cfg["use_frf"] = self.use_frf_var.get()
+        cfg["mode"] = self._model_key()
         cfg["frf_path"] = self.frf_var.get().strip()
-        if cfg["use_frf"]:
+        if cfg["mode"] == "frf":
             if not cfg["frf_path"]:
-                raise RuntimeError("'use measured FRF' is ticked but no FRF "
-                                   "file is set -- browse to "
-                                   "run\\frf_WIDE_<ch>.csv or untick it")
+                raise RuntimeError("the measured-FRF model needs an FRF file "
+                                   "-- browse to run\\frf_WIDE_<ch>.csv, or "
+                                   "make one with tools/sysid_make.py + "
+                                   "tools/sysid_fit.py")
             cfg.update(self._floats(f_use=self.fuse_var, f_max=self.fmax_var))
+        else:
+            cfg["params"] = self._entry_params(cfg["mode"], strict=True)
         return cfg
 
     def _apply_settings(self, cfg):
@@ -662,18 +861,25 @@ class App:
             print(f"t-offset {s.t_off*1e6:g} -> {t_off*1e6:g} us -- measured 0 "
                   f"on this bench; change it only if the trigger wiring changed")
             s.t_off = t_off
-        if not cfg["use_frf"]:
-            if s.loop.frf is not None:
-                print(f"FRF off -- parametric lead, confined to f_cut "
-                      f"{s.loop.f_cut/1e3:g} kHz")
-            s.loop.frf = None
-        else:
+        if cfg["mode"] == "frf":
             s.loop.frf = ilc.FRF(cfg["frf_path"], f_use=cfg["f_use"],
                                  f_max=cfg["f_max"])
             print(f"update uses the measured inverse from "
                   f"{os.path.basename(cfg['frf_path'])} "
                   f"({s.loop.frf.f[0]:.0f}-{s.loop.frf.f[-1]:.0f} Hz, "
                   f"taper {cfg['f_use']/1e3:g}-{cfg['f_max']/1e3:g} kHz)")
+            cfg["desc"] = (f"FRF {cfg['f_use']/1e3:g}-{cfg['f_max']/1e3:g}k")
+        else:
+            if s.loop.frf is not None:
+                print(f"FRF off -- {KEY2LABEL[cfg['mode']]} lead, confined to "
+                      f"f_cut {s.loop.f_cut/1e3:g} kHz")
+            s.loop.frf = None
+            old = s.loop.plant
+            new = self._plant_from(cfg["params"], s.loop.dt, offset=old.offset)
+            if repr(new) != repr(old):
+                print(f"plant -> {new}")
+            s.loop.plant = new
+            cfg["desc"] = DESC_FOR[cfg["mode"]]
 
     def _write_iteration(self, wname):
         """Drive CSV in run\\, GUI-previewable copy in the AWG library --
@@ -724,15 +930,19 @@ class App:
 
         it = s.iteration
         m = s.loop.metrics(y)
+        m["model"] = cfg["desc"]
         print(f"iteration {it}: error peak {m['peak_err_hv']:7.1f} V   "
               f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
         if refit:
-            p2, info = plantmod.identify(s.u, y, s.loop.dt)
-            print(f"refit plant: {p2}  (residual {info['resid_peak_pct']:.2f}% peak)")
+            fit_key = cfg["mode"] if cfg["mode"] != "frf" else "resonant"
+            p2, info = plantmod.identify(s.u, y, s.loop.dt, model=fit_key)
+            print(f"refit plant ({KEY2LABEL[fit_key]}): {p2}  "
+                  f"(residual {info['resid_peak_pct']:.2f}% peak)")
             s.loop.plant = p2
 
         u_prev = s.u
         u_next = s.loop.update(s.u, y)
+        s.loop.history[-1]["model"] = cfg["desc"]
         rep = s.loop.check(u_next)
         print(f"limit check: {rep}")
         if not rep and not force:
@@ -847,6 +1057,7 @@ class App:
                                         repeats, wait_s)
                 np.save(os.path.join(RUN_DIR, f"meas_{wname}.npy"), y)
                 m = s.loop.metrics(y)
+                m["model"] = cfg["desc"]
                 print(f"         error: peak {m['peak_err_hv']:7.1f} V   "
                       f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
                 s.snapshots.append(dict(it=k, y=y, m=m))
@@ -857,6 +1068,7 @@ class App:
                                 self._show_iteration(u, y, m, k))))
                 if k < k0 + iterations and not self.stop_evt.is_set():
                     u = s.loop.update(u, y)
+                    s.loop.history[-1]["model"] = cfg["desc"]
                     s.u = u
                     s.iteration = k + 1
                     save_session(s)
@@ -959,11 +1171,15 @@ class App:
         ax.clear()
         prev = next((sn for sn in reversed(s.snapshots)
                      if sn["it"] < it and len(sn["y"]) == len(s.t)), None)
+        def tag(n, mm):
+            d = mm.get("model") if isinstance(mm, dict) else None
+            return f"iter {n} ({d})" if d else f"iter {n}"
+
         if prev is not None:
             ax.plot(tms, (s.loop.target - prev["y"]) * HV_PER_MON, color=c,
-                    lw=0.8, alpha=GHOST_ALPHA, label=f"iter {prev['it']}")
+                    lw=0.8, alpha=GHOST_ALPHA, label=tag(prev["it"], prev["m"]))
         e_hv = (s.loop.target - y) * HV_PER_MON
-        ax.plot(tms, e_hv, color=c, lw=0.9, label=f"iter {it}")
+        ax.plot(tms, e_hv, color=c, lw=0.9, label=tag(it, m))
         ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
         ax.set_xlabel("time (ms)")
         ax.set_ylabel("error at the EOM (V)")
@@ -1023,6 +1239,20 @@ class App:
                         lw=0.8, ms=3, alpha=0.6, label="rms error")
             ax.set_xticks(k)
             ax.legend(loc="best", fontsize=7)
+            # mark where the inverse model changed -- the point of stepping
+            # through the model ladder is seeing these transitions
+            prev = None
+            for i, m in enumerate(hist):
+                d = m.get("model") if isinstance(m, dict) else None
+                if d and d != prev:
+                    if prev is not None:
+                        ax.axvline(i - 0.5, color="#8a8a8a", lw=0.7, ls=":")
+                    ax.annotate(d, (i, 0.98),
+                                xycoords=("data", "axes fraction"),
+                                fontsize=6.5, color="#666666",
+                                ha="left", va="top", rotation=0)
+                if d:
+                    prev = d
         else:
             ax.text(0.5, 0.5, "no iterations yet", ha="center", va="center",
                     transform=ax.transAxes, color="#888888")
@@ -1046,7 +1276,7 @@ class App:
         for ax in self.ax_frf:
             ax.clear()
         axm.loglog(d["f_Hz"][ok], d["H_mag"][ok], "o-", ms=3, lw=0.9,
-                   color="#1f77b4")
+                   color="#1f77b4", label="measured")
         axm.loglog(d["f_Hz"][~ok], d["H_mag"][~ok], "o", ms=3, mfc="none",
                    color="#c62828", label="coherence < 0.9 (dropped)")
         axm.set_ylabel("|H| (mon V / AWG V)")
@@ -1054,6 +1284,31 @@ class App:
         ph = np.degrees(np.unwrap(np.radians(d["H_phase_deg"][ok].to_numpy())))
         axp.semilogx(d["f_Hz"][ok], ph, "o-", ms=3, lw=0.9, color="#1f77b4")
         axp.set_ylabel("phase, unwrapped (deg)")
+
+        # Overlay the current parametric model, if one is selected and filled
+        # in: this is the model-vs-chain comparison that decided the campaign
+        # (see docs/REPORT.md section 5) and it is what shows how much each
+        # rung of the model ladder explains.
+        key = self._model_key()
+        overlay = None
+        if key != "frf":
+            try:
+                overlay = self._entry_params(key, strict=False)
+            except RuntimeError:
+                overlay = None
+        if overlay:
+            fg = d["f_Hz"].to_numpy(float)
+            w = 2j * np.pi * fg
+            H = np.full(fg.shape, overlay["gain"], complex)
+            if "tau" in overlay:
+                H = H / (1 + w * overlay["tau"] * 1e-6)
+            if "fn" in overlay:
+                wn = 2 * np.pi * overlay["fn"]
+                H = H * wn ** 2 / (w ** 2 + 2 * overlay["zeta"] * wn * w + wn ** 2)
+            axm.loglog(fg, np.abs(H), "--", lw=1.1, color="#c68000",
+                       label=f"model: {DESC_FOR[key]}")
+            axp.semilogx(fg, np.degrees(np.unwrap(np.angle(H))), "--",
+                         lw=1.1, color="#c68000")
         axc.semilogx(d["f_Hz"], d["coherence"], "o-", ms=3, lw=0.9,
                      color="#2e7d32")
         axc.axhline(0.9, color="#c62828", lw=0.7, ls=":")
@@ -1062,7 +1317,7 @@ class App:
         for ax in self.ax_frf:
             ax.axvspan(f["f_use"], f["f_max"], color="#c68000", alpha=0.15)
             ax.grid(True, which="both", alpha=0.3)
-        if (~ok).any():
+        if (~ok).any() or overlay:
             axm.legend(loc="best", fontsize=7)
         self.fig_frf._canvas.draw_idle()
         self.nb.select(4)

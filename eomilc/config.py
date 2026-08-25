@@ -81,6 +81,10 @@ class Channel:
                          fn=self.fn(amplitude_mon), zeta=self.zeta(amplitude_mon))
         if model == "one_pole":
             return Plant(gain=self.gain(amplitude_mon), tau=self.tau(amplitude_mon), dt=dt)
+        if model == "static":
+            # gain and nothing else -- the zeroth-order rung of the model
+            # ladder.  Knows the level, misses all 28 us of lag.
+            return Plant(gain=self.gain(amplitude_mon), dt=dt)
         raise ValueError(f"no calibration table for model {model!r}; "
                          f"fit one with plant.identify()")
 

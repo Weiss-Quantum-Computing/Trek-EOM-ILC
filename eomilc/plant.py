@@ -104,7 +104,7 @@ class Plant:
         return s + f", offset={self.offset*1e3:.2f} mV)"
 
 
-MODELS = ("resonant", "one_pole", "two_pole")
+MODELS = ("resonant", "one_pole", "two_pole", "static")
 
 
 def identify(u: np.ndarray, y: np.ndarray, dt: float,
@@ -133,6 +133,9 @@ def identify(u: np.ndarray, y: np.ndarray, dt: float,
         if model == "two_pole":
             g, tau, tau2, off = p
             return Plant(gain=g, tau=max(tau, dt), offset=off, tau2=max(tau2, 0.0), dt=dt)
+        if model == "static":
+            g, off = p
+            return Plant(gain=g, offset=off, dt=dt)
         g, tau, off = p
         return Plant(gain=g, tau=max(tau, dt), offset=off, dt=dt)
 
@@ -143,6 +146,8 @@ def identify(u: np.ndarray, y: np.ndarray, dt: float,
         p0, xs = [g0, 2500.0, 0.22, 0.0], [0.1, 500.0, 0.05, 1e-3]
     elif model == "two_pole":
         p0, xs = [g0, 25e-6, 5e-6, 0.0], [0.1, 5e-6, 5e-6, 1e-3]
+    elif model == "static":
+        p0, xs = [g0, 0.0], [0.1, 1e-3]
     else:
         p0, xs = [g0, 25e-6, 0.0], [0.1, 5e-6, 1e-3]
 
