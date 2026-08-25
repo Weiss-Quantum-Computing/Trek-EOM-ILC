@@ -35,9 +35,13 @@ from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
 # The AWG GUI lists and previews whatever lives in its Waveforms folder, so a
 # drive written there shows up in the memory list without being moved by hand.
 # WAVE_CACHE in bk4063b_awg_gui.py is <that repo>/Waveforms; keep these in step.
+# The bench repos live side by side (currently under Desktop\Python Projects),
+# so siblings are found relative to this repo rather than by absolute path --
+# the whole folder has moved once already and absolute defaults went stale.
+SIBLINGS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AWG_WAVEFORMS = os.environ.get(
     "BK4063B_WAVEFORMS",
-    r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms")
+    os.path.join(SIBLINGS, "BK4063B-AWG-GUI", "Waveforms"))
 
 
 # --------------------------------------------------------------------- utils

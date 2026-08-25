@@ -274,7 +274,7 @@ line within the same ±100 mV before the burst idles on it.
 The upload file goes straight into the generator's own library at
 
 ```
-C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms
+C:\Users\mzd416\Desktop\Python Projects\BK4063B-AWG-GUI\Waveforms
 ```
 
 named exactly as the AWG waveform it becomes, so it appears in the GUI's
@@ -306,7 +306,7 @@ Then, per channel:
    Leave the output directory where you already have it:
 
    ```
-   C:\Users\mzd416\Desktop\scope_data\EOM ramps day 4
+   C:\Users\mzd416\Desktop\Python Projects\scope_data\EOM ramps day 4
    ```
 
    That keeps raw captures out of the repo, which is what `run/` being
@@ -315,11 +315,11 @@ Then, per channel:
    `--mon-col`:
 
    ```powershell
-   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "C:\Users\mzd416\Desktop\scope_data\EOM ramps day 4\ilc_i00*.csv" --mon-col CH3 --t-offset 0
+   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "C:\Users\mzd416\Desktop\Python Projects\scope_data\EOM ramps day 4\ilc_i00*.csv" --mon-col CH3 --t-offset 0
    ```
 
    ```powershell
-   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX2.state.npz --measured "C:\Users\mzd416\Desktop\scope_data\EOM ramps day 4\ilc_i00*.csv" --mon-col CH4 --t-offset 0
+   C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX2.state.npz --measured "C:\Users\mzd416\Desktop\Python Projects\scope_data\EOM ramps day 4\ilc_i00*.csv" --mon-col CH4 --t-offset 0
    ```
 
    Each writes `run\drive_MKJX<n>_iter1.csv` and its `_awg.csv` pair.

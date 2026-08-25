@@ -239,18 +239,21 @@ def main():
     # 5 kHz: the model is only trusted below ~5 kHz on this bench (see run_ilc)
     ap.add_argument("--f-cut", type=float, default=5e3)
     ap.add_argument("--outdir", default="run")
+    # sibling repos found relative to this one -- see run_ilc.SIBLINGS
+    siblings = os.path.dirname(HERE)
     ap.add_argument("--scope-grab",
                     default=os.environ.get(
                         "SCOPE_GRAB",
-                        r"C:\Users\mzd416\Desktop\scope-grab\scope_grab.py"))
+                        os.path.join(siblings, "scope-grab", "scope_grab.py")))
     ap.add_argument("--awg-gui",
                     default=os.environ.get(
                         "AWG_GUI",
-                        r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\bk4063b_awg_gui.py"))
+                        os.path.join(siblings, "BK4063B-AWG-GUI",
+                                     "bk4063b_awg_gui.py")))
     ap.add_argument("--awg-dir",
                     default=os.environ.get(
                         "BK4063B_WAVEFORMS",
-                        r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms"),
+                        os.path.join(siblings, "BK4063B-AWG-GUI", "Waveforms")),
                     help="where the GUI-previewable copy of each uploaded drive "
                          "is written, like the manual loop does")
     ap.add_argument("--frf", default=None, metavar="FRF.CSV",

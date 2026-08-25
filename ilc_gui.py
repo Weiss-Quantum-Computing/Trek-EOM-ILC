@@ -73,6 +73,7 @@ CONFIG_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
                            "EOM-ILC-GUI", "config.json")
 
 RUN_DIR = os.path.join(HERE, "run")
+SIBLINGS = os.path.dirname(HERE)               # the folder holding all the bench repos
 AWG_WAVEFORMS = run_ilc.AWG_WAVEFORMS          # env-overridable, one definition
 
 # The stored-name cap on the 4063B (15 chars for <name>.bin, so 11 typed;
@@ -476,7 +477,7 @@ class App:
         p = filedialog.askopenfilename(
             title="One file of the capture sequence",
             initialdir=os.path.dirname(self.meas_var.get())
-            or r"C:\Users\mzd416\Desktop\scope_data",
+            or os.path.join(SIBLINGS, "scope_data"),
             filetypes=(("Scope CSV", "*.csv"), ("All files", "*.*")))
         if p:
             g = re.sub(r"_\d+\.csv$", "*.csv", p)
@@ -982,9 +983,11 @@ class App:
     def _bench_modules(self):
         if self._modules is None:
             sg = os.environ.get("SCOPE_GRAB",
-                                r"C:\Users\mzd416\Desktop\scope-grab\scope_grab.py")
+                                os.path.join(SIBLINGS, "scope-grab",
+                                             "scope_grab.py"))
             ag = os.environ.get("AWG_GUI",
-                                r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\bk4063b_awg_gui.py")
+                                os.path.join(SIBLINGS, "BK4063B-AWG-GUI",
+                                             "bk4063b_awg_gui.py"))
             print(f"instrument layers: {sg}")
             print(f"                   {ag}")
             self._modules = (ilc_bench.load_module(sg, "scope_grab"),

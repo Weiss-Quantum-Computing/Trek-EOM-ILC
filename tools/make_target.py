@@ -22,7 +22,9 @@ from eomilc.config import CHANNELS, HV_PER_MON
 
 DEFAULT_SRC = os.environ.get(
     "MKJ_FULL",
-    r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms\MKJ_full.csv")
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))),          # the folder holding the repos
+        "BK4063B-AWG-GUI", "Waveforms", "MKJ_full.csv"))
 SRC_PERIOD = 0.010602        # s, from C1:BSWV PERI -- the played length
 
 

@@ -73,7 +73,8 @@ def main():
     ap.add_argument("--awg-dir",
                     default=os.environ.get(
                         "BK4063B_WAVEFORMS",
-                        r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms"))
+                        os.path.join(os.path.dirname(ROOT),
+                                     "BK4063B-AWG-GUI", "Waveforms")))
     a = ap.parse_args()
 
     name = a.name or f"SYSID{a.peak:g}".replace(".", "p")[:11]

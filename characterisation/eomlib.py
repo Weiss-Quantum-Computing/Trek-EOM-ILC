@@ -4,7 +4,9 @@ import numpy as np, os, re, glob
 # Point EOM_RAMPS_DIR at wherever they live before running any of these.
 ROOT = os.environ.get(
     "EOM_RAMPS_DIR",
-    r"C:\Users\mzd416\Desktop\scope_data\EOM ramps day 3")
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))),          # the folder holding the repos
+        "scope_data", "EOM ramps day 3"))
 
 def load(path):
     with open(path) as f:
