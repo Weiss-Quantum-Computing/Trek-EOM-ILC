@@ -76,24 +76,31 @@ reason to.
     u_native = outputs.resample_points(u, 106020)   # if you ever need it
 
 Decimating MKJ_full 20:1 costs 3.2 V peak / 1.3 V rms at the EOM against the
-0.1 µs source — 0.06% of full scale, comfortably under the ~5 V floor that
-256-average 8-bit capture sets anyway.
+0.1 µs source — 0.06% of full scale. That was comfortably under the ~5 V floor
+of the 256-average era; the HRES scheme's 0.5–1 V floor and the campaign's
+2.4 V final residual have since caught up with it. It still doesn't bite,
+though: the loop tracks the decimated target *exactly*, so the departure is
+versus the 0.1 µs source shape — not an error the loop sees or chases.
 
-Why not learn at 10 MSa/s directly: the plant's time constant is 28 µs and the Q
-filter cuts at 20 kHz, so there is nothing above ~20 kHz to learn. The scope
-samples at 160 ns, so interpolating measurements up to a 100 ns grid invents
-structure that isn't there. And every iteration would write a 106020-line file
-for no gain.
+Why not learn at 10 MSa/s directly: the 2 µs grid's Nyquist is 250 kHz,
+comfortably above the 75 kHz the measured-inverse campaign ended up correcting
+to. (The "20 kHz Q filter" ceiling this note originally cited belonged to the
+parametric era and is long superseded — see REPORT.md — but the conclusion
+survives the change.) The scope samples at 160 ns, so interpolating
+measurements up to a 100 ns grid invents structure that isn't there. And every
+iteration would write a 106020-line file for no gain.
 
 Worst case if the generator zero-order-holds between stored points rather than
 interpolating: at the 5301-point / 2 µs record the steepest part steps by about
-**6.6 V** at the EOM (peak slew 3.30 V/µs at 5200 V). That is marginally *above*
-the ~5 V loop floor, where the 1 µs version's 3.3 V sat below it.
+**6.6 V** at the EOM (peak slew 3.30 V/µs at 5200 V) — well above the 0.5–1 V
+measurement floor and the 2.4 V residual the campaign reached.
 
-**Worth one look on the scope before trusting it** — zoom the steepest part of the
-up leg and see whether the monitor shows steps or a smooth ramp. If it steps,
-either move to a 1 µs grid or resample up to 106020 on upload. If it interpolates,
-as expected, none of this matters.
+**Answered 25 Aug: it interpolates.** The wide-probe detail capture (REPORT.md,
+"the wide probe as actually played") shows the generator reconstructing
+smoothly between the stored 2 µs samples — its reconstruction *attenuates* the
+fastest content rather than stepping — and the corrected ramps' 2.4 V peak
+residual is incompatible with 6.6 V ZOH steps at the steep sections. No grid
+change needed.
 
 ## Two things to expect
 
