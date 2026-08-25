@@ -106,6 +106,7 @@ class Loop:
                                         # right model, or with gamma.
     limits: Limits = field(default_factory=lambda: LIMITS)
     history: list = field(default_factory=list)
+    frf: "FRF | None" = None            # measured inverse; see class FRF
 
     # ---------------------------------------------------------------- drives
     def first_shot(self) -> np.ndarray:
@@ -127,7 +128,13 @@ class Loop:
         d2/dt2 is larger than the correction it is meant to carry.
         """
         e = smooth(self.target - y_k, self.dt, self.f_cut)
-        u_next = smooth(u_k + self.gamma * self.plant.lead(e), self.dt, self.f_cut)
+        if self.frf is not None:
+            # measured inverse: its own taper bounds the band, so the Q filter
+            # does not have to strangle the update to protect a wrong model
+            u_next = u_k + self.frf.lead(e, self.dt, self.gamma)
+        else:
+            u_next = smooth(u_k + self.gamma * self.plant.lead(e),
+                            self.dt, self.f_cut)
         self.history.append(self.metrics(y_k))
         return _limit_ends(u_next)
 
@@ -153,6 +160,59 @@ class Loop:
         for i, m in enumerate(self.history):
             w.append(f"{i:>4}   {m['peak_err_hv']:7.1f} V   {m['rms_err_hv']:7.2f} V   {m['peak_pct']:6.2f}%")
         return "\n".join(w)
+
+
+class FRF:
+    """A measured transfer function, used as a nonparametric inverse.
+
+    Born 2026-08-24, when a multitone measurement showed the chain has NO
+    resonant peak at operating-signal levels: the second-order model's Q=2.4
+    peak at 2.3-2.9 kHz is a large-signal artifact of the ramp fits, and
+    inverting that fictitious peak is what stalled the loop at 3-6 kHz (0.65x
+    magnitude at +49 degrees of phase error in-band). Dividing the error by
+    the MEASURED response sidesteps the model question entirely, in whatever
+    band the measurement is coherent.
+
+    Loads the CSV sysid_fit writes. The inverse is regularised two ways:
+    tones below `min_coherence` are dropped, and the correction band is
+    tapered to zero between `f_use` and `f_max` with a raised cosine so the
+    update never acts where nothing was measured.
+    """
+
+    def __init__(self, path, min_coherence=0.9, f_use=15e3, f_max=22e3):
+        import pandas as pd
+        d = pd.read_csv(path)
+        m = d["coherence"].to_numpy() >= min_coherence
+        self.f = d["f_Hz"].to_numpy()[m]
+        H = (d["H_mag"].to_numpy() *
+             np.exp(1j * np.radians(d["H_phase_deg"].to_numpy())))[m]
+        self.logmag = np.log(np.abs(H))
+        self.phase = np.unwrap(np.angle(H))
+        self.f_use, self.f_max = f_use, f_max
+        self.path = str(path)
+
+    def interp(self, f):
+        """H at arbitrary frequencies: log-magnitude and unwrapped phase,
+        both linearly interpolated in log-f, held flat outside the tones."""
+        lf = np.log(np.clip(f, self.f[0] * 0.5, None))
+        src = np.log(self.f)
+        mag = np.exp(np.interp(lf, src, self.logmag))
+        ph = np.interp(lf, src, self.phase)
+        return mag * np.exp(1j * ph)
+
+    def lead(self, e, dt, gamma=1.0):
+        """gamma * IFFT( taper(f) * E(f) / H(f) ) -- the measured inverse."""
+        n = len(e)
+        E = np.fft.rfft(e)
+        f = np.fft.rfftfreq(n, dt)
+        H = self.interp(np.where(f > 0, f, self.f[0]))
+        H[0] = np.abs(self.interp(np.array([self.f[0]])))[0]   # DC: real gain
+        taper = np.ones_like(f)
+        band = (f >= self.f_use) & (f <= self.f_max)
+        taper[band] = 0.5 * (1 + np.cos(np.pi * (f[band] - self.f_use)
+                                        / (self.f_max - self.f_use)))
+        taper[f > self.f_max] = 0.0
+        return gamma * np.fft.irfft(taper * E / H, n=n)
 
 
 def _limit_ends(u: np.ndarray, cap: float = LIMITS.idle_awg) -> np.ndarray:

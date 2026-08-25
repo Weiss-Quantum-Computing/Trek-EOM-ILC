@@ -253,6 +253,10 @@ def main():
                         r"C:\Users\mzd416\Desktop\BK4063B-AWG-GUI\Waveforms"),
                     help="where the GUI-previewable copy of each uploaded drive "
                          "is written, like the manual loop does")
+    ap.add_argument("--frf", default=None, metavar="FRF.CSV",
+                    help="use a measured transfer function (sysid_fit output) as "
+                         "the update's inverse -- corrects the 3-6 kHz band the "
+                         "parametric model stalls in")
     ap.add_argument("--overwrite-state", action="store_true",
                     help="allow a fresh run to replace an existing state file")
     ap.add_argument("--drive-scope-ch", type=int, default=None,
@@ -312,6 +316,10 @@ def main():
                      f"- it did once, taking a four-iteration manual state with "
                      f"it. Use --resume {state_path} to continue it, or "
                      f"--overwrite-state to discard it deliberately.")
+
+    if a.frf:
+        loop.frf = ilc.FRF(a.frf)
+        print(f"update uses the measured inverse from {a.frf}")
 
     limit = getattr(_AWGMOD, "MAX_ARB_NAME", 11)
     if len(stem) + 4 > limit:                        # "_i00" is four more

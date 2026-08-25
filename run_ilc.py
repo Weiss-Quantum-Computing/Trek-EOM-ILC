@@ -124,6 +124,11 @@ def cmd_init(a):
 def cmd_step(a):
     st = load_state(a.state)
     loop = build_loop(st)
+    if a.frf:
+        loop.frf = ilc.FRF(a.frf)
+        print(f"update uses the measured inverse from {a.frf} "
+              f"({loop.frf.f[0]:.0f}-{loop.frf.f[-1]:.0f} Hz, "
+              f"tapered off {loop.frf.f_use/1e3:g}-{loop.frf.f_max/1e3:g} kHz)")
     if a.f_cut:
         # Confining learning to where the model is trusted. Measured on this
         # bench (24 Aug): above ~6 kHz the real chain passes 4-8x more than the
@@ -266,6 +271,10 @@ def main():
     s.add_argument("--mon-col", default="CH3")
     s.add_argument("--out")
     s.add_argument("--t-offset", type=float, default=None)
+    s.add_argument("--frf", default=None, metavar="FRF.CSV",
+                   help="use a measured transfer function (from sysid_fit) as "
+                        "the update's inverse instead of the parametric model. "
+                        "This is what corrects the 3-6 kHz wiggle band.")
     s.add_argument("--f-cut", type=float, default=None,
                    help="override the Q filter corner for this and later steps. "
                         "5e3 is right on this bench - the model is only trusted "
