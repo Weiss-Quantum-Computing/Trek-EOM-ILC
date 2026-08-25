@@ -1,8 +1,9 @@
 # EOM-ILC — pre-distortion and iterative learning control for the Trek / EOM ramp drive
 
 Corrects the tracking error of the Trek 610E → EOM chain by reshaping the drive
-waveform. Model-based pre-distortion does most of the work in one shot;
-iterative learning control (ILC) cleans up what the model misses.
+waveform. A model-based pre-distortion takes the first shot; iterative learning
+control (ILC) then converges on the residual by dividing the measured error by
+the chain's own measured frequency response H(f).
 
 Built around the two bench programs that already exist —
 [scope-grab](https://github.com/Weiss-Quantum-Computing/scope-grab) and
@@ -14,39 +15,50 @@ second copy of SCPI to keep in step.
 fixing the measurement, the parametric era and its failure, the measured
 inverse, the final numbers, and the instrument catalog.
 
-## The plant is second order
+## The inverse is measured, not modeled
 
-This is the thing to know before anything else. The Trek 610E + EOM is a lightly
-damped resonance, **ζ ≈ 0.21, fₙ 2.2–3.0 kHz**, measured across a 0.05–19.2 Vpp
-sweep. A one-pole fit of the same data returns τ ≈ 28 µs, which is exactly the
-resonance's group delay `2ζ/ωₙ` — it gets the lag right and knows nothing about
-the Q = 2.4 peak.
+This is the thing to know before anything else — it changed on 24–25 Aug 2026.
+Schroeder-multitone probes of both chains at 2 V found **no resonance**: a
+smooth rolloff with phase easing to ~−140°, like several distributed poles plus
+delay. That rules out both parametric forms this repo grew up with — a single
+pole cannot lag past −90° (the chain is at 82° already at the pole's own
+5.7 kHz corner), and the second-order peak simply is not in the probe data.
+So the production loop divides the error by the measured H(f) directly, tapered
+to zero past the measured band. Wide-probe FRFs for both channels ship in
+`run/frf_WIDE_X1.csv` and `run/frf_WIDE_X2.csv`; on the bench this converged at
+~0.4 per iteration everywhere the taper was open and reached 2.4 V peak
+(0.046%) on both channels.
 
-That is not a cosmetic distinction. ILC contracts only where
-`|1 − γ·P⁻¹model·Ptrue| < 1`, and with a one-pole model at γ = 0.6 that factor is
-**1.51 at 2326 Hz**. The loop bottoms out around iteration 3 and then climbs,
-which on the bench reads exactly like plant drift:
+The FRF workflow, all in this repo:
 
-```
-                            i0      i1      i2      i3      i4      i5      i6
-resonant  gamma=0.6       58.6    25.8    12.0     7.0     4.8     5.0     4.3
-one_pole  gamma=0.6       84.3    33.9    16.5    11.9    13.5    16.8    23.5  <-- diverging
-```
+1. `sysid_make.py` builds the probe (defaults 0.4–24 kHz, 48 tones;
+   `--f-hi 80e3 --tones 60` was the wide probe) and its `_awg.csv`.
+2. Play it through the normal burst path; capture 64 HRES single shots.
+3. `sysid_fit.py` turns the captures into `run/frf_<name>.csv` — magnitude,
+   phase, and per-tone coherence, formed from the scope's *measured* drive
+   channel so drive-side rolloff cancels.
+4. Hand that file to the loop with `--frf` (both `run_ilc.py step` and
+   `ilc_bench.py` take it, with `--frf-use`/`--frf-max` setting the taper —
+   the campaign ended at 50/75 kHz).
 
-Peak error in volts at the EOM, against the measured plant perturbed by +1% gain,
-+6% fₙ and +10% ζ, with 256-average scope noise. Reproduce the numbers with
-`simulate.py --target waveforms/target_MKJX1.csv`, or the figure below with
-`make_validation_fig.py`.
+**How the parametric era ended, for the record.** The chain had been
+characterized from large-signal ramp fits (`characterisation/`, 20–21 Aug) as a
+lightly damped second order, ζ ≈ 0.21, fₙ 2.2–3.0 kHz. ILC contracts only
+where `|1 − γ·L·Ptrue| < 1`, and above ~6 kHz the real chain passes 4–8× more
+than that model predicts: the loop's drive grew high-frequency grass that
+tripled every iteration while the captures looked clean. Pulling `--f-cut` to
+5 kHz froze the divergence but left a repeatable ±3–4 V residual at 3–6 kHz
+that no amount of iteration could remove — a wrong inverse is not fixed by
+iterating on it. The probes then showed the fitted resonance was a
+*large-signal* phenomenon of edges near the Trek's slew limit, absent at probe
+level. The full story, with the contraction numbers per band, is REPORT.md
+§4–5; `simulate.py` and `make_validation_fig.py` reproduce the parametric-era
+simulations that (correctly, given the fits) rejected the one-pole model.
 
-![ILC convergence against the measured second-order plant](ilc_validation.png)
-
-Note the floor those curves flatten onto is a **peak** quantity: 256 averages of
-a 31 mV LSB give 0.56 V rms, but the peak of 5301 samples of that noise is 2.4 V.
-A converged trace sitting at 2.4 V peak is at the measurement floor, not above it.
-
-Seed with `fn`/`zeta` via `Channel.plant()`, never with `tau`. Gain accuracy is
-what dominates the first shot — the 1% gain error alone is 55 V of that 58.6 —
-while a ±20% error in fₙ barely moves the final result.
+The ramp fits did get the group delay right (τ ≈ 28 µs = 2ζ/ωₙ), which is why
+the model-based first shot still works: `run_ilc.py init` seeds from the
+`config.py` fit constants, and the loop's `--frf` path takes over from
+iteration 1.
 
 ## Layout
 
@@ -55,12 +67,16 @@ while a ±20% error in fₙ barely moves the final result.
 | `eomilc/` | the library: `config` (calibration), `plant` (models + fitting), `ilc` (the loop), `outputs` (file emission), `scope` (capture reader) |
 | `run_ilc.py` | manual driver — `init` / `step` / `emit-ni` |
 | `ilc_bench.py` | closed-loop driver, upload → capture → update with no hands |
+| `sysid_make.py` | build a Schroeder multitone probe for FRF measurement |
+| `sysid_fit.py` | probe captures → `run/frf_<name>.csv` (magnitude, phase, coherence) |
 | `make_target.py` | build a target from the MKJ waveform at any peak and grid |
 | `simulate.py` | validate the loop off the bench |
 | `characterisation/` | the 2026-08-21 analysis that produced every constant in `config.py` |
 | `waveforms/` | the current targets and iteration-0 drives |
+| `run/` | states, iteration drives, and the measured FRFs |
 | `WORKFLOW.md` | **the bench procedure** — read this before touching hardware |
 | `MKJ_FULL_NOTES.md` | what the MKJ waveform is, headroom arithmetic, DDS behaviour |
+| `REPORT.md` | the campaign write-up |
 
 Needs `numpy`, `scipy`, `pandas`, and `pyvisa` for the bench drivers. On the lab
 PC that means the Anaconda interpreter, `C:\ProgramData\anaconda3\python.exe` —
@@ -91,16 +107,22 @@ C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MK
 C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MKJX2.csv --channel EO2 --name MKJX2 --out run\drive_MKJX2_iter0.csv
 ```
 
-Play `run\drive_MKJX<n>_iter0_awg.csv`, capture at least 256 averages,
-then update. Note the monitor column differs: **X1 is CH3, X2 is CH4**.
+Play `run\drive_MKJX<n>_iter0_awg.csv`, capture 64 HRES single shots (not the
+scope's AVER mode — see below), then update against the measured FRF. Note the
+monitor column differs: **X1 is CH3, X2 is CH4**.
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "run\MKJX1_i00*.csv" --mon-col CH3 --t-offset 250
+C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX1.state.npz --measured "run\MKJX1_i00*.csv" --mon-col CH3 --t-offset 250 --frf run\frf_WIDE_X1.csv --frf-use 50e3 --frf-max 75e3
 ```
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX2.state.npz --measured "run\MKJX2_i00*.csv" --mon-col CH4 --t-offset 250
+C:\ProgramData\anaconda3\python.exe run_ilc.py step --state run\drive_MKJX2.state.npz --measured "run\MKJX2_i00*.csv" --mon-col CH4 --t-offset 250 --frf run\frf_WIDE_X2.csv --frf-use 50e3 --frf-max 75e3
 ```
+
+Without `--frf` the step falls back to the parametric lead — fine for a first
+iteration, but it converges to the ~7 V parametric floor, not the ~2.4 V the
+measured inverse reaches. `ilc_bench.py` runs the whole
+upload → capture → update cycle hands-off and takes the same `--frf` flags.
 
 ## Calibration lives in `eomilc/config.py`
 
@@ -110,10 +132,14 @@ Measured 2026-08-20/21 — **update these when the hardware changes.**
 |---|---|---|
 | divider (AWG → Trek in) | 0.6254 ± 0.0038 | 0.6103 ± 0.0037 |
 | Trek in → monitor | **0.8926** ← see below | 1.0011 ✓ |
-| fₙ at full scale | 2326 Hz | 2207 Hz |
-| ζ at full scale | 0.206 | 0.209 |
+| fₙ at full scale (ramp fit) | 2326 Hz | 2207 Hz |
+| ζ at full scale (ramp fit) | 0.206 | 0.209 |
 | noise at Trek input | 144 µV rms | 624 µV rms |
 | fine trim channel | none | 1:100 op-amp summer |
+
+The fₙ/ζ rows are the large-signal ramp-fit values — they seed the first shot
+(their group delay is right) but the loop itself should run on the measured FRF,
+which supersedes them; see above.
 
 **The 12% Trek mismatch.** EO1's monitor-over-input is 0.8926 where EO2's is
 1.0011. Reaching a 90° rotation needs more analog-card voltage on X1 than X2,
@@ -148,17 +174,24 @@ record's own peak, which silently rescales the correction the loop just computed
 it once and leave it alone. Re-fitted per iteration, the loop chases its own
 alignment and stops converging.
 
-**Averaging.** A single 8-bit trace has a code worth ~40 mV on the monitor — 40 V
-at the EOM. Averaging alone does not fix that: the staircase only softens where
-analog noise dithers the codes, and the old BYTE readback rounded the average
-back to 8 bits anyway. Scope Grab reads WORD as of 24 Aug; measured on the first
-real 256-average capture, the record steps at 2.5 mV — **2.5 V at the EOM**
-against 40 V for a single shot. That is the measurement floor the loop
-converges to.
+**Measurement: 64 HRES single shots, averaged in software.** A single 8-bit
+trace has a code worth ~40 mV on the monitor — 40 V at the EOM — and the
+staircase is deterministic, so the loop learns it as if it were real error. The
+scope's AVER mode does not rescue this through these scripts: `:SINGle` takes
+exactly one acquisition, so an "AVER 256" capture carries one hit while claiming
+the full depth, and even an honest hardware average delivers a hard 2.5 mV word
+lattice (2.5 V at the EOM). The scheme that works — and what `ilc_bench.py`
+does — is HRES single shots averaged in software: the 3.5 mV per-shot analog
+noise dithers the lattice away and the floor lands near 0.5–1 V at the EOM.
+REPORT.md §3 and §7 have the details.
 
-**The Q filter.** `--f-cut` (default 20 kHz) keeps ILC from learning noise. Do
-**not** lower it to cure divergence — it filters the whole drive, not just the
-update, so dropping it near fₙ destroys the pre-distortion. Fix the model instead.
+**The Q filter and the FRF band.** `--f-cut` (default 5 kHz in the drivers)
+confines the *parametric* update to the band the model earned; do not widen it
+to speed that path up — divergence above ~5 kHz is how the resonant model
+failed. With `--frf` the code filters the error at the FRF's own `f_max`
+instead, deliberately: pre-filtering the error at 5 kHz in front of the
+measured inverse is exactly the integration bug that once left a perfectly
+repeatable 2 V rms residual sitting untouched at 5–15 kHz.
 
 **`--zero-baseline` is off by default** and must stay off for any waveform already
 moving in the first 5% of the record. MKJ is, and enabling it there subtracts
@@ -169,5 +202,8 @@ moving in the first 5% of the record. MKJ is, and enabling it there subtracts
 `characterisation/` holds the scripts, fits and figures behind every number in
 `config.py`, from 40 captures taken 2026-08-20/21. The raw captures themselves
 (~260 MB) are not in the repository; point `EOM_RAMPS_DIR` at them to re-run.
-`characterisation/results2.json` is the direct source of the `fn_pts` / `zeta_pts`
-tables.
+`characterisation/results2.json` is the direct source of the `fn_pts` /
+`zeta_pts` tables. The measured FRFs in `run/frf_*.csv` come from the 24–25 Aug
+probe campaign (`sysid_make.py` / `sysid_fit.py`, raw shots in
+`run/wideprobe*.npz`); REPORT.md documents the probe construction and its
+verification.
