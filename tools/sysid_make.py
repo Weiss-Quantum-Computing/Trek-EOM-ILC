@@ -19,18 +19,19 @@ Run it at two or three amplitudes -- the resonance moves with drive level
 (voltage-dependent EOM capacitance), so the model band of interest should be
 identified near the amplitude the ramps actually use.
 
-    python sysid_make.py --peak 2.0 --name SYSID2
-    python sysid_make.py --peak 6.0 --name SYSID6
+    python tools/sysid_make.py --peak 2.0 --name SYSID2
+    python tools/sysid_make.py --peak 6.0 --name SYSID6
 
 Then: upload via the AWG GUI (normalise OFF, AMP 20 Vpp), scope HRES full
-window, take a 64-shot sequence (e.g. prefix sysid2), and run sysid_fit.py.
+window, take a 64-shot sequence (e.g. prefix sysid2), and run tools/sysid_fit.py.
 """
 from __future__ import annotations
 import argparse, os, sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+ROOT = os.path.dirname(HERE)          # repo root: eomilc and run/ live there
+sys.path.insert(0, ROOT)
 from eomilc import outputs
 
 N = 5301                      # the ILC grid
@@ -81,7 +82,7 @@ def main():
 
     out = os.path.join(a.awg_dir, f"{name}.csv")
     outputs.write_bk_waveform(out, u, name, full_scale=10.0)
-    np.savez(os.path.join(HERE, "run", f"sysid_{name}.npz"),
+    np.savez(os.path.join(ROOT, "run", f"sysid_{name}.npz"),
              u=u, bins=bins, dt=DT, peak=a.peak)
     print(f"{out}")
     print(f"  {len(bins)} tones, {bins[0]/T:.0f} Hz to {bins[-1]/T:.0f} Hz "
@@ -91,7 +92,7 @@ def main():
           f"rms {u.std():.3f} V, ends {u[0]:+.1e}/{u[-1]:+.1e}")
     print(f"  reference saved to run\\sysid_{name}.npz")
     print(f"\nupload '{name}' with normalise OFF, then capture a 64-shot HRES "
-          f"sequence and run:\n  python sysid_fit.py --ref run\\sysid_{name}.npz "
+          f"sequence and run:\n  python tools\\sysid_fit.py --ref run\\sysid_{name}.npz "
           f"--measured \"<seq glob>\" --drive-col CH1 --mon-col CH3")
 
 

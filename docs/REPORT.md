@@ -16,7 +16,7 @@ bench.
 |:---|:---|:---|:---|
 | peak error, 5.2 kV ramp | end-of-campaign peak error, both channels | end-of-campaign rms error, X1 / X2 | peak-error reduction |
 
-![The campaign in one chart](report/figures/report_convergence.png)
+![The campaign in one chart](figures/report_convergence.png)
 
 ***The campaign in one chart.** Peak tracking error per iteration for both
 channels, on the from-scratch automated runs. Three eras: the parametric
@@ -156,7 +156,7 @@ rungs were climbed in sequence:
   substitute for the analog noise, but the chain's own noise turned out
   sufficient; a deeper digitizer solves it by fiat, with money.
 
-![Three capture schemes on the same knee of the ramp](report/figures/report_quant3.png)
+![Three capture schemes on the same knee of the ramp](figures/report_quant3.png)
 
 ***Three capture schemes on the same knee of the ramp.** Left: the single 8-bit
 sweep is a 40 mV staircase; the 64-shot HRES software average (blue) resolves
@@ -187,7 +187,7 @@ destroyed by a quantizer is not recoverable from one record; it is only
 recoverable across records, via dither and averaging. That distinction is the
 defense of the measurement scheme.
 
-![What happens when the loop is fed quantization](report/figures/i01_grass_diagnosis.png)
+![What happens when the loop is fed quantization](figures/i01_grass_diagnosis.png)
 
 ***What happens when the loop is fed quantization.** The first bench iteration
 ran on a single unaveraged capture (an instrument trap, §7). Top: the monitor
@@ -221,7 +221,7 @@ before the lead ever sees it. And the one-pole model of §2 is secretly a
 special case of this one: its τ equals the resonance's group delay 2ζ/ωₙ to
 within 1.5%, so it reproduces the lag while knowing nothing of the peak.
 
-![Predistortion made visible](report/figures/report_predistortion.png)
+![Predistortion made visible](figures/report_predistortion.png)
 
 ***Predistortion made visible.** Left: what each inverse adds to the plain
 scaled drive on the upper knee — the one-pole lead is a slope-proportional
@@ -269,7 +269,7 @@ same construction extended to 80 kHz with 60 tones — was built after the first
 corrected runs showed repeatable residual living above 24 kHz, outside the
 measured band.
 
-![The wide probe as actually played](report/figures/report_probe.png)
+![The wide probe as actually played](figures/report_probe.png)
 
 ***The wide probe as actually played (measured, not synthetic).** Left: one
 shot of the 2 V record. Middle: a 120 µs detail — the stored 2 µs samples
@@ -289,7 +289,7 @@ Y(fᵢ)/U(fᵢ) with a per-tone coherence computed from the shot-to-shot scatter
 Tones below 0.9 coherence are discarded (in practice, none were — the wide
 probes were coherent at every tone on both channels).
 
-![The pivotal measurement](report/figures/report_frf_wide.png)
+![The pivotal measurement](figures/report_frf_wide.png)
 
 ***The pivotal measurement.** Both chains, probed to 80 kHz at 2 V: a smooth,
 gentle rolloff with phase easing to ~−140°. The second-order resonance — the
@@ -344,7 +344,7 @@ behaves like several distributed poles plus delay, and matching it
 parametrically would mean fitting two or three poles and a delay to the FRF, at
 which point one may as well divide by the FRF itself.
 
-![All three inverses judged against the measured chain](report/figures/report_modelform.png)
+![All three inverses judged against the measured chain](figures/report_modelform.png)
 
 ***All three inverses judged against the measured chain.** Every panel uses the
 wide-probe FRF as the truth, so nothing here rests on the discredited
@@ -389,7 +389,7 @@ the characterization method.
 
 ## 6. Results
 
-![The parametric era, from-scratch automated runs](report/figures/scratch_runs_combined.png)
+![The parametric era, from-scratch automated runs](figures/scratch_runs_combined.png)
 
 ***The parametric era: from-scratch automated runs, both channels.** Ten
 iterations, no hands. The trusted band converges at the theoretical rate to a
@@ -399,7 +399,7 @@ record's first sample freely within a ±100 mV safety cap — each channel then
 trims its own chain offset (X1 walked to +17 mV, X2 to +69 mV, matching the
 independently measured idle offsets).*
 
-![The measured-inverse era, X1](report/figures/frf_campaign_X1.png)
+![The measured-inverse era, X1](figures/frf_campaign_X1.png)
 
 ***The measured-inverse era (X1 shown).** A session-start drift spike of +22 V
 collapses within two iterations; the floor that remains is uniform
@@ -421,7 +421,7 @@ out, and the open threads in §7 would move these numbers.
 | **total rms** | **0.48 V** | **0.33 V** | **0.009% / 0.006%** |
 | **total peak** | **2.4 V** | **2.4 V** | **0.046% of 5.2 kV** |
 
-![The remaining error, spectrally](report/figures/report_residual_asd.png)
+![The remaining error, spectrally](figures/report_residual_asd.png)
 
 ***The remaining error, spectrally.** Amplitude spectral density of each
 channel's final residual against X1's pre-correction error. Nothing sits at the
@@ -454,7 +454,7 @@ change, and c an effective delay:
 | X1, third session start | 29.8 V | −3.4 V | −0.4 V | −1.5 µs | **25.5 V pk** |
 | X2, session start (mild) | 5.6 V | +0.9 V | −2.1 V | −1.35 µs | 3.3 V |
 
-![The drift is none of the easy things](report/figures/drift_deviation.png)
+![The drift is none of the easy things](figures/drift_deviation.png)
 
 ***The drift is none of the easy things.** Top: the drifted runs' deviations,
 in the same convention as the other deviation plots, with a converged run in
@@ -506,4 +506,4 @@ day 4`, states and measurements in `EOM-ILC/run`). All errors quoted in volts
 at the EOM; all measurements 64-shot software-averaged HRES captures unless
 noted. Figure sources: `run/make_report_figs*.py`, `run/make_quant_fig.py`.
 This file is the repository copy of the published report artifact; the figures
-are the same PNGs, committed under `report/figures/`.*
+are the same PNGs, committed under `docs/figures/`.*

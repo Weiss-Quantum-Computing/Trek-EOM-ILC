@@ -185,8 +185,8 @@ amplitude, and it *drifts on hour scales* (a converged drive re-measured
 ~15–20 V off at the next session's start, shape not gain). The working
 recipe, per channel:
 
-1. `C:\ProgramData\anaconda3\python.exe sysid_make.py --peak 2.0 --name <NAME>` and upload it
-   (normalise OFF); 64-shot HRES sequence; then `sysid_fit.py` with that
+1. `C:\ProgramData\anaconda3\python.exe tools\sysid_make.py --peak 2.0 --name <NAME>` and upload it
+   (normalise OFF); 64-shot HRES sequence; then `tools\sysid_fit.py` with that
    channel's drive/monitor columns -> `run\frf_<NAME>.csv`.
 2. Iterate with the inverse:
    `ilc_bench.py --resume <state> --frf run\frf_<NAME>.csv --frf-use 20e3 --frf-max 24e3`
@@ -223,11 +223,11 @@ converging.
 ## Building the target
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
+C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
 ```
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe make_target.py --channel EO2 --peak-hv 5200 --step 2 --out waveforms\target_MKJX2.csv
+C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO2 --peak-hv 5200 --step 2 --out waveforms\target_MKJX2.csv
 ```
 
 The target is in volts **at the EOM**, which is what makes two channels with
@@ -240,7 +240,7 @@ the source by 3.2 V peak / 1.3 V rms at the EOM — 0.06% of full scale. That
 was negligible against the old ~5 V hardware-average floor; against the ~0.5–1 V
 HRES floor and the 2.4 V final residual it is no longer free, but note the loop
 tracks the decimated target *exactly* — the departure is versus the 0.1 µs
-source shape, not an error the loop sees. `MKJ_FULL_NOTES.md` has the grid
+source shape, not an error the loop sees. `docs\MKJ_FULL_NOTES.md` has the grid
 arithmetic if a finer grid ever looks worth it.
 
 ## The manual loop

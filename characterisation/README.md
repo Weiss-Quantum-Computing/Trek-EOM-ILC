@@ -27,4 +27,4 @@ Fitted plant, Trek 610E + EOM (large-signal ramp fits):
 Superseded 25 Aug 2026: the 2 V FRF probes found no resonance at probe level -
 the peak was an artifact of these large-signal fits (the group delay they imply,
 ~28 us, was right). The fit still seeds the model-based first shot, but the loop
-runs on the measured FRF (--frf); see ../REPORT.md sections 4-5.
+runs on the measured FRF (--frf); see ../docs/REPORT.md sections 4-5.

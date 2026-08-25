@@ -8,6 +8,9 @@ meas_*.npy
 drive_*_iter*.csv
 !waveforms/*.csv
 
+# Superseded bench outputs kept for the record, not for the repository
+archive/
+
 # The raw scope captures live outside the repo (~260 MB); see EOM_RAMPS_DIR
 cache/
 *.npy

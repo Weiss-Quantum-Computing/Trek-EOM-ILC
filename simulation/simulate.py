@@ -6,7 +6,7 @@ gain, fn and zeta by more than the sweep's own scatter -- driven through the
 measured scope quantisation and noise.  If the loop converges under these
 conditions it will converge on the bench.
 
-    python simulate.py --target target_MKJ_EO1.csv
+    python simulation/simulate.py --target target_MKJ_EO1.csv
 
 Note what the model comparison shows: the one-pole model, which is what this
 package used before 2026-08-24, does not converge.  It bottoms out around
@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse, sys, os
 import numpy as np, pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for eomilc
 from eomilc.plant import Plant
 from eomilc.ilc import Loop
 from eomilc.config import CHANNELS, HV_PER_MON

@@ -6,7 +6,7 @@ played back over a 10.602 ms period, i.e. a 0.1 us grid.  ILC wants volts at the
 EOM on the grid the loop will run on, so this decimates with a boxcar and scales
 by the measured AWG->monitor gain for the channel.
 
-    python make_target.py --channel EO1 --peak-hv 5200 --step 2 --out target_X1.csv
+    python tools/make_target.py --channel EO1 --peak-hv 5200 --step 2 --out target_X1.csv
 
 The target is expressed in volts AT THE EOM, which is `HV_PER_MON` times the
 monitor reading.  That is the quantity the loop controls, and it is what makes
@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse, os, sys
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for eomilc
 from eomilc.config import CHANNELS, HV_PER_MON
 
 DEFAULT_SRC = os.environ.get(

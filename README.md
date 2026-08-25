@@ -11,7 +11,7 @@ Built around the two bench programs that already exist —
 whose instrument layers this imports rather than reimplementing, so there is no
 second copy of SCPI to keep in step.
 
-**Campaign write-up:** [REPORT.md](REPORT.md) — the 24–25 Aug 2026 report:
+**Campaign write-up:** [REPORT.md](docs/REPORT.md) — the 24–25 Aug 2026 report:
 fixing the measurement, the parametric era and its failure, the measured
 inverse, the final numbers, and the instrument catalog.
 
@@ -31,10 +31,10 @@ to zero past the measured band. Wide-probe FRFs for both channels ship in
 
 The FRF workflow, all in this repo:
 
-1. `sysid_make.py` builds the probe (defaults 0.4–24 kHz, 48 tones;
+1. `tools/sysid_make.py` builds the probe (defaults 0.4–24 kHz, 48 tones;
    `--f-hi 80e3 --tones 60` was the wide probe) and its `_awg.csv`.
 2. Play it through the normal burst path; capture 64 HRES single shots.
-3. `sysid_fit.py` turns the captures into `run/frf_<name>.csv` — magnitude,
+3. `tools/sysid_fit.py` turns the captures into `run/frf_<name>.csv` — magnitude,
    phase, and per-tone coherence, formed from the scope's *measured* drive
    channel so drive-side rolloff cancels.
 4. Hand that file to the loop with `--frf` (both `run_ilc.py step` and
@@ -52,7 +52,7 @@ that no amount of iteration could remove — a wrong inverse is not fixed by
 iterating on it. The probes then showed the fitted resonance was a
 *large-signal* phenomenon of edges near the Trek's slew limit, absent at probe
 level. The full story, with the contraction numbers per band, is REPORT.md
-§4–5; `simulate.py` and `make_validation_fig.py` reproduce the parametric-era
+§4–5; `simulation/simulate.py` and `simulation/make_validation_fig.py` reproduce the parametric-era
 simulations that (correctly, given the fits) rejected the one-pole model.
 
 The ramp fits did get the group delay right (τ ≈ 28 µs = 2ζ/ωₙ), which is why
@@ -68,16 +68,14 @@ iteration 1.
 | `run_ilc.py` | manual driver — `init` / `step` / `emit-ni` |
 | `ilc_bench.py` | closed-loop driver, upload → capture → update with no hands |
 | `ilc_gui.py` | panel front end for both drivers, with per-iteration plots (waveforms, error, spectrum, convergence, FRF); same state files as the CLIs, so GUI and CLI steps interleave. `ilc_gui.bat` launches it with the Anaconda interpreter |
-| `sysid_make.py` | build a Schroeder multitone probe for FRF measurement |
-| `sysid_fit.py` | probe captures → `run/frf_<name>.csv` (magnitude, phase, coherence) |
-| `make_target.py` | build a target from the MKJ waveform at any peak and grid |
-| `simulate.py` | validate the loop off the bench |
+| `tools/` | target builders and system-ID: `make_target.py` (MKJ target at any peak and grid), `make_ramp_target.py`, `sysid_make.py` (Schroeder multitone probe), `sysid_fit.py` (probe captures → `run/frf_<name>.csv`) |
+| `simulation/` | off-bench validation: `simulate.py`, `make_validation_fig.py` and its figure |
 | `characterisation/` | the 2026-08-21 analysis that produced every constant in `config.py` |
 | `waveforms/` | the current targets and iteration-0 drives |
 | `run/` | states, iteration drives, and the measured FRFs |
 | `WORKFLOW.md` | **the bench procedure** — read this before touching hardware |
-| `MKJ_FULL_NOTES.md` | what the MKJ waveform is, headroom arithmetic, DDS behaviour |
-| `REPORT.md` | the campaign write-up |
+| `docs/` | the campaign write-up (`REPORT.md` + `figures/`), `MKJ_FULL_NOTES.md` (what the MKJ waveform is, headroom arithmetic, DDS behaviour), and the Scope Grab averaging patch |
+| `archive/` | superseded bench outputs kept for the record (not tracked) |
 
 Needs `numpy`, `scipy`, `pandas`, and `pyvisa` for the bench drivers. On the lab
 PC that means the Anaconda interpreter, `C:\ProgramData\anaconda3\python.exe` —
@@ -91,11 +89,11 @@ there, and bare `python` is the wrong interpreter (see above).
 Build the target — **X1**, then **X2**:
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
+C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
 ```
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe make_target.py --channel EO2 --peak-hv 5200 --step 2 --out waveforms\target_MKJX2.csv
+C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO2 --peak-hv 5200 --step 2 --out waveforms\target_MKJX2.csv
 ```
 
 Model-based first shot:

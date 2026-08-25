@@ -9,7 +9,7 @@ from the shot-to-shot scatter, and writes:
   * run/frf_<name>.csv   -- f, |H|, phase, coherence, and the current model
   * run/frf_<name>.png   -- the measured transfer against the model
 
-    python sysid_fit.py --ref run\\sysid_SYSID2.npz \\
+    python tools\\sysid_fit.py --ref run\\sysid_SYSID2.npz \\
         --measured "C:\\...\\day 4\\sysid2_0*.csv" --drive-col CH1 --mon-col CH3
 """
 from __future__ import annotations
@@ -17,7 +17,8 @@ import argparse, glob, os, sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+ROOT = os.path.dirname(HERE)          # repo root: eomilc and run/ live there
+sys.path.insert(0, ROOT)
 from eomilc import scope as scopeio
 from eomilc.config import CHANNELS
 
@@ -70,7 +71,7 @@ def main():
     Hm = ch.gain(amp) * wn ** 2 / (w ** 2 + 2 * zt * wn * w + wn ** 2)
 
     stem = os.path.splitext(os.path.basename(a.ref))[0].replace("sysid_", "")
-    csv = os.path.join(HERE, "run", f"frf_{stem}.csv")
+    csv = os.path.join(ROOT, "run", f"frf_{stem}.csv")
     import pandas as pd
     pd.DataFrame({
         "f_Hz": fHz,
@@ -114,7 +115,7 @@ def main():
     fig.suptitle(f"Measured chain transfer, {stem} vs the {chname} model",
                  color=INK, fontsize=12.5, fontweight="semibold", x=0.06, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
-    png = os.path.join(HERE, "run", f"frf_{stem}.png")
+    png = os.path.join(ROOT, "run", f"frf_{stem}.png")
     fig.savefig(png, dpi=160, facecolor=SURF)
     print("wrote", png)
     print()
