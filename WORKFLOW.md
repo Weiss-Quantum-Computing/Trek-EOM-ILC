@@ -140,6 +140,28 @@ now refuses any capture that does not span the whole waveform and lists every
 file it averages — read that list. Give each sequence a prefix nothing else
 uses, and give zoomed inspection grabs prefixes the ILC globs can never match.
 
+### The burst-entry transient: the loop cannot fix the idle level
+
+Measured 24 Aug from the pre-trigger portions of the 64-shot sequences: even
+with the drive files pinned to zero, the chain idles at **−9 V (X1) and −41 V
+(X2) at the EOM** between bursts, and every burst opens with a ~150 µs
+relaxation from that level. This is invisible to the loop — the initial state
+is set before the record starts — and it shows up as a stuck error peak at
+t = 0 (~40 V on X2) that no iteration reduces.
+
+The offsets decompose as: the AWG's own zero-code offset error (−12 mV on CH1,
+−40 mV on CH2 at 20 Vpp — within the generator's spec), plus, on X2 only,
+~−16 mV at the Trek input that the AWG never sees — the 1:100 summer's fine
+port, which is consistent with something holding ≈ −1.6 V there. Two fixes,
+either or both:
+
+- **Trim the generator:** set each channel's OFST to cancel its measured idle
+  (≈ +12 mV / +40 mV). The loop re-adapts in one iteration; relax the OFST=0
+  check tolerance accordingly.
+- **Chase the summer:** find what is parked on X2's fine input.
+
+Re-measure the idle from any sequence's pre-trigger data after either change.
+
 ### The trigger offset
 
 **Measured 2026-08-24 on this bench: `--t-offset 0`.** Cross-correlating the

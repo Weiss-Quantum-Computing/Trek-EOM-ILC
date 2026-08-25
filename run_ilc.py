@@ -241,7 +241,11 @@ def main():
                    help="force a ONE-POLE model with this tau in microseconds. "
                         "Diagnostic only -- it makes the loop diverge at fn.")
     i.add_argument("--gamma", type=float, default=0.6)
-    i.add_argument("--f-cut", type=float, default=20e3)
+    # 5 kHz, not the 20 kHz the package shipped with: measured 2026-08-24,
+    # the real chain passes 4-8x more than the model above ~6 kHz and the
+    # inverse-model update diverges there (factor 2.6 at 12 kHz). A fresh
+    # init with the old default re-armed that divergence once already.
+    i.add_argument("--f-cut", type=float, default=5e3)
     i.add_argument("--awg-dir", default=AWG_WAVEFORMS,
                    help="where to write the upload-ready waveform. Defaults "
                         "to the AWG GUI's Waveforms folder, so it shows up in "
