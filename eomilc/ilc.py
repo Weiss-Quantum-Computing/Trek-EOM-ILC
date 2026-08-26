@@ -110,21 +110,28 @@ class Loop:
     frf: "FRF | None" = None            # measured inverse; see class FRF
 
     # ---------------------------------------------------------------- drives
-    def first_shot(self, flat: bool = True) -> np.ndarray:
+    def first_shot(self, flat: bool = True,
+                   gain: float | None = None) -> np.ndarray:
         """The first drive to play.
 
-        flat=True (the default): the target scaled by the DC gain alone --
+        flat=True (the default): the target scaled by a DC gain alone --
         u = target / gain, no dynamics inverse, no Q filter -- so the first
         measurement IS the chain's raw response to the waveform, and every
         correction the loop applies afterwards is visible against it.
 
+        `gain` is the CONVERSION gain for that flat shot.  It defaults to
+        the plant's gain but is deliberately a separate number: the plant
+        gain belongs to the error-correction model and may be tuned, refit
+        or swapped without silently rescaling what iteration 0 plays.
+
         flat=False restores the model-based pre-distortion (full model
-        inverse plus Q filter).  It lands closer on the first shot, at the
-        cost of baking the model's opinion into the very measurement you
-        would use to judge the model.
+        inverse plus Q filter, `gain` ignored).  It lands closer on the
+        first shot, at the cost of baking the model's opinion into the very
+        measurement you would use to judge the model.
         """
         if flat:
-            return _limit_ends(np.asarray(self.target, float) / self.plant.gain)
+            g = self.plant.gain if gain is None else float(gain)
+            return _limit_ends(np.asarray(self.target, float) / g)
         u = self.plant.inverse(self.target)
         return _limit_ends(smooth(u, self.dt, self.f_cut))
 

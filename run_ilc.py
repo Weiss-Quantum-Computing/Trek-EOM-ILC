@@ -101,9 +101,10 @@ def cmd_init(a):
     gain, tau = p.gain, p.tau
 
     loop = ilc.Loop(plant=p, target=v, dt=dt, channel=ch, gamma=a.gamma, f_cut=a.f_cut)
-    u = loop.first_shot(flat=not a.model_first_shot)
+    u = loop.first_shot(flat=not a.model_first_shot, gain=a.shot_gain)
+    g_shot = a.shot_gain if a.shot_gain is not None else p.gain
     kind = ("model-based pre-distortion" if a.model_first_shot
-            else "flat conversion, target / gain")
+            else f"flat conversion, target / {g_shot:g}")
 
     print(f"channel     : {ch.name}")
     print(f"target      : {np.ptp(v)*ch.mon_scale:.0f} V peak-to-peak over {t[-1]*1e3:.2f} ms")
@@ -271,6 +272,12 @@ def main():
                                   "including the '_i00' suffix)")
     i.add_argument("--t-offset", type=float, default=0.0,
                    help="fixed trigger-to-waveform offset, microseconds")
+    i.add_argument("--shot-gain", type=float, default=None,
+                   help="conversion gain for the flat first shot (u = target "
+                        "/ shot-gain). Defaults to the model's gain, but is "
+                        "deliberately a separate knob: tuning the correction "
+                        "model must not silently rescale what iteration 0 "
+                        "plays.")
     i.add_argument("--model-first-shot", action="store_true",
                    help="pre-distort the first shot with the model inverse "
                         "instead of the default flat conversion (target / "

@@ -310,11 +310,12 @@ class App:
         ttk.Separator(sf).grid(row=1, column=0, columnspan=4, sticky="ew", pady=3)
 
         self.target_var = tk.StringVar(value=self.cfg.get("target", ""))
-        self._path_row(sf, 2, "Target", self.target_var,
-                       lambda: self._browse(self.target_var, "Target CSV",
-                                            "*.csv", os.path.join(HERE, "waveforms")))
+        self._path_row(sf, 2, "Target", self.target_var, self._browse_target)
         b = ttk.Button(sf, text="Build...", command=self.do_build_target)
         b.grid(row=2, column=3, padx=2)
+        self._actions.append(b)
+        b = ttk.Button(sf, text="Plot", command=self.do_preview_target)
+        b.grid(row=2, column=4, padx=2)
         self._actions.append(b)
         self.channel_var = tk.StringVar(value="EO1")
         self.stem_var = tk.StringVar(value="")
@@ -329,17 +330,20 @@ class App:
         ttk.Label(r3, text=f"(<= {NAME_LIMIT - 4} chars; '_iNN' is appended)"
                   ).pack(side="left")
 
-        r4 = ttk.Frame(sf); r4.grid(row=4, column=0, columnspan=4, sticky="ew", pady=1)
-        self.gamma_var = tk.StringVar(value="0.6")
-        self.fcut_var = tk.StringVar(value="5000")
-        self.toff_var = tk.StringVar(value="0.0")
+        r4 = ttk.Frame(sf); r4.grid(row=4, column=0, columnspan=5, sticky="ew", pady=1)
+        # The first-shot gain is deliberately NOT the model gain: it fixes
+        # what iteration 0 plays, and tuning the correction model afterwards
+        # must not silently rescale it. Blank = fall back to the model gain.
+        self.shotgain_var = tk.StringVar(value="")
         self.fs_var = tk.StringVar(value="10.0")
-        for lab, var, w in (("gamma", self.gamma_var, 5),
-                            ("f_cut Hz", self.fcut_var, 7),
-                            ("t-offset us", self.toff_var, 6),
-                            ("full scale V", self.fs_var, 5)):
-            ttk.Label(r4, text=lab).pack(side="left", padx=(0, 2))
-            ttk.Entry(r4, textvariable=var, width=w).pack(side="left", padx=(0, 8))
+        ttk.Label(r4, text="first-shot gain").pack(side="left", padx=(0, 2))
+        ttk.Entry(r4, textvariable=self.shotgain_var, width=7).pack(
+            side="left", padx=(0, 8))
+        ttk.Label(r4, text="full scale V").pack(side="left", padx=(0, 2))
+        ttk.Entry(r4, textvariable=self.fs_var, width=5).pack(
+            side="left", padx=(0, 6))
+        ttk.Label(r4, text="(AWG: AMP = 2x full scale, OFST 0)",
+                  foreground="#666666").pack(side="left")
 
         b = ttk.Button(sf, text="Init  (first shot = flat conversion, "
                                 "target / gain)", command=self.do_init)
@@ -383,19 +387,32 @@ class App:
             self._param_entries[key] = e
 
         r2 = ttk.Frame(vf); r2.grid(row=2, column=0, columnspan=4,
+                                    sticky="ew", pady=1)
+        self.gamma_var = tk.StringVar(value="0.6")
+        self.fcut_var = tk.StringVar(value="5000")
+        ttk.Label(r2, text="gamma").pack(side="left", padx=(0, 2))
+        ttk.Entry(r2, textvariable=self.gamma_var, width=5).pack(
+            side="left", padx=(0, 8))
+        ttk.Label(r2, text="f_cut Hz").pack(side="left", padx=(0, 2))
+        ttk.Entry(r2, textvariable=self.fcut_var, width=7).pack(
+            side="left", padx=(0, 6))
+        ttk.Label(r2, text="(learning gain; parametric band edge)",
+                  foreground="#666666").pack(side="left")
+
+        r3 = ttk.Frame(vf); r3.grid(row=3, column=0, columnspan=4,
                                     sticky="ew", pady=(2, 1))
-        b = ttk.Button(r2, text="From calibration", command=self.do_calib)
+        b = ttk.Button(r3, text="From calibration", command=self.do_calib)
         b.pack(side="left", fill="x", expand=True)
         self._actions.append(b)
-        b = ttk.Button(r2, text="Fit from measurement", command=self.do_fit)
+        b = ttk.Button(r3, text="Fit from measurement", command=self.do_fit)
         b.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self._actions.append(b)
 
         self.frf_var = tk.StringVar(value=self.cfg.get("frf", ""))
-        self._path_row(vf, 3, "FRF", self.frf_var,
+        self._path_row(vf, 4, "FRF", self.frf_var,
                        lambda: self._browse(self.frf_var, "FRF CSV",
                                             "frf_*.csv", RUN_DIR))
-        r4 = ttk.Frame(vf); r4.grid(row=4, column=0, columnspan=4, sticky="ew")
+        r4 = ttk.Frame(vf); r4.grid(row=5, column=0, columnspan=4, sticky="ew")
         self.fuse_var = tk.StringVar(value=self.cfg.get("f_use", "50e3"))
         self.fmax_var = tk.StringVar(value=self.cfg.get("f_max", "75e3"))
         ttk.Label(r4, text="full strength to Hz").pack(side="left")
@@ -407,6 +424,26 @@ class App:
         self._actions.append(b)
         vf.columnconfigure(1, weight=1)
         self._update_model_fields()
+
+        # ---- capture post-processing ---------------------------------
+        # Settings that shape how a MEASUREMENT is turned into an error --
+        # nothing here touches the first shot, which is a pure flat
+        # conversion. Applies to both Step and the bench loop.
+        pf = ttk.LabelFrame(left, text="Capture post-processing "
+                                       "(Step + Bench)", padding=4)
+        pf.pack(fill="x", pady=(0, 4))
+        r0 = ttk.Frame(pf); r0.grid(row=0, column=0, sticky="ew")
+        self.toff_var = tk.StringVar(value="0.0")
+        self.zerobase_var = tk.BooleanVar(value=False)
+        ttk.Label(r0, text="t-offset us").pack(side="left", padx=(0, 2))
+        ttk.Entry(r0, textvariable=self.toff_var, width=6).pack(
+            side="left", padx=(0, 8))
+        ttk.Checkbutton(r0, text="zero baseline (not for MKJ)",
+                        variable=self.zerobase_var).pack(side="left")
+        ttk.Label(pf, text="t-offset: measured 0 on this bench -- change only "
+                           "if the trigger wiring changed",
+                  foreground="#666666").grid(row=1, column=0, sticky="w")
+        pf.columnconfigure(0, weight=1)
 
         # ---- manual step ---------------------------------------------
         mf = ttk.LabelFrame(left, text="Step from captured files", padding=4)
@@ -420,11 +457,8 @@ class App:
                      values=("CH1", "CH2", "CH3", "CH4")).pack(side="left", padx=(2, 8))
         self.refit_var = tk.BooleanVar(value=False)
         self.force_var = tk.BooleanVar(value=False)
-        self.zerobase_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(r1, text="refit plant", variable=self.refit_var).pack(side="left")
         ttk.Checkbutton(r1, text="force", variable=self.force_var).pack(side="left")
-        ttk.Checkbutton(r1, text="zero baseline (not for MKJ)",
-                        variable=self.zerobase_var).pack(side="left")
         self.step_btn = ttk.Button(mf, text="Step  (average captures -> update drive)",
                                    command=self.do_step)
         self.step_btn.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(3, 0))
@@ -604,7 +638,10 @@ class App:
         leak the GEN channel exists to prevent."""
         for v in self._param_vars.values():
             v.set("")
+        self.shotgain_var.set("")
         self._apply_channel_defaults()
+        if os.path.exists(self.target_var.get().strip()):
+            self.do_preview_target(quiet=True)
 
     def _apply_channel_defaults(self, channel=None):
         ch = channel or self.channel_var.get()
@@ -759,6 +796,96 @@ class App:
         self._plot_waveforms(u_fit, y, p.forward(u_fit), it)
         self.nb.select(0)
 
+    def _browse_target(self):
+        self._browse(self.target_var, "Target CSV", "*.csv",
+                     os.path.join(HERE, "waveforms"))
+        if os.path.exists(self.target_var.get().strip()):
+            self.do_preview_target()
+
+    def _first_shot_gain(self):
+        """The conversion gain for the flat first shot: the dedicated entry,
+        else the model gain as fallback. None when neither is set."""
+        for name, var in (("first-shot gain", self.shotgain_var),
+                          ("model gain", self.pgain_var)):
+            txt = var.get().strip()
+            if txt:
+                try:
+                    g = float(txt)
+                except ValueError:
+                    raise RuntimeError(f"{name} is not a number: {txt!r}")
+                if g <= 0:
+                    raise RuntimeError(f"{name} must be positive")
+                return g
+        return None
+
+    def do_preview_target(self, quiet=False):
+        """Plot the target file, and the AWG output the flat first shot
+        would produce at AMP = 2x full scale / OFST 0 -- nothing is sent.
+        This is the look-before-you-init view."""
+        path = self.target_var.get().strip()
+        if not os.path.exists(path):
+            if not quiet:
+                messagebox.showerror("Plot target",
+                                     f"target not found: {path!r}")
+            return
+        chname = self.channel_var.get()
+        ch = CHANNELS[chname]
+        try:
+            t, v = run_ilc.load_target(path, ch.mon_scale)
+            fs = float(self.fs_var.get())
+            g = self._first_shot_gain()
+        except (RuntimeError, ValueError) as e:
+            if not quiet:
+                messagebox.showerror("Plot target", str(e))
+            return
+        tms = t * 1e3
+        c = CH_DEFAULTS[chname]["colour"]
+        ax = self.ax_out
+        ax.clear()
+        ax.plot(tms, v * ch.mon_scale, color=TARGET_COLOUR, lw=1.0,
+                label="target (file contents)")
+        ax.set_ylabel(f"{ch.out_name} voltage (V)")
+        ax.set_title(f"{os.path.basename(path)} -- preview, nothing sent")
+        ax.legend(loc="best", fontsize=7)
+        ax.grid(True, alpha=0.3)
+
+        ax2 = self.ax_drv
+        ax2.clear()
+        if g is not None:
+            u = v / g
+            pk = float(np.abs(u).max())
+            ax2.plot(tms, u, color=c, lw=0.9,
+                     label=f"predicted AWG output (target / {g:g})")
+            ax2.axhline(fs, color="#c62828", lw=0.8, ls="--")
+            ax2.axhline(-fs, color="#c62828", lw=0.8, ls="--",
+                        label=f"+/-{fs:g} V full scale "
+                              f"(AMP {2*fs:g} Vpp, OFST 0)")
+            note = f"peak {pk:.3f} V = {100*pk/fs:.1f}% of DAC range"
+            if pk > fs:
+                note += "  --  CLIPS: raise the gain or lower the target"
+                self.log(f"preview: the first shot would CLIP "
+                         f"({pk:.3f} V > {fs:g} V full scale)")
+            ax2.set_title(note)
+            ax2.legend(loc="best", fontsize=7)
+            self.log(f"preview {os.path.basename(path)}: "
+                     f"{np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
+                     f"{t[-1]*1e3:.2f} ms, {len(v)} pts; AWG peak {pk:.3f} V "
+                     f"({100*pk/fs:.1f}% of range) at gain {g:g}")
+        else:
+            ax2.text(0.5, 0.5, "type a first-shot gain (or a model gain)\n"
+                               "to preview the AWG output",
+                     ha="center", va="center", transform=ax2.transAxes,
+                     color="#888888")
+            self.log(f"preview {os.path.basename(path)}: "
+                     f"{np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
+                     f"{t[-1]*1e3:.2f} ms, {len(v)} pts (no gain set, AWG "
+                     f"preview skipped)")
+        ax2.set_xlabel("time (ms)")
+        ax2.set_ylabel("AWG drive (V)")
+        ax2.grid(True, alpha=0.3)
+        self.fig_wave._canvas.draw_idle()
+        self.nb.select(0)
+
     def do_build_target(self):
         """Build a target CSV from scratch, for a system with no target yet.
         Values are in OUTPUT units for the selected channel: EOM volts on
@@ -821,6 +948,7 @@ class App:
                      f"over {t[-1]*1e3:.2f} ms, {len(v)} points at "
                      f"{p['dt us']:g} us")
             dlg.destroy()
+            self.do_preview_target(quiet=True)
 
         bf = ttk.Frame(f)
         bf.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -908,7 +1036,13 @@ class App:
         # model-predicted-output trace, and is what parametric updates use.
         mode = self._model_key()
         seed_key = "resonant" if mode == "frf" else mode
+        # one-number bootstrap: a typed first-shot gain can seed a blank
+        # model gain, so either box alone is enough to start from scratch
+        if not self.pgain_var.get().strip() and self.shotgain_var.get().strip():
+            self.pgain_var.set(self.shotgain_var.get().strip())
+            self.log("model gain was blank -- seeded from the first-shot gain")
         try:
+            g_shot = self._first_shot_gain()
             params = self._entry_params(seed_key, strict=False)
         except RuntimeError as e:
             return messagebox.showerror("Init", str(e))
@@ -929,7 +1063,8 @@ class App:
             seed_src = "from the calibration tables"
         loop = ilc.Loop(plant=plant, target=v, dt=dt, channel=ch,
                         gamma=f["gamma"], f_cut=f["f_cut"])
-        u = loop.first_shot()
+        u = loop.first_shot(gain=g_shot)
+        g_used = g_shot if g_shot is not None else plant.gain
         rep = loop.check(u)
 
         os.makedirs(RUN_DIR, exist_ok=True)
@@ -954,10 +1089,11 @@ class App:
                  f"{plant}")
         self.log(f"  target {np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
                  f"{t[-1]*1e3:.2f} ms, {len(v)} points at {dt*1e6:.3f} us")
-        self.log(f"  first shot  : flat conversion (target / gain "
-                 f"{plant.gain:.4f}), drive peak {np.abs(u).max():.4f} V -- "
-                 f"no pre-distortion, the first measurement shows the "
-                 f"chain's raw response")
+        sep = ("" if abs(g_used - plant.gain) < 1e-12 else
+               f"; the model gain is {plant.gain:g}, a separate knob")
+        self.log(f"  first shot  : flat conversion (target / {g_used:g}{sep}), "
+                 f"drive peak {np.abs(u).max():.4f} V -- no pre-distortion, "
+                 f"the first measurement shows the chain's raw response")
         self.log(f"  predicted   : peak error "
                  f"{np.abs(plant.forward(u)-v).max()*ch.mon_scale:.1f} V "
                  f"(the model's guess at what that measurement shows)")

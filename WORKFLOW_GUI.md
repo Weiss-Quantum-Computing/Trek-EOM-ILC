@@ -24,8 +24,9 @@ instruments only accept one.
 
 | panel | what it does |
 |---|---|
-| **Session** | load a state file, or build one: target + channel + name → Init |
-| **Inverse model** | what the update divides the error by — the model ladder, its parameters, and the FRF band |
+| **Session** | load a state file, or build one: target + channel + name + first-shot gain → Init |
+| **Inverse model** | what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, and the FRF band |
+| **Capture post-processing** | how a measurement becomes an error: `t-offset` and baseline handling, shared by Step and Bench. Nothing here touches the first shot. |
 | **Step from captured files** | one ILC iteration from scope CSVs you captured yourself |
 | **Bench loop** | the hands-off cycle: upload → capture → update |
 | **Log** | everything the loop reports, timestamped |
@@ -41,17 +42,26 @@ Nothing carries over from the Trek chains unless you load it on purpose.
 2. **Target**: press **Build…** for a cosine-edged ramp or half-sine
    (peak in output units, segment lengths in ms), or browse to any
    `time_us,voltage_V` CSV. On GEN the values are read in the same units
-   the scope measures.
+   the scope measures. The moment a target is chosen it plots itself in
+   the Waveforms tab (or press **Plot**): the file contents on top, and —
+   once a gain is typed — the AWG output the flat first shot would
+   produce, drawn against the ±full-scale rails (AMP = 2× full scale,
+   OFST 0) with the DAC-range percentage and a clipping warning.
+   **Nothing is sent by the preview**; validate the shape here first.
 3. **Name stem**: ≤ 7 characters (the `_iNN` suffix brings it to the
    generator's 11-character cap — past that the 4063B's front panel wedges
    until a power cycle).
-4. **Model** → *gain only (0th order)*, and type a **gain** guess
-   (output/drive ratio). Guess it **high** — the loop converges for
-   γ·g_true/g_model < 2, so a high guess just makes the first correction
-   small. There is nothing else to configure: no τ, no fₙ, no FRF.
+4. Type a **first-shot gain** guess (output/drive ratio) in the Session
+   panel, and set **Model** → *gain only (0th order)*. The first-shot gain
+   and the model's gain are **separate knobs**: the first fixes what
+   iteration 0 plays, the second belongs to the error correction — tuning
+   or refitting the model later never rescales the first shot. Either box
+   alone is enough to start (each falls back to the other, logged). Guess
+   the gain **high** — the loop converges for γ·g_true/g_model < 2, so a
+   high guess just makes the first correction small.
 5. Press **Init**. The first shot is a **flat conversion** — the target
-   divided by the gain, no pre-distortion — so the first measurement shows
-   the chain's raw response directly. The state file
+   divided by the first-shot gain, no pre-distortion — so the first
+   measurement shows the chain's raw response directly. The state file
    (`run\drive_<stem>.state.npz`) now exists; the campaign is resumable
    from here on.
 6. Run one iteration (§4 or §5).
@@ -91,10 +101,13 @@ Nothing carries over from the Trek chains unless you load it on purpose.
 5. The plots refresh; the new drive lands in `run\` and the AWG library,
    and the state is saved. Repeat from 1 with the new `_iNN` file.
 
-Leave `zero baseline` off for any waveform already moving at the start of
-the record (MKJ is). `force` overrides a failed limit check — don't, until
-you have read why it failed. `refit plant` re-identifies the parametric
-model from each iteration's own data as it steps.
+The **Capture post-processing** panel applies here and in bench mode:
+`t-offset` is the fixed trigger-to-waveform delay (measured 0 on this
+bench — change it only if the trigger wiring changed), and `zero baseline`
+must stay off for any waveform already moving at the start of the record
+(MKJ is). In the Step panel, `force` overrides a failed limit check —
+don't, until you have read why it failed — and `refit plant` re-identifies
+the parametric model from each iteration's own data as it steps.
 
 ## 5. The hands-off bench loop
 
