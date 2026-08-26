@@ -1,6 +1,6 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-39 numbered checks: state round-trips, the span guard, the model ladder,
+40 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
@@ -757,6 +757,20 @@ app.frf_var.set(FRF + ";" + fpath)   # left overlaid for the screenshots
 app.do_show_frf(); root.update()
 print("[39] FRF overlay: two files side by side with per-file labels, "
       "model refuses the list, single path still drives")
+
+# the band knobs follow the model: f_cut is inert in FRF mode (the FRF
+# path never pre-filters at it) and the taper is inert everywhere else
+cur_model = app.model_var.get()
+app.model_var.set("measured FRF (nonparametric)"); app._update_model_fields()
+assert str(app._fcut_entry.cget("state")) == "disabled"
+assert str(app._fuse_entry.cget("state")) == "normal"
+assert str(app._fmax_entry.cget("state")) == "normal"
+app.model_var.set("gain only (0th order)"); app._update_model_fields()
+assert str(app._fcut_entry.cget("state")) == "normal"
+assert str(app._fuse_entry.cget("state")) == "disabled"
+app.model_var.set(cur_model); app._update_model_fields()
+print("[40] band knobs follow the model: f_cut greyed in FRF mode, "
+      "the f_use/f_max taper greyed on the parametric rungs")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")

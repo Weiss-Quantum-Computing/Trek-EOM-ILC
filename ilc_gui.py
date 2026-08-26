@@ -635,7 +635,8 @@ class App:
         ttk.Entry(r2, textvariable=self.gamma_var, width=5).pack(
             side="left", padx=(0, 8))
         ttk.Label(r2, text="f_cut Hz").pack(side="left", padx=(0, 2))
-        ttk.Entry(r2, textvariable=self.fcut_var, width=7).pack(
+        self._fcut_entry = ttk.Entry(r2, textvariable=self.fcut_var, width=7)
+        self._fcut_entry.pack(
             side="left", padx=(0, 6))
         ttk.Label(r2, text="(learning gain; parametric band edge)",
                   foreground="#666666").pack(side="left")
@@ -657,9 +658,11 @@ class App:
         self.fuse_var = tk.StringVar(value=self.cfg.get("f_use", "50e3"))
         self.fmax_var = tk.StringVar(value=self.cfg.get("f_max", "75e3"))
         ttk.Label(r4, text="full strength to Hz").pack(side="left")
-        ttk.Entry(r4, textvariable=self.fuse_var, width=7).pack(side="left", padx=(2, 8))
+        self._fuse_entry = ttk.Entry(r4, textvariable=self.fuse_var, width=7)
+        self._fuse_entry.pack(side="left", padx=(2, 8))
         ttk.Label(r4, text="taper to zero at Hz").pack(side="left")
-        ttk.Entry(r4, textvariable=self.fmax_var, width=7).pack(side="left", padx=2)
+        self._fmax_entry = ttk.Entry(r4, textvariable=self.fmax_var, width=7)
+        self._fmax_entry.pack(side="left", padx=2)
         b = ttk.Button(r4, text="Show FRF", command=self.do_show_frf)
         b.pack(side="right")
         self._actions.append(b)
@@ -1069,10 +1072,18 @@ class App:
 
     def _update_model_fields(self):
         """Only the parameters the selected model actually has are editable --
-        a greyed box says 'this model does not know about that'."""
-        need = PARAMS_FOR[self._model_key()]
-        for key, e in self._param_entries.items():
-            e.configure(state="normal" if key in need else "disabled")
+        a greyed box says 'this model does not know about that'. That
+        includes the band knobs: f_cut belongs to the parametric rungs
+        (the FRF path deliberately never pre-filters at it -- ilc.update),
+        and the f_use/f_max taper belongs to the measured FRF."""
+        key = self._model_key()
+        need = PARAMS_FOR[key]
+        for k, e in self._param_entries.items():
+            e.configure(state="normal" if k in need else "disabled")
+        frf = key == "frf"
+        self._fcut_entry.configure(state="disabled" if frf else "normal")
+        for e in (self._fuse_entry, self._fmax_entry):
+            e.configure(state="normal" if frf else "disabled")
 
     def _set_param_entries(self, p):
         """Plant -> panel entries (blank = the term is absent from p)."""
