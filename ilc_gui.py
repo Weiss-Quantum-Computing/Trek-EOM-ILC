@@ -1114,10 +1114,17 @@ class App:
             return messagebox.showerror("Init", str(e))
         state_path = os.path.join(RUN_DIR, f"drive_{stem}.state.npz")
         if os.path.exists(state_path) and not messagebox.askyesno(
-                "State exists",
-                f"{state_path}\nalready exists. A fresh init DESTROYS that "
-                f"campaign's state (it happened once, taking a four-iteration "
-                f"manual state with it).\n\nOverwrite it?"):
+                "A campaign already uses this stem",
+                f"{state_path}\nalready exists.\n\n"
+                f"Init OVERWRITES the loop's memory: the current drive, the "
+                f"iteration counter, and the error history behind the "
+                f"Convergence tab -- that history exists nowhere else. The "
+                f"per-iteration files (drive_/meas_{stem}_iNN) survive this "
+                f"press, but the new campaign restarts at i00 under the SAME "
+                f"names and overwrites them one iteration at a time.\n\n"
+                f"To keep iterating on the existing campaign use Load state "
+                f"instead; to start fresh AND keep the old campaign, change "
+                f"the name stem.\n\nDiscard the existing campaign?"):
             return
 
         ch = CHANNELS[chname]
