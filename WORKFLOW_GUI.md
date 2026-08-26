@@ -155,6 +155,15 @@ the parametric model from each iteration's own data as it steps.
    run that actually played something ends — finished, stopped, or died —
    the driven channel's **output switches OFF** automatically; a run
    refused at the setup checks leaves the bench exactly as it found it.
+7. **Hold** re-measures the *current* drive `runs` times with `gap s`
+   between measurements, **without ever updating** — for thermalisation
+   studies: how does one fixed drive's error evolve over minutes? Each
+   measurement is a **run** (`iter k r1, r2, …`, saved as
+   `meas_<stem>_iNN_rMM.npy`), deliberately distinct from the loop's
+   iterations and from the 64 *repeats* averaged inside every single
+   measurement. The state and iteration counter are untouched; repeated
+   holds keep counting runs up. Setup checks, the output-ON confirmation
+   and the output-OFF-at-end policy all apply as in the bench loop.
 
 ## 6. Stepping through the model ladder (the demo)
 
@@ -194,6 +203,17 @@ age, newest drawn heaviest. Every measurement the bench loop takes — and
 every one recalled from `meas_*.npy` beside the state at load — is
 available.
 
+Hold **runs** draw dashed on the Error and Error spectrum tabs, labelled
+`iter k rN`, and appear as open circles on the Convergence tab; the
+**runs** checkbox hides them wholesale, and they are excluded from the
+drive-side tabs by construction (same drive → identical correction, zero
+update). The **Δt labels** checkbox appends wall-clock offsets to the
+legend — a run against its iteration's base measurement, a base iteration
+against the previous one — for reading thermalisation timescales straight
+off the plot; timestamps come from the measurement moment (file mtime for
+recalled ones), so they survive restarts. Leave it off when the clutter
+is not earning its place.
+
 Traces carry small dots marking **real samples** — every dot is actual
 data, and the *dot every Nth sample* box sets the density: blank = auto
 (~180 dots per trace, keeps a 5301-point record readable), any number =
@@ -222,6 +242,7 @@ every draw and overrides anything the sliders set.
 | `drive_<stem>_iNN.csv` | `run\` | the iteration's drive, `time_us,voltage_V` |
 | `<stem>_iNN.csv` | the AWG GUI's `Waveforms\` | upload-ready copy (±1, Normalise OFF) |
 | `meas_<stem>_iNN.npy` | beside the state | the iteration's averaged measurement — bench mode and Step both save it, so every measured iteration reloads with the session |
+| `meas_<stem>_iNN_rMM.npy` | beside the state | a Hold run's averaged measurement — run M of iteration N, same drive, no update |
 | `ilc_gui.log` | `run\` | timestamped append-only copy of everything the panel logged |
 
 `run\README.md` has the full taxonomy and where finished campaigns get
@@ -318,9 +339,13 @@ Three kinds of persistence, marked in the tables:
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
 | **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |
 
+| **Hold (runs / gap s)** | Re-measures the current drive `runs` times, `gap s` apart, with **no update and no state change** — the thermalisation probe. Runs are tagged `iter k rN`, saved as `meas_<stem>_iNN_rMM.npy`, and numbered on from any earlier holds of the same iteration. Same setup checks, output confirmation and output-off-at-end as the bench loop; Stop works between shots and during the gap. |
+
 ### Plot bar
 
 | field | what it does |
 |---|---|
 | **Iterations shown** *(config)* | Which stored iterations the Drive corrections, Drive updates, Error and Error spectrum tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
 | **dot every Nth sample** *(config)* | Marker density on every data trace: blank = auto (~180 dots per trace), a number = that literal subsampling step, `1` = every real sample gets a dot. Enter or **Redraw** applies to the iteration tabs; the Waveforms/preview traces pick it up on their next draw. |
+| **runs** *(config)* | Show or hide Hold runs on the Error / Error spectrum / Convergence tabs. Runs of every selected iteration draw dashed after their base trace. |
+| **Δt labels** *(config)* | Append wall-clock offsets to legend labels: runs relative to their iteration's base measurement, base iterations relative to the previous one. Off by default — plot clutter only when the timing question is live. |

@@ -218,6 +218,15 @@ def build_target_waveform(shape, peak, lead_ms, rise_ms, hold_ms, fall_ms,
     return np.arange(len(v)) * dt, v
 
 
+def fmt_span(seconds):
+    """A wall-clock interval, sized for a legend: 37s, 4.2m, 1.53h."""
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds/60:.1f}m"
+    return f"{seconds/3600:.2f}h"
+
+
 def dot_kw(n, dots=180, ms=3.0):
     """Marker kwargs that put ~`dots` small dots of REAL samples on a trace.
 
@@ -298,6 +307,10 @@ class App:
                  stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
                  iter_sel=self.itersel_var.get(),
                  dot_step=self.dotstep_var.get(),
+                 show_runs=self.showruns_var.get(),
+                 dt_labels=self.dtlabels_var.get(),
+                 hold_runs=self.holdruns_var.get(),
+                 hold_gap=self.holdgap_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -532,10 +545,25 @@ class App:
         self.stop_btn = ttk.Button(r2, text="Stop", command=self.stop_evt.set,
                                    state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
+        r3 = ttk.Frame(bf); r3.grid(row=4, column=0, sticky="ew", pady=(3, 0))
+        ttk.Label(r3, text="runs").pack(side="left")
+        self.holdruns_var = tk.StringVar(value=str(self.cfg.get("hold_runs",
+                                                                "5")))
+        ttk.Entry(r3, textvariable=self.holdruns_var, width=4).pack(
+            side="left", padx=(2, 6))
+        ttk.Label(r3, text="gap s").pack(side="left")
+        self.holdgap_var = tk.StringVar(value=str(self.cfg.get("hold_gap",
+                                                               "30")))
+        ttk.Entry(r3, textvariable=self.holdgap_var, width=6).pack(
+            side="left", padx=(2, 6))
+        b = ttk.Button(r3, text="Hold  (re-measure this drive, no update)",
+                       command=self.do_hold)
+        b.pack(side="left", fill="x", expand=True)
+        self._actions.append(b)
         ttk.Label(bf, text="Close the AWG GUI and Scope Grab first -- both hold\n"
                            "their VISA sessions. Outputs switch OFF when a run\n"
                            "that played anything ends.",
-                  foreground="#666666").grid(row=4, column=0, sticky="w")
+                  foreground="#666666").grid(row=5, column=0, sticky="w")
         bf.columnconfigure(0, weight=1)
 
         # ---- log ------------------------------------------------------
@@ -573,6 +601,13 @@ class App:
         e2.bind("<Return>", lambda ev: self._redraw_iterations())
         ttk.Label(sel, text="th sample (blank = auto, 1 = all)",
                   foreground="#666666").pack(side="left")
+        self.showruns_var = tk.BooleanVar(value=self.cfg.get("show_runs", True))
+        ttk.Checkbutton(sel, text="runs", variable=self.showruns_var,
+                        command=self._redraw_iterations).pack(side="left",
+                                                              padx=(8, 0))
+        self.dtlabels_var = tk.BooleanVar(value=self.cfg.get("dt_labels", False))
+        ttk.Checkbutton(sel, text="Δt labels", variable=self.dtlabels_var,
+                        command=self._redraw_iterations).pack(side="left")
         b = ttk.Button(sel, text="Redraw", command=self._redraw_iterations)
         b.pack(side="right")
         self._actions.append(b)
@@ -1089,8 +1124,15 @@ class App:
             y = np.load(f)
             if len(y) != len(s.t):
                 continue
-            it = int(re.search(r"_i(\d+)\.npy$", f).group(1))
-            snap = dict(it=it, y=y, m=s.loop.metrics(y))
+            mo = re.search(r"_i(\d+)(?:_r(\d+))?\.npy$", f)
+            if mo is None:
+                continue
+            it = int(mo.group(1))
+            run = int(mo.group(2)) if mo.group(2) else None
+            # the file's mtime IS the measurement time -- both save paths
+            # write the array the moment the capture average completes
+            snap = dict(it=it, y=y, m=s.loop.metrics(y), run=run,
+                        t_wall=os.path.getmtime(f))
             # pair it with the drive that played it, so Fit uses a true pair
             dcsv = os.path.join(os.path.dirname(s.state_path),
                                 f"drive_{s.stem}_i{it:02d}.csv")
@@ -1364,14 +1406,14 @@ class App:
         print(f"limit check: {rep}")
         if not rep and not force:
             s.loop.history.pop()      # the refused update never happened
-            s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev))
+            s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev, t_wall=time.time()))
             self.msgs.put(("call", lambda: self._show_iteration(u_prev, y, m, it)))
             print("REFUSED to write a drive that violates a hard limit "
                   "(tick 'force' to override)")
             return
         s.u = u_next
         s.iteration = it + 1
-        s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev))
+        s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev, t_wall=time.time()))
         self._write_iteration(f"{s.stem}_i{s.iteration:02d}")
         save_session(s)
         print(f"state saved, now at iteration {s.iteration}")
@@ -1552,6 +1594,107 @@ class App:
         finally:
             awg.close()
 
+    # ----------------------------------------------------------------- hold
+    def do_hold(self):
+        """Re-measure the CURRENT drive several times without updating --
+        for thermalisation studies: how does the error of one fixed drive
+        evolve over minutes? Measurements are tagged as runs (iter k r1,
+        r2, ...) so they never mix with the loop's own iterations, and the
+        state is untouched."""
+        if self.session is None:
+            return messagebox.showerror("Hold", "load or init a session first")
+        try:
+            f = self._floats(runs=self.holdruns_var, gap_s=self.holdgap_var,
+                             awg_ch=self.awgch_var, scope_ch=self.scopech_var,
+                             repeats=self.repeats_var, wait=self.wait_var)
+        except RuntimeError as e:
+            return messagebox.showerror("Hold", str(e))
+        if f["runs"] < 1:
+            return messagebox.showerror("Hold", "runs must be at least 1")
+        self.run_worker(lambda: self._hold_work(int(f["runs"]), f["gap_s"],
+                                                int(f["awg_ch"]),
+                                                int(f["scope_ch"]),
+                                                int(f["repeats"]), f["wait"]),
+                        "hold: re-measuring...")
+
+    def _hold_work(self, runs, gap_s, awg_ch, scope_ch, repeats, wait_s):
+        s = self.session
+        scopemod, awgmod = self._bench_modules()
+        awg = ilc_bench.make_awg(awgmod)
+        print("AWG:  ", awg.connect())
+        scope = ilc_bench.make_scope(scopemod)
+        print("Scope:", scope.connect())
+        played = False
+        switched_on = False
+        try:
+            problems, notes = ilc_bench.check_awg_channel(
+                awg, awg_ch, full_scale=s.full_scale)
+            for note in notes:
+                print("      ", note)
+            acq = scope.get(":ACQuire:TYPE")
+            if not acq.upper().startswith("HRES"):
+                problems.append(f"scope is in {acq}; hold uses the same "
+                                f"averaged-HRES scheme as the loop")
+            if problems:
+                print("Setup problems:")
+                for p in problems:
+                    print("  !", p)
+                print("REFUSING -- fix the setup first.")
+                return
+
+            it = s.iteration
+            wname = f"{s.stem}_i{it:02d}"
+            n, frac = ilc_bench.upload_drive(awg, awg_ch, wname, s.u,
+                                             s.full_scale)
+            played = True
+            print(f"hold: uploaded {wname} ({n} pts, {100*frac:.1f}% of DAC "
+                  f"range) -- this drive will NOT be updated")
+            ok, switched_on = self._ensure_output_on(awg, awg_ch)
+            if not ok:
+                return
+
+            prior = [sn["run"] for sn in s.snapshots
+                     if sn["it"] == it and sn.get("run") is not None]
+            r0 = max(prior, default=0) + 1
+            print(f"hold: {runs} run(s) of iteration {it}, {gap_s:g} s gap, "
+                  f"starting at r{r0}")
+            t_start = time.time()
+            for j in range(runs):
+                if self.stop_evt.is_set():
+                    print("hold stopped by user")
+                    break
+                y = self._bench_capture(scope, scope_ch, s.t, s.t_off,
+                                        repeats, wait_s)
+                r = r0 + j
+                np.save(os.path.join(os.path.dirname(s.state_path),
+                                     f"meas_{s.stem}_i{it:02d}_r{r:02d}.npy"),
+                        y)
+                m = s.loop.metrics(y)
+                sn = dict(it=it, y=y, m=m, u=s.u, run=r, t_wall=time.time())
+                s.snapshots.append(sn)
+                print(f"  r{r} (+{fmt_span(time.time() - t_start)}): error "
+                      f"peak {m['peak_err_hv']:7.1f} V   "
+                      f"rms {m['rms_err_hv']:6.2f} V")
+                self.msgs.put(("call", self._redraw_iterations))
+                if j < runs - 1 and gap_s > 0:
+                    # sleep in slices so Stop stays responsive
+                    t_end = time.time() + gap_s
+                    while time.time() < t_end:
+                        if self.stop_evt.is_set():
+                            break
+                        time.sleep(min(0.2, max(t_end - time.time(), 0.01)))
+            print(f"hold finished: state untouched, iteration still {it}")
+        finally:
+            if played or switched_on:
+                try:
+                    awg.set_output(awg_ch, False)
+                    print(f"CH{awg_ch} output OFF (end of hold)")
+                except Exception as e:
+                    print(f"could not switch CH{awg_ch} output off: {e}")
+            awg.close()
+            scope.close()
+            print("instruments closed")
+
     # ------------------------------------------------------------ bench run
     def do_bench(self):
         if self.session is None:
@@ -1630,23 +1773,9 @@ class App:
                           "scope, or tick 'skip setup checks'.")
                     return
 
-            # Switching ON is the direction that puts voltage into something,
-            # so it asks first -- and the end-of-run cleanup switches it back
-            # off regardless of who turned it on.
-            if not awg.is_on(awg_ch):
-                if not self.ask_user(
-                        "Output is OFF",
-                        f"CH{awg_ch} output is OFF, and the loop needs it "
-                        f"driving.\n\nTurn CH{awg_ch} ON and run?\n\n"
-                        f"(It is switched OFF again when the run ends.)"):
-                    print(f"run cancelled: CH{awg_ch} output left OFF")
-                    return
-                awg.set_output(awg_ch, True)
-                switched_on = True
-                print(f"CH{awg_ch} output ON (confirmed in dialog)")
-                if not awg.is_on(awg_ch):
-                    print(f"CH{awg_ch} did not switch on -- aborting")
-                    return
+            ok, switched_on = self._ensure_output_on(awg, awg_ch)
+            if not ok:
+                return
 
             k0, u = s.iteration, s.u
             for k in range(k0, k0 + iterations + 1):
@@ -1676,7 +1805,7 @@ class App:
                 m["model"] = cfg["desc"]
                 print(f"         error: peak {m['peak_err_hv']:7.1f} V   "
                       f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
-                s.snapshots.append(dict(it=k, y=y, m=m, u=u))
+                s.snapshots.append(dict(it=k, y=y, m=m, u=u, t_wall=time.time()))
                 u_now = u
                 self.msgs.put(("call",
                                lambda u=u_now, y=y, m=m, k=k:
@@ -1704,6 +1833,26 @@ class App:
             scope.close()
             print("instruments closed")
         print("\n" + s.loop.report())
+
+    def _ensure_output_on(self, awg, awg_ch):
+        """Worker-side: switching ON is the direction that puts voltage into
+        something, so it asks first. Returns (proceed, we_switched_it_on);
+        the caller's cleanup switches it back off regardless of who did."""
+        if awg.is_on(awg_ch):
+            return True, False
+        if not self.ask_user(
+                "Output is OFF",
+                f"CH{awg_ch} output is OFF, and the measurement needs it "
+                f"driving.\n\nTurn CH{awg_ch} ON and run?\n\n"
+                f"(It is switched OFF again when the run ends.)"):
+            print(f"run cancelled: CH{awg_ch} output left OFF")
+            return False, False
+        awg.set_output(awg_ch, True)
+        print(f"CH{awg_ch} output ON (confirmed in dialog)")
+        if not awg.is_on(awg_ch):
+            print(f"CH{awg_ch} did not switch on -- aborting")
+            return False, True
+        return True, True
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
                        settle=0.5):
@@ -1738,11 +1887,13 @@ class App:
         return self.session.loop.channel.out_name
 
     def _snaps_by_it(self):
-        """Stored measurements keyed by iteration; a re-measurement of the
-        same iteration replaces the earlier one."""
+        """BASE measurements (run None) keyed by iteration; a later base
+        measurement of the same iteration replaces the earlier one. Hold
+        runs are kept separately -- see _selected_snaps."""
         m = {}
         for sn in self.session.snapshots:
-            m[sn["it"]] = sn
+            if sn.get("run") is None:
+                m[sn["it"]] = sn
         return m
 
     def _selected_snaps(self):
@@ -1752,7 +1903,7 @@ class App:
         if s is None:
             return []
         by_it = self._snaps_by_it()
-        avail = sorted(by_it)
+        avail = sorted({sn["it"] for sn in s.snapshots})
         spec = self.itersel_var.get().strip().lower()
         if not spec:
             pick = avail[-2:]
@@ -1778,11 +1929,58 @@ class App:
             if avail and not pick:
                 self.log(f"no stored measurements match {spec!r} "
                          f"(available: {avail})")
-        return [by_it[i] for i in pick]
+        # each picked iteration contributes its base measurement plus, when
+        # the 'runs' box is ticked, every hold re-measurement in run order
+        runs_by_it = {}
+        if self.showruns_var.get():
+            for sn in s.snapshots:
+                if sn.get("run") is not None:
+                    runs_by_it.setdefault(sn["it"], {})[sn["run"]] = sn
+        out = []
+        for i in pick:
+            if i in by_it:
+                out.append(by_it[i])
+            for r in sorted(runs_by_it.get(i, {})):
+                out.append(runs_by_it[i][r])
+        return out
 
     def _snap_label(self, sn):
         d = sn["m"].get("model") if isinstance(sn.get("m"), dict) else None
-        return f"iter {sn['it']} ({d})" if d else f"iter {sn['it']}"
+        lab = f"iter {sn['it']}"
+        if sn.get("run") is not None:
+            lab += f" r{sn['run']}"
+        elif d:
+            lab += f" ({d})"
+        if self.dtlabels_var.get():
+            suf = self._dt_suffix(sn)
+            if suf:
+                lab += f"  {suf}"
+        return lab
+
+    def _dt_suffix(self, sn):
+        """Time offset for the Δt legend labels: a hold run against its
+        iteration's base measurement (or the first run when no base was
+        measured); a base iteration against the latest earlier iteration."""
+        t = sn.get("t_wall")
+        if t is None:
+            return ""
+        ref = None
+        if sn.get("run") is not None:
+            base = self._snaps_by_it().get(sn["it"])
+            if base is not None and base.get("t_wall"):
+                ref = base["t_wall"]
+            else:
+                rr = [x["t_wall"] for x in self.session.snapshots
+                      if x["it"] == sn["it"] and x.get("run") is not None
+                      and x.get("t_wall")]
+                ref = min(rr) if rr else None
+        else:
+            earlier = [x["t_wall"] for x in self._snaps_by_it().values()
+                       if x["it"] < sn["it"] and x.get("t_wall")]
+            ref = max(earlier) if earlier else None
+        if ref is None or t <= ref:
+            return ""
+        return "+" + fmt_span(t - ref)
 
     def _iter_colour(self, idx, n):
         return matplotlib.colormaps["viridis"](0.1 + 0.75 * idx / max(n - 1, 1))
@@ -1883,6 +2081,7 @@ class App:
             ax.plot(tms, (s.loop.target - sn["y"]) * sc,
                     color=self._iter_colour(idx, n),
                     lw=1.1 if idx == n - 1 else 0.8,
+                    ls="--" if sn.get("run") is not None else "-",
                     label=self._snap_label(sn),
                     **self._dot_kw(len(tms), ms=2.6))
         if n:
@@ -1917,6 +2116,7 @@ class App:
             fe, ae = asd(s.loop.target - sn["y"])
             ax.loglog(fe, ae, color=self._iter_colour(idx, n),
                       lw=1.0 if idx == n - 1 else 0.7,
+                      ls="--" if sn.get("run") is not None else "-",
                       label=self._snap_label(sn),
                       **self._dot_kw(len(fe), ms=2.2))
         if s.loop.frf is not None:
@@ -1943,6 +2143,9 @@ class App:
         tms = s.t * 1e3
         ax = self.ax_dcor
         ax.clear()
+        # hold runs replay the SAME drive -- their correction is identical
+        # to the base iteration's, so only base measurements draw here
+        snaps = [sn for sn in snaps if sn.get("run") is None]
         by_it = self._snaps_by_it()
         if 0 in by_it and by_it[0].get("u") is not None:
             u_ref, ref_lab = by_it[0]["u"], "the iteration-0 drive"
@@ -1994,6 +2197,8 @@ class App:
         tms = s.t * 1e3
         ax = self.ax_ddel
         ax.clear()
+        # same-drive hold runs have a zero delta by construction -- base only
+        snaps = [sn for sn in snaps if sn.get("run") is None]
         by_it = self._snaps_by_it()      # the prior drive can come from any
         n = len(snaps)                   # stored iteration, selected or not
         shown = 0
@@ -2034,8 +2239,10 @@ class App:
         s, c = self.session, self._colour()
         hist = list(s.loop.history)
         # the newest measurement is only in history once update() ran on it;
-        # show it anyway so the final bench iteration appears
-        if s.snapshots and s.snapshots[-1]["it"] == len(hist):
+        # show it anyway so the final bench iteration appears (hold runs
+        # never enter the history -- nothing was updated)
+        if (s.snapshots and s.snapshots[-1].get("run") is None
+                and s.snapshots[-1]["it"] == len(hist)):
             hist = hist + [s.snapshots[-1]["m"]]
         ax = self.ax_conv
         ax.clear()
@@ -2045,6 +2252,12 @@ class App:
                         lw=1.0, ms=4, label="peak error")
             ax.semilogy(k, [m["rms_err_hv"] for m in hist], "s--", color=c,
                         lw=0.8, ms=3, alpha=0.6, label="rms error")
+            run_pts = [(sn["it"], sn["m"]["peak_err_hv"])
+                       for sn in s.snapshots if sn.get("run") is not None]
+            if run_pts and self.showruns_var.get():
+                xs, ys = zip(*run_pts)
+                ax.semilogy(xs, ys, "o", ms=4, mfc="none", color="#c68000",
+                            label="hold runs (same drive)")
             ax.set_xticks(k)
             ax.legend(loc="best", fontsize=7)
             # mark where the inverse model changed -- the point of stepping
