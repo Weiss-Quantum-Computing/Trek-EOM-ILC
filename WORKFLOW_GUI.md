@@ -203,6 +203,16 @@ age, newest drawn heaviest. Every measurement the bench loop takes — and
 every one recalled from `meas_*.npy` beside the state at load — is
 available.
 
+The **Compare** box underneath overlays *other campaigns* on the same
+plots: space-separated stems (`OLDX1 OLDX2:all OLDX3:0,3` — each
+optionally with the Iterations grammar after a colon, blank meaning that
+stem's last measured iteration). Their states load read-only from the
+active state's directory and are never saved or stepped; each stem draws
+in its own colour, on its own time grid and monitor scale, against its
+own reference drive. The Convergence tab always shows a compared stem's
+whole peak-error history — that is usually the comparison that matters
+(X1 vs X2, or the same target before and after a model change).
+
 Hold **runs** draw dashed on the Error and Error spectrum tabs, labelled
 `iter k rN`, and appear as open circles on the Convergence tab; the
 **runs** checkbox hides them wholesale, and they are excluded from the
@@ -346,6 +356,7 @@ Three kinds of persistence, marked in the tables:
 | field | what it does |
 |---|---|
 | **Iterations shown** *(config)* | Which stored iterations the Drive corrections, Drive updates, Error and Error spectrum tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
+| **Compare** *(config)* | Other campaigns overlaid on the same plots, read-only: space-separated stems, each optionally `stem:ITERS` with the Iterations grammar (`OLDX1 OLDX2:all OLDX3:0,3`); a blank selection means that stem's last measured iteration. States load from the active state's directory (`drive_<stem>.state.npz` plus its `meas_*.npy` / `drive_*_iNN.csv`), never saved or stepped. Each stem gets one colour, older selected iterations fading; hold runs ride along dashed when **runs** is on. Overlays land on Error, Error spectrum, Drive corrections, Drive updates (each stem against its *own* reference and prior drives, on its *own* time grid and monitor scale), Convergence (the stem's whole peak-error history, regardless of the iteration selection), and the Waveforms output pane (last selected measurement, plus that stem's target when it differs). Δt labels stay active-session-only. A stem with no state or no measurements is reported in the log once per spec. |
 | **dot every Nth sample** *(config)* | Marker density on every data trace: blank = auto (~180 dots per trace), a number = that literal subsampling step, `1` = every real sample gets a dot. Enter or **Redraw** applies everywhere, the Waveforms tab and target preview included. |
 | **runs** *(config)* | Show or hide Hold runs on the Error / Error spectrum / Convergence tabs. Runs of every selected iteration draw dashed after their base trace. |
 | **Δt labels** *(config)* | Append wall-clock offsets to legend labels: runs relative to their iteration's base measurement, base iterations relative to the previous one. Off by default — plot clutter only when the timing question is live. |

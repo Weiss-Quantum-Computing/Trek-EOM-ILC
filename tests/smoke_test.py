@@ -1,8 +1,8 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-30 numbered checks: state round-trips, the span guard, the model ladder,
+31 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
-overlays, dot density, linked time axes. No instruments are touched --
+overlays, compare-stem overlays, dot density, linked time axes. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
 scratch folder for eyeballing.
@@ -413,6 +413,64 @@ print(f"[23] auto-reload restored '{app3.session.stem}' at iteration "
       f"{app3.session.iteration} with {len(app3.session.snapshots)} "
       f"snapshot(s)")
 root3.destroy()
+
+# compare overlays: another stem's results ride the same plots. The GENX
+# and TSTX1 campaigns live in RUN_DIR, so put MKJX1 beside them (the real
+# layout -- every campaign shares run/) and load it as the active session.
+for f in [os.path.join(SCRATCH, "drive_MKJX1.state.npz")] + \
+         glob.glob(os.path.join(SCRATCH, "meas_MKJX1_i*.npy")):
+    shutil.copy(f, ilc_gui.RUN_DIR)
+app.state_var.set(os.path.join(ilc_gui.RUN_DIR, "drive_MKJX1.state.npz"))
+app.do_load(); root.update()
+app.itersel_var.set("")
+app.cmpsel_var.set("GENX:all NOPE TSTX1")
+app._redraw_iterations(); root.update()
+labs = [l.get_label() for l in app.ax_err.get_lines()]
+assert any(l == "GENX iter 0" for l in labs), labs
+assert any(l == "GENX iter 1" for l in labs), labs
+assert any(l == "GENX iter 1 r3" for l in labs), \
+    f"compare hold run missing: {labs}"      # runs box is on
+assert any(l.startswith("iter ") for l in labs), \
+    f"active session's own traces vanished: {labs}"
+# GENX draws on its OWN time grid, not the active session's
+gline = next(l for l in app.ax_err.get_lines()
+             if l.get_label() == "GENX iter 1")
+gsess = app._cmp_cache[os.path.join(
+    os.path.dirname(app.session.state_path), "drive_GENX.state.npz")][1]
+assert len(gline.get_xdata()) == len(gsess.t), \
+    "compare overlay is not on GENX's own grid"
+conv_labs = [l.get_label() for l in app.ax_conv.get_lines()]
+assert any(l == "GENX peak error" for l in conv_labs), conv_labs
+panel = app.log_text.get("1.0", "end")
+assert "no state for 'NOPE'" in panel, "missing stem not reported"
+assert "'TSTX1' has no stored measurements" in panel, \
+    "measurement-less stem not reported"
+app._redraw_iterations(); root.update()      # same spec again
+panel2 = app.log_text.get("1.0", "end")
+assert panel2.count("no state for 'NOPE'") == 1, \
+    "compare warnings repeat on every redraw"
+app.cmpsel_var.set("")
+app._redraw_iterations(); root.update()
+assert not any(l.get_label().startswith("GENX")
+               for l in app.ax_err.get_lines()), \
+    "clearing the Compare box did not remove the overlays"
+print("[30] compare overlays: GENX rode the MKJX1 plots on its own grid "
+      "(runs included), missing/empty stems reported once, box clears")
+
+# the Compare selection takes the Iterations grammar per stem
+app.cmpsel_var.set("GENX")                   # blank sel = last iter only
+app._redraw_iterations(); root.update()
+glabs = [l.get_label() for l in app.ax_err.get_lines()
+         if l.get_label().startswith("GENX iter") and " r" not in l.get_label()]
+assert glabs == ["GENX iter 1"], glabs
+app.cmpsel_var.set("GENX:0")
+app._redraw_iterations(); root.update()
+glabs = [l.get_label() for l in app.ax_err.get_lines()
+         if l.get_label().startswith("GENX")]
+assert glabs == ["GENX iter 0"], glabs
+app.cmpsel_var.set("GENX:all")               # left set for the screenshots
+app._redraw_iterations(); root.update()
+print("[31] compare grammar: blank = last iter, 'GENX:0' picks iteration 0")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")

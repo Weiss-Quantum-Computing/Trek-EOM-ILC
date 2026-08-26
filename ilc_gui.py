@@ -99,6 +99,10 @@ CH_DEFAULTS = {
 }
 TARGET_COLOUR = "#222222"
 PRED_COLOUR = "#8a8a8a"
+# compare-stem overlays: one colour per stem, chosen clear of the channel
+# colours above and of viridis (the active session's iteration ramp)
+CMP_COLOURS = ["#9467bd", "#e377c2", "#17becf", "#bcbd22", "#8c564b",
+               "#7f7f7f"]
 
 # The model ladder: what the update divides the error by, in increasing order
 # of how much of the chain it knows about.  The first three are parametric
@@ -158,6 +162,34 @@ def save_session(s: Session):
              zeta=lp.plant.zeta, full_scale=s.full_scale, name=s.stem,
              gamma=lp.gamma, f_cut=lp.f_cut, iteration=s.iteration,
              t_offset=s.t_off, history=np.array(lp.history, dtype=object))
+
+
+def recall_snapshots(s: Session):
+    """Pull a session's on-disk measurements (meas_<stem>_i*.npy beside the
+    state, paired with the drive CSVs that played them) back into
+    s.snapshots. Grid mismatches (a state rebuilt on a different step) are
+    skipped rather than guessed at."""
+    run_dir = os.path.dirname(s.state_path)
+    for f in sorted(glob.glob(os.path.join(run_dir, f"meas_{s.stem}_i*.npy"))):
+        y = np.load(f)
+        if len(y) != len(s.t):
+            continue
+        mo = re.search(r"_i(\d+)(?:_r(\d+))?\.npy$", f)
+        if mo is None:
+            continue
+        it = int(mo.group(1))
+        run = int(mo.group(2)) if mo.group(2) else None
+        # the file's mtime IS the measurement time -- both save paths
+        # write the array the moment the capture average completes
+        snap = dict(it=it, y=y, m=s.loop.metrics(y), run=run,
+                    t_wall=os.path.getmtime(f))
+        # pair it with the drive that played it, so Fit uses a true pair
+        dcsv = os.path.join(run_dir, f"drive_{s.stem}_i{it:02d}.csv")
+        if os.path.exists(dcsv):
+            du = pd.read_csv(dcsv, comment="#").iloc[:, 1].to_numpy(float)
+            if len(du) == len(s.t):
+                snap["u"] = du
+        s.snapshots.append(snap)
 
 
 def read_captures(pattern, mon_col, t, t_off):
@@ -309,6 +341,7 @@ class App:
                  model=self.model_var.get(), channel=self.channel_var.get(),
                  stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
                  iter_sel=self.itersel_var.get(),
+                 cmp_sel=self.cmpsel_var.get(),
                  dot_step=self.dotstep_var.get(),
                  show_runs=self.showruns_var.get(),
                  dt_labels=self.dtlabels_var.get(),
@@ -621,6 +654,21 @@ class App:
         b.pack(side="right")
         self._actions.append(b)
         self._dot_warned = None
+
+        # second row: other campaigns overlaid read-only on the same plots
+        sel2 = ttk.Frame(right)
+        sel2.pack(fill="x", pady=(0, 2))
+        ttk.Label(sel2, text="Compare").pack(side="left")
+        self.cmpsel_var = tk.StringVar(value=self.cfg.get("cmp_sel", ""))
+        e3 = ttk.Entry(sel2, textvariable=self.cmpsel_var, width=26)
+        e3.pack(side="left", padx=2)
+        e3.bind("<Return>", lambda ev: self._redraw_iterations())
+        ttk.Label(sel2, text="other stems, e.g. 'TSTX1 OLDX1:all OLDX2:0,3' "
+                             "(blank sel = last iter)",
+                  foreground="#666666").pack(side="left")
+        self._cmp_cache = {}         # state path -> (state mtime, Session)
+        self._cmp_logged = set()     # compare warnings already shown ...
+        self._cmp_lastspec = None    # ... for this spec (reset on change)
 
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
@@ -1135,31 +1183,8 @@ class App:
         self.log(f"  plant: {s.loop.plant}")
 
         # Pull the last bench measurements back in, so the plots do not start
-        # blank on a resumed campaign. Grid mismatches (a state rebuilt on a
-        # different step) are skipped rather than guessed at.
-        pat = os.path.join(os.path.dirname(s.state_path),
-                           f"meas_{s.stem}_i*.npy")
-        for f in sorted(glob.glob(pat)):
-            y = np.load(f)
-            if len(y) != len(s.t):
-                continue
-            mo = re.search(r"_i(\d+)(?:_r(\d+))?\.npy$", f)
-            if mo is None:
-                continue
-            it = int(mo.group(1))
-            run = int(mo.group(2)) if mo.group(2) else None
-            # the file's mtime IS the measurement time -- both save paths
-            # write the array the moment the capture average completes
-            snap = dict(it=it, y=y, m=s.loop.metrics(y), run=run,
-                        t_wall=os.path.getmtime(f))
-            # pair it with the drive that played it, so Fit uses a true pair
-            dcsv = os.path.join(os.path.dirname(s.state_path),
-                                f"drive_{s.stem}_i{it:02d}.csv")
-            if os.path.exists(dcsv):
-                du = pd.read_csv(dcsv, comment="#").iloc[:, 1].to_numpy(float)
-                if len(du) == len(s.t):
-                    snap["u"] = du
-            s.snapshots.append(snap)
+        # blank on a resumed campaign.
+        recall_snapshots(s)
         if s.snapshots:
             its = sorted({sn["it"] for sn in s.snapshots})
             self.log(f"  recalled {len(its)} stored measurement(s): "
@@ -1905,51 +1930,52 @@ class App:
     def _out_name(self):
         return self.session.loop.channel.out_name
 
-    def _snaps_by_it(self):
+    def _snaps_by_it(self, s=None):
         """BASE measurements (run None) keyed by iteration; a later base
         measurement of the same iteration replaces the earlier one. Hold
-        runs are kept separately -- see _selected_snaps."""
+        runs are kept separately -- see _snaps_for."""
         m = {}
-        for sn in self.session.snapshots:
+        for sn in (s or self.session).snapshots:
             if sn.get("run") is None:
                 m[sn["it"]] = sn
         return m
 
-    def _selected_snaps(self):
-        """The iterations the plots show, per the 'Iterations shown' box:
-        blank = the last two, 'all', a range '2-5', or a list '0,3,6'."""
-        s = self.session
-        if s is None:
-            return []
-        by_it = self._snaps_by_it()
-        avail = sorted({sn["it"] for sn in s.snapshots})
-        spec = self.itersel_var.get().strip().lower()
+    def _pick_iters(self, spec, avail, last_n, log):
+        """The iteration grammar shared by the Iterations and Compare boxes:
+        blank = the last last_n, 'all', a range '2-5', or a list '0,3,6'."""
+        spec = spec.strip().lower()
         if not spec:
-            pick = avail[-2:]
-        elif spec in ("all", "*"):
-            pick = avail
-        else:
-            its = set()
-            try:
-                for part in spec.split(","):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    if "-" in part:
-                        a, b = part.split("-", 1)
-                        its.update(range(int(a), int(b) + 1))
-                    else:
-                        its.add(int(part))
-            except ValueError:
-                self.log(f"iteration selection {spec!r} not understood -- "
-                         f"use 'all', '2-5', or '0,3,6'; showing last two")
-                its = set(avail[-2:])
-            pick = [i for i in avail if i in its]
-            if avail and not pick:
-                self.log(f"no stored measurements match {spec!r} "
-                         f"(available: {avail})")
-        # each picked iteration contributes its base measurement plus, when
-        # the 'runs' box is ticked, every hold re-measurement in run order
+            return avail[-last_n:]
+        if spec in ("all", "*"):
+            return list(avail)
+        its = set()
+        try:
+            for part in spec.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    its.update(range(int(a), int(b) + 1))
+                else:
+                    its.add(int(part))
+        except ValueError:
+            log(f"iteration selection {spec!r} not understood -- "
+                f"use 'all', '2-5', or '0,3,6'; showing the last {last_n}")
+            return avail[-last_n:]
+        pick = [i for i in avail if i in its]
+        if avail and not pick:
+            log(f"no stored measurements match {spec!r} "
+                f"(available: {avail})")
+        return pick
+
+    def _snaps_for(self, s, spec, last_n, log=None):
+        """Snapshots of session s that spec picks: each picked iteration
+        contributes its base measurement plus, when the 'runs' box is
+        ticked, every hold re-measurement in run order."""
+        by_it = self._snaps_by_it(s)
+        avail = sorted({sn["it"] for sn in s.snapshots})
+        pick = self._pick_iters(spec, avail, last_n, log or self.log)
         runs_by_it = {}
         if self.showruns_var.get():
             for sn in s.snapshots:
@@ -1962,6 +1988,84 @@ class App:
             for r in sorted(runs_by_it.get(i, {})):
                 out.append(runs_by_it[i][r])
         return out
+
+    def _selected_snaps(self):
+        """The iterations the plots show, per the 'Iterations shown' box:
+        blank = the last two, 'all', a range '2-5', or a list '0,3,6'."""
+        if self.session is None:
+            return []
+        return self._snaps_for(self.session, self.itersel_var.get(), 2)
+
+    def _log_once(self, msg):
+        """Compare warnings fire on every redraw -- show each once per spec."""
+        if msg not in self._cmp_logged:
+            self._cmp_logged.add(msg)
+            self.log(msg)
+
+    def _compare_groups(self):
+        """The Compare box -> [(stem, session, snaps, colour)]: sibling
+        campaigns from the active state's directory, loaded read-only (never
+        saved, never stepped) and overlaid on the analysis plots. Grammar:
+        space-separated stems, each optionally stem:ITERS with the
+        Iterations grammar; a blank selection means that stem's last
+        measured iteration."""
+        s0 = self.session
+        spec = self.cmpsel_var.get().strip() if s0 is not None else ""
+        if spec != self._cmp_lastspec:
+            self._cmp_lastspec = spec
+            self._cmp_logged.clear()
+        if not spec:
+            return []
+        run_dir = os.path.dirname(s0.state_path)
+        groups, seen = [], set()
+        for tok in spec.split():
+            stem, _, isel = tok.partition(":")
+            if not stem or stem in seen:
+                continue
+            seen.add(stem)
+            if stem == s0.stem:
+                self._log_once(f"compare: {stem!r} is the loaded session "
+                               f"-- skipped")
+                continue
+            path = os.path.join(run_dir, f"drive_{stem}.state.npz")
+            if not os.path.exists(path):
+                have = sorted(
+                    re.match(r"drive_(.+)\.state\.npz$",
+                             os.path.basename(p)).group(1)
+                    for p in glob.glob(os.path.join(run_dir,
+                                                    "drive_*.state.npz")))
+                self._log_once(f"compare: no state for {stem!r} in {run_dir} "
+                               f"(available: {', '.join(have) or 'none'})")
+                continue
+            mt = os.path.getmtime(path)
+            cached = self._cmp_cache.get(path)
+            if cached and cached[0] == mt:
+                cs = cached[1]
+            else:
+                try:
+                    cs = load_session(path)
+                    recall_snapshots(cs)
+                except Exception as e:
+                    self._log_once(f"compare: could not load {stem!r}: {e}")
+                    continue
+                self._cmp_cache[path] = (mt, cs)
+            snaps = self._snaps_for(cs, isel, 1, log=self._log_once)
+            if not snaps and not cs.snapshots:
+                self._log_once(f"compare: {stem!r} has no stored measurements"
+                               f" -- only its convergence history can show")
+            groups.append((stem, cs, snaps,
+                           CMP_COLOURS[len(groups) % len(CMP_COLOURS)]))
+        return groups
+
+    def _cmp_alpha(self, idx, n):
+        """Within one compare stem, older selected iterations fade."""
+        return 1.0 if n <= 1 else 0.45 + 0.55 * idx / (n - 1)
+
+    def _cmp_label(self, stem, sn):
+        lab = f"{stem} iter {sn['it']}"
+        if sn.get("run") is not None:
+            lab += f" r{sn['run']}"
+        return lab
 
     def _snap_label(self, sn):
         d = sn["m"].get("model") if isinstance(sn.get("m"), dict) else None
@@ -2096,11 +2200,12 @@ class App:
         if self.session is None:
             return
         snaps = self._selected_snaps()
-        self._plot_error(snaps)
-        self._plot_spectrum(snaps)
-        self._plot_dcorr(snaps)
-        self._plot_ddelta(snaps)
-        self._plot_convergence()
+        cmp = self._compare_groups()
+        self._plot_error(snaps, cmp)
+        self._plot_spectrum(snaps, cmp)
+        self._plot_dcorr(snaps, cmp)
+        self._plot_ddelta(snaps, cmp)
+        self._plot_convergence(cmp)
         if self._wave_redraw is not None:
             self._wave_redraw()
 
@@ -2139,6 +2244,21 @@ class App:
         if y is not None:
             ax.plot(tms, y * sc, color=c, lw=0.9,
                     label=f"measured (iter {it})", **self._dot_kw(len(tms)))
+        # compare stems ride along with their LAST selected measurement --
+        # the Error tab is the multi-iteration surface, this pane stays legible
+        for stem, cs, csnaps, col in self._compare_groups():
+            if not csnaps:
+                continue
+            sn = csnaps[-1]
+            csc = cs.loop.channel.mon_scale
+            ctms = cs.t * 1e3
+            if not np.array_equal(cs.loop.target * csc, s.loop.target * sc):
+                ax.plot(ctms, cs.loop.target * csc, color=col, lw=0.7,
+                        ls=":", alpha=0.8, label=f"{stem} target")
+            run = f" r{sn['run']}" if sn.get("run") is not None else ""
+            ax.plot(ctms, sn["y"] * csc, color=col, lw=0.9,
+                    label=f"{stem} measured (iter {sn['it']}{run})",
+                    **self._dot_kw(len(ctms)))
         ax.set_ylabel(f"{self._out_name()} voltage (V)")
         ax.legend(loc="best", fontsize=7)
         ax.set_title(f"{s.channel} '{s.stem}' -- output vs target")
@@ -2167,7 +2287,7 @@ class App:
         self._finish_time_axis(self.ax_out)
         self.fig_wave._canvas.draw_idle()
 
-    def _plot_error(self, snaps):
+    def _plot_error(self, snaps, cmp=()):
         s = self.session
         tms = s.t * 1e3
         sc = self._out_scale()
@@ -2181,12 +2301,25 @@ class App:
                     ls="--" if sn.get("run") is not None else "-",
                     label=self._snap_label(sn),
                     **self._dot_kw(len(tms), ms=2.6))
+        total = n
+        for stem, cs, csnaps, col in cmp:
+            ctms = cs.t * 1e3            # each stem on its OWN grid & scale
+            csc = cs.loop.channel.mon_scale
+            k = len(csnaps)
+            for idx, sn in enumerate(csnaps):
+                ax.plot(ctms, (cs.loop.target - sn["y"]) * csc, color=col,
+                        lw=0.9, alpha=self._cmp_alpha(idx, k),
+                        ls="--" if sn.get("run") is not None else "-",
+                        label=self._cmp_label(stem, sn),
+                        **self._dot_kw(len(ctms), ms=2.6))
+            total += k
         if n:
             m = snaps[-1]["m"]
             ax.set_title(f"target - measured:  iter {snaps[-1]['it']} peak "
                          f"{m['peak_err_hv']:.1f} V, rms {m['rms_err_hv']:.2f} V"
                          f"  ({m['peak_pct']:.3f}% FS)")
-            ax.legend(loc="best", fontsize=7, ncols=2 if n > 6 else 1)
+        if total:
+            ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
         else:
             ax.text(0.5, 0.5, "no measurements stored yet",
                     ha="center", va="center", transform=ax.transAxes,
@@ -2198,25 +2331,37 @@ class App:
         self._finish_time_axis(ax)
         self.fig_err._canvas.draw_idle()
 
-    def _plot_spectrum(self, snaps):
+    def _plot_spectrum(self, snaps, cmp=()):
         s = self.session
         sc = self._out_scale()
         ax = self.ax_spec
         ax.clear()
 
-        def asd(e):
+        def asd(e, dt, scale):
             npts = len(e)
-            f = np.fft.rfftfreq(npts, s.loop.dt)
-            return f[1:], np.abs(np.fft.rfft(e * sc))[1:] * 2 / npts
+            f = np.fft.rfftfreq(npts, dt)
+            return f[1:], np.abs(np.fft.rfft(e * scale))[1:] * 2 / npts
 
         n = len(snaps)
         for idx, sn in enumerate(snaps):
-            fe, ae = asd(s.loop.target - sn["y"])
+            fe, ae = asd(s.loop.target - sn["y"], s.loop.dt, sc)
             ax.loglog(fe, ae, color=self._iter_colour(idx, n),
                       lw=1.0 if idx == n - 1 else 0.7,
                       ls="--" if sn.get("run") is not None else "-",
                       label=self._snap_label(sn),
                       **self._dot_kw(len(fe), ms=2.2))
+        total = n
+        for stem, cs, csnaps, col in cmp:
+            csc = cs.loop.channel.mon_scale
+            k = len(csnaps)
+            for idx, sn in enumerate(csnaps):
+                fe, ae = asd(cs.loop.target - sn["y"], cs.loop.dt, csc)
+                ax.loglog(fe, ae, color=col, lw=0.8,
+                          alpha=self._cmp_alpha(idx, k),
+                          ls="--" if sn.get("run") is not None else "-",
+                          label=self._cmp_label(stem, sn),
+                          **self._dot_kw(len(fe), ms=2.2))
+            total += k
         if s.loop.frf is not None:
             ax.axvspan(s.loop.frf.f_use, s.loop.frf.f_max, color="#c68000",
                        alpha=0.15, label="FRF taper band")
@@ -2228,12 +2373,30 @@ class App:
         ax.set_ylabel(f"error amplitude at the {self._out_name()} (V)")
         ax.set_title("where the residual lives -- the update only acts left "
                      "of the band edge")
-        if n:
-            ax.legend(loc="best", fontsize=7, ncols=2 if n > 6 else 1)
+        if total:
+            ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
         ax.grid(True, which="both", alpha=0.3)
         self.fig_spec._canvas.draw_idle()
 
-    def _plot_dcorr(self, snaps):
+    def _dcorr_ref(self, s, gui_gain=False):
+        """Reference drive the corrections are measured against: the stored
+        iteration-0 drive when there is one, else the target's flat
+        conversion. Only the active session (gui_gain) may use the panel's
+        first-shot gain entry -- compare stems fall back to their own
+        plant gain."""
+        by_it = self._snaps_by_it(s)
+        if 0 in by_it and by_it[0].get("u") is not None:
+            return by_it[0]["u"], "the iteration-0 drive"
+        g = None
+        if gui_gain:
+            try:
+                g = self._first_shot_gain()
+            except RuntimeError:
+                g = None
+        g = g or s.loop.plant.gain
+        return s.loop.target / g, f"the flat conversion target/{g:g}"
+
+    def _plot_dcorr(self, snaps, cmp=()):
         """The drive side of the error plot: each iteration's AWG waveform
         minus the target's flat conversion -- the correction the loop has
         accumulated at the input, in millivolts at the AWG."""
@@ -2244,49 +2407,60 @@ class App:
         # hold runs replay the SAME drive -- their correction is identical
         # to the base iteration's, so only base measurements draw here
         snaps = [sn for sn in snaps if sn.get("run") is None]
-        by_it = self._snaps_by_it()
-        if 0 in by_it and by_it[0].get("u") is not None:
-            u_ref, ref_lab = by_it[0]["u"], "the iteration-0 drive"
-        else:
-            try:
-                g = self._first_shot_gain()
-            except RuntimeError:
-                g = None
-            g = g or s.loop.plant.gain
-            u_ref = s.loop.target / g
-            ref_lab = f"the flat conversion target/{g:g}"
+        u_ref, ref_lab = self._dcorr_ref(s, gui_gain=True)
         n = len(snaps)
         shown = 0
         skipped = []
         for idx, sn in enumerate(snaps):
             u = sn.get("u")
             if u is None or len(u) != len(s.t):
-                skipped.append(sn["it"])
+                skipped.append(f"{sn['it']}")
                 continue
             ax.plot(tms, (u - u_ref) * 1e3, color=self._iter_colour(idx, n),
                     lw=1.1 if idx == n - 1 else 0.8,
                     label=self._snap_label(sn),
                     **self._dot_kw(len(tms), ms=2.6))
             shown += 1
-        if shown:
-            ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
+        cshown = 0
+        for stem, cs, csnaps, col in cmp:
+            csnaps = [sn for sn in csnaps if sn.get("run") is None]
+            c_ref, _ = self._dcorr_ref(cs)   # each stem vs its OWN reference
+            ctms = cs.t * 1e3
+            k = len(csnaps)
+            for idx, sn in enumerate(csnaps):
+                u = sn.get("u")
+                if u is None or len(u) != len(cs.t):
+                    skipped.append(f"{stem} {sn['it']}")
+                    continue
+                ax.plot(ctms, (u - c_ref) * 1e3, color=col, lw=0.9,
+                        alpha=self._cmp_alpha(idx, k),
+                        label=self._cmp_label(stem, sn),
+                        **self._dot_kw(len(ctms), ms=2.6))
+                cshown += 1
+        if shown + cshown:
+            ax.legend(loc="best", fontsize=7,
+                      ncols=2 if shown + cshown > 6 else 1)
         else:
             ax.text(0.5, 0.5, "no drives stored for the selected iterations",
                     ha="center", va="center", transform=ax.transAxes,
                     color="#888888")
         if skipped:
-            ax.annotate(f"no stored drive for iter {skipped}", (0.02, 0.02),
+            ax.annotate(f"no stored drive for iter {', '.join(skipped)}",
+                        (0.02, 0.02),
                         xycoords="axes fraction", fontsize=7, color="#888888")
         ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
         ax.set_xlabel("time (ms)")
         ax.set_ylabel("drive correction at the AWG (mV)")
         ax.set_title(f"drive minus {ref_lab} -- what the loop has learned "
-                     f"to add at the input")
+                     f"to add at the input"
+                     + ("; compare stems vs their own reference"
+                        if cshown else ""),
+                     fontsize=10 if cshown else None)
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(ax)
         self.fig_dcor._canvas.draw_idle()
 
-    def _plot_ddelta(self, snaps):
+    def _plot_ddelta(self, snaps, cmp=()):
         """Iteration-to-iteration drive change: u_k minus u_(k-1) -- the
         update the loop actually applied going into iteration k, in mV at
         the AWG. Shrinking updates are convergence seen from the input;
@@ -2308,13 +2482,32 @@ class App:
             up = prev.get("u") if prev else None
             if (u is None or up is None
                     or len(u) != len(s.t) or len(up) != len(s.t)):
-                skipped.append(sn["it"])
+                skipped.append(f"{sn['it']}")
                 continue
             ax.plot(tms, (u - up) * 1e3, color=self._iter_colour(idx, n),
                     lw=1.1 if idx == n - 1 else 0.8,
                     label=f"{self._snap_label(sn)} - iter {sn['it'] - 1}",
                     **self._dot_kw(len(tms), ms=2.6))
             shown += 1
+        for stem, cs, csnaps, col in cmp:
+            csnaps = [sn for sn in csnaps if sn.get("run") is None]
+            c_by_it = self._snaps_by_it(cs)
+            ctms = cs.t * 1e3
+            k = len(csnaps)
+            for idx, sn in enumerate(csnaps):
+                u = sn.get("u")
+                prev = c_by_it.get(sn["it"] - 1)
+                up = prev.get("u") if prev else None
+                if (u is None or up is None
+                        or len(u) != len(cs.t) or len(up) != len(cs.t)):
+                    skipped.append(f"{stem} {sn['it']}")
+                    continue
+                ax.plot(ctms, (u - up) * 1e3, color=col, lw=0.9,
+                        alpha=self._cmp_alpha(idx, k),
+                        label=f"{self._cmp_label(stem, sn)} "
+                              f"- iter {sn['it'] - 1}",
+                        **self._dot_kw(len(ctms), ms=2.6))
+                shown += 1
         if shown:
             ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
         else:
@@ -2323,7 +2516,8 @@ class App:
                     ha="center", va="center", transform=ax.transAxes,
                     color="#888888")
         if skipped:
-            ax.annotate(f"no prior-iteration drive for iter {skipped}",
+            ax.annotate("no prior-iteration drive for iter "
+                        f"{', '.join(skipped)}",
                         (0.02, 0.02), xycoords="axes fraction", fontsize=7,
                         color="#888888")
         ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
@@ -2335,7 +2529,7 @@ class App:
         self._finish_time_axis(ax)
         self.fig_ddel._canvas.draw_idle()
 
-    def _plot_convergence(self):
+    def _plot_convergence(self, cmp=()):
         s, c = self.session, self._colour()
         hist = list(s.loop.history)
         # the newest measurement is only in history once update() ran on it;
@@ -2346,6 +2540,7 @@ class App:
             hist = hist + [s.snapshots[-1]["m"]]
         ax = self.ax_conv
         ax.clear()
+        n_it = len(hist)
         if hist:
             k = np.arange(len(hist))
             ax.semilogy(k, [m["peak_err_hv"] for m in hist], "o-", color=c,
@@ -2358,8 +2553,23 @@ class App:
                 xs, ys = zip(*run_pts)
                 ax.semilogy(xs, ys, "o", ms=4, mfc="none", color="#c68000",
                             label="hold runs (same drive)")
-            ax.set_xticks(k)
+        # compare stems: their WHOLE campaign's peak-error curve (the
+        # Compare box's iteration selection only affects the time plots)
+        for stem, cs, csnaps, col in cmp:
+            chist = list(cs.loop.history)
+            base = [sn for sn in cs.snapshots if sn.get("run") is None]
+            if base and base[-1]["it"] == len(chist):
+                chist = chist + [base[-1]["m"]]
+            if not chist:
+                continue
+            ax.semilogy(np.arange(len(chist)),
+                        [m["peak_err_hv"] for m in chist], "o-", color=col,
+                        lw=0.9, ms=3, label=f"{stem} peak error")
+            n_it = max(n_it, len(chist))
+        if n_it:
+            ax.set_xticks(np.arange(n_it))
             ax.legend(loc="best", fontsize=7)
+        if hist:
             # mark where the inverse model changed -- the point of stepping
             # through the model ladder is seeing these transitions
             prev = None
@@ -2374,7 +2584,7 @@ class App:
                                 ha="left", va="top", rotation=0)
                 if d:
                     prev = d
-        else:
+        elif not n_it:
             ax.text(0.5, 0.5, "no iterations yet", ha="center", va="center",
                     transform=ax.transAxes, color="#888888")
         ax.set_xlabel("iteration")
