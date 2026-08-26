@@ -213,8 +213,34 @@ The **Model** combobox selects what the update divides the error by:
   model overlaid — the model-vs-chain comparison of REPORT.md §5, live.
 - The frequency-ranged FRF cases are one file stepped through different
   tapers (e.g. 10/15 → 24/36 → 50/75 kHz). To measure an FRF in the first
-  place: `tools\sysid_make.py` → play + 64-shot sequence →
+  place, use **Measure FRF…** (below), or the CLI route:
+  `tools\sysid_make.py` → play + 64-shot sequence →
   `tools\sysid_fit.py` → browse to `run\frf_<name>.csv`.
+
+### Measure an FRF and drive with it, step by step
+
+1. Load the session; close the AWG GUI and Scope Grab; burst trigger
+   firing; bench channels/repeats/wait as usual; **Auto-set instruments**
+   with the output off. The run re-checks the setup and has no skip.
+2. **Measure FRF…**: peak 2 V for bands to ~100 kHz, 0.5–1 V above that
+   (demand scales with peak × f hi — the dialog shows the numbers and
+   asks); `f lo`/`f hi` pick the record regime automatically (§10);
+   name ≤ 11 chars. Prompts in order: demand → overwrite → output-on.
+3. It writes `run\frf_<name>.csv`, points the **FRF** field at it, and
+   draws the FRF tab. Output OFF at the end; the probe stays the AWG's
+   selected waveform until the next bench upload or Auto-set.
+4. On the FRF tab, find where coherence dies. Set **taper to zero at**
+   (`f_max`) at or below the last coherent tone, **full strength to**
+   (`f_use`) ≈ ⅔ of it. Never taper past the measured band.
+5. **Model → measured FRF (nonparametric)** — measuring is not
+   consenting; this is the switch. γ still applies; `f_cut` is ignored
+   in FRF mode (the taper is the band edge).
+6. Step or run the bench loop; the log names the inverse and the
+   history is tagged `FRF <use>-<max>k`. Judge on the Error spectrum:
+   the residual should fall inside the widened taper band. Error
+   growing right of the taper → pull `f_max` in. Budget the usual 2–3
+   warm-up iterations. A new stem + the old one in Compare shows what
+   the wider band bought.
 
 ## 7. Reading the plots
 
