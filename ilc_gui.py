@@ -277,6 +277,8 @@ class App:
         self.session: Session | None = None
         self._modules = None          # (scope_grab, awg_gui) once bench-loaded
         self._wave_redraw = None      # replays the Waveforms tab's last draw
+        self._t_range = None          # linked time window across time plots
+        self._tlink_busy = False
         self.cfg = self._load_config()
         root.geometry(self.cfg.get("geometry", "1380x880"))
 
@@ -310,6 +312,7 @@ class App:
                  dot_step=self.dotstep_var.get(),
                  show_runs=self.showruns_var.get(),
                  dt_labels=self.dtlabels_var.get(),
+                 link_t=self.tlink_var.get(),
                  hold_runs=self.holdruns_var.get(),
                  hold_gap=self.holdgap_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
@@ -609,6 +612,9 @@ class App:
         self.dtlabels_var = tk.BooleanVar(value=self.cfg.get("dt_labels", False))
         ttk.Checkbutton(sel, text="Δt labels", variable=self.dtlabels_var,
                         command=self._redraw_iterations).pack(side="left")
+        self.tlink_var = tk.BooleanVar(value=self.cfg.get("link_t", True))
+        ttk.Checkbutton(sel, text="link t", variable=self.tlink_var).pack(
+            side="left")
         b = ttk.Button(sel, text="Redraw", command=self._redraw_iterations)
         b.pack(side="right")
         self._actions.append(b)
@@ -1012,6 +1018,7 @@ class App:
         ax2.set_xlabel("time (ms)")
         ax2.set_ylabel("AWG drive (V)")
         ax2.grid(True, alpha=0.3)
+        self._finish_time_axis(self.ax_out)
         self.fig_wave._canvas.draw_idle()
         self.nb.select(0)
         self._wave_redraw = lambda: self.do_preview_target(quiet=True)
@@ -1987,6 +1994,38 @@ class App:
     def _iter_colour(self, idx, n):
         return matplotlib.colormaps["viridis"](0.1 + 0.75 * idx / max(n - 1, 1))
 
+    def _time_axes(self):
+        """Every axis whose x is time in ms (ax_drv shares x with ax_out)."""
+        return (self.ax_out, self.ax_err, self.ax_dcor, self.ax_ddel)
+
+    def _finish_time_axis(self, ax):
+        """Apply the linked time window and re-arm the link callback.
+        Called at the end of every time-domain plot function: ax.clear()
+        wipes the callback registry, so each redraw re-registers -- which
+        also means autoscaling during the draw itself never fires the link,
+        only the user's toolbar zoom/pan/home afterwards does."""
+        if self.tlink_var.get() and self._t_range is not None:
+            ax.set_xlim(self._t_range)
+        ax.callbacks.connect("xlim_changed", self._on_xlim_changed)
+
+    def _on_xlim_changed(self, ax):
+        """Toolbar zoom/pan/home on one time plot drives them all -- the
+        rectangle zoom stays exactly as it is; it just acts everywhere."""
+        if not self.tlink_var.get() or self._tlink_busy:
+            return
+        self._tlink_busy = True
+        try:
+            lims = ax.get_xlim()
+            self._t_range = lims
+            for other in self._time_axes():
+                if other is ax:
+                    continue
+                if other.get_xlim() != lims:
+                    other.set_xlim(lims)
+                    other.figure._canvas.draw_idle()
+        finally:
+            self._tlink_busy = False
+
     def _dot_kw(self, n, ms=3.0):
         """dot_kw honouring the 'dot every Nth sample' box: blank = auto
         (~180 dots per trace), a number = that literal subsampling step,
@@ -2076,6 +2115,7 @@ class App:
         ax.set_ylabel("AWG drive (V)")
         ax.legend(loc="best", fontsize=7)
         ax.grid(True, alpha=0.3)
+        self._finish_time_axis(self.ax_out)
         self.fig_wave._canvas.draw_idle()
 
     def _plot_error(self, snaps):
@@ -2106,6 +2146,7 @@ class App:
         ax.set_xlabel("time (ms)")
         ax.set_ylabel(f"error at the {self._out_name()} (V)")
         ax.grid(True, alpha=0.3)
+        self._finish_time_axis(ax)
         self.fig_err._canvas.draw_idle()
 
     def _plot_spectrum(self, snaps):
@@ -2193,6 +2234,7 @@ class App:
         ax.set_title(f"drive minus {ref_lab} -- what the loop has learned "
                      f"to add at the input")
         ax.grid(True, alpha=0.3)
+        self._finish_time_axis(ax)
         self.fig_dcor._canvas.draw_idle()
 
     def _plot_ddelta(self, snaps):
@@ -2241,6 +2283,7 @@ class App:
         ax.set_title("u_k minus u_(k-1) -- the update each shown iteration "
                      "applied")
         ax.grid(True, alpha=0.3)
+        self._finish_time_axis(ax)
         self.fig_ddel._canvas.draw_idle()
 
     def _plot_convergence(self):
