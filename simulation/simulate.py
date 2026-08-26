@@ -54,7 +54,8 @@ def run(target, ch_name="EO1", model="resonant", n_iter=6, n_avg=256,
         q = rng.uniform(-lsb / 2, lsb / 2, (n_avg, len(y))).mean(axis=0)
         return y + n + q
 
-    u = loop.first_shot()
+    u = loop.first_shot(flat=False)   # the parametric-era pre-distorted seed
+                                      # -- what these simulations documented
     rows = []
     for k in range(n_iter + 1):
         y = measure(u)

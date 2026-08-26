@@ -341,7 +341,8 @@ class App:
             ttk.Label(r4, text=lab).pack(side="left", padx=(0, 2))
             ttk.Entry(r4, textvariable=var, width=w).pack(side="left", padx=(0, 8))
 
-        b = ttk.Button(sf, text="Init first shot (model-based)", command=self.do_init)
+        b = ttk.Button(sf, text="Init  (first shot = flat conversion, "
+                                "target / gain)", command=self.do_init)
         b.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(3, 0))
         self._actions.append(b)
 
@@ -901,9 +902,10 @@ class App:
         ch = CHANNELS[chname]
         t, v = run_ilc.load_target(target, ch.mon_scale)
         dt = float(np.median(np.diff(t)))
-        # The first shot needs a parametric plant even when the loop will run
-        # on the measured FRF -- the campaign recipe: resonant seed (its group
-        # delay is right), FRF takes over from the first step.
+        # The first shot is a FLAT conversion (target / gain) -- only the
+        # seed's gain shapes it. The rest of the seed plant still matters:
+        # it is the parametric model stored in the state, drives the
+        # model-predicted-output trace, and is what parametric updates use.
         mode = self._model_key()
         seed_key = "resonant" if mode == "frf" else mode
         try:
@@ -933,7 +935,8 @@ class App:
         os.makedirs(RUN_DIR, exist_ok=True)
         out = os.path.join(RUN_DIR, f"drive_{stem}_iter0.csv")
         outputs.write_awg_csv(out, t, u,
-                              comment=f"{chname} ILC iteration 0 (model-based)\n{plant}")
+                              comment=f"{chname} ILC iteration 0 "
+                                      f"(flat conversion, target / gain)\n{plant}")
         wname = f"{stem}_i00"
         os.makedirs(AWG_WAVEFORMS, exist_ok=True)
         gui = outputs.write_bk_waveform(os.path.join(AWG_WAVEFORMS, wname + ".csv"),
@@ -949,16 +952,17 @@ class App:
         self._set_param_entries(plant)
         self.log(f"init {chname} ({KEY2LABEL[seed_key]} seed {seed_src}): "
                  f"{plant}")
-        if mode == "frf":
-            self.log("  first shot is parametric; the measured FRF takes "
-                     "over at the first step")
         self.log(f"  target {np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
                  f"{t[-1]*1e3:.2f} ms, {len(v)} points at {dt*1e6:.3f} us")
-        self.log(f"  uncorrected : peak error "
-                 f"{np.abs(plant.forward(v/plant.gain)-v).max()*ch.mon_scale:.0f} V")
-        self.log(f"  modelled    : peak error "
+        self.log(f"  first shot  : flat conversion (target / gain "
+                 f"{plant.gain:.4f}), drive peak {np.abs(u).max():.4f} V -- "
+                 f"no pre-distortion, the first measurement shows the "
+                 f"chain's raw response")
+        self.log(f"  predicted   : peak error "
                  f"{np.abs(plant.forward(u)-v).max()*ch.mon_scale:.1f} V "
-                 f"(first shot, if the model is right)")
+                 f"(the model's guess at what that measurement shows)")
+        if mode == "frf":
+            self.log("  the measured FRF takes over at the first step")
         self.log(f"  limit check : {rep}")
         self.log(f"  wrote {out}")
         self.log(f"        {gui}  (GUI-ready, upload with Normalise OFF)")

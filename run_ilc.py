@@ -101,20 +101,20 @@ def cmd_init(a):
     gain, tau = p.gain, p.tau
 
     loop = ilc.Loop(plant=p, target=v, dt=dt, channel=ch, gamma=a.gamma, f_cut=a.f_cut)
-    u = loop.first_shot()
+    u = loop.first_shot(flat=not a.model_first_shot)
+    kind = ("model-based pre-distortion" if a.model_first_shot
+            else "flat conversion, target / gain")
 
     print(f"channel     : {ch.name}")
     print(f"target      : {np.ptp(v)*ch.mon_scale:.0f} V peak-to-peak over {t[-1]*1e3:.2f} ms")
     print(f"plant       : {p}")
-    print(f"uncorrected : peak error {np.abs(p.forward(v/gain)-v).max()*ch.mon_scale:.0f} V")
-    print(f"modelled    : peak error {np.abs(p.forward(u)-v).max()*ch.mon_scale:.1f} V "
-          f"(what the first shot should land at if the model is right)")
-    print(f"drive       : peak {np.abs(u).max():.4f} V, "
-          f"overshoot {(np.abs(u).max()-np.abs(v).max()/gain)*1e3:.0f} mV over the flat-top demand")
+    print(f"first shot  : {kind} -- drive peak {np.abs(u).max():.4f} V")
+    print(f"predicted   : peak error {np.abs(p.forward(u)-v).max()*ch.mon_scale:.1f} V "
+          f"(what the model expects the first measurement to show)")
     print("\nlimit check :", loop.check(u))
 
     out = a.out or f"drive_{ch.name}_iter0.csv"
-    outputs.write_awg_csv(out, t, u, comment=f"{ch.name} ILC iteration 0 (model-based)\n{p}")
+    outputs.write_awg_csv(out, t, u, comment=f"{ch.name} ILC iteration 0 ({kind})\n{p}")
     wname = f"{a.name or ch.name}_i00"
     gui = os.path.join(a.awg_dir, wname + ".csv")
     os.makedirs(a.awg_dir, exist_ok=True)
@@ -271,6 +271,11 @@ def main():
                                   "including the '_i00' suffix)")
     i.add_argument("--t-offset", type=float, default=0.0,
                    help="fixed trigger-to-waveform offset, microseconds")
+    i.add_argument("--model-first-shot", action="store_true",
+                   help="pre-distort the first shot with the model inverse "
+                        "instead of the default flat conversion (target / "
+                        "gain). Flat is the default so the first measurement "
+                        "shows the chain's raw response directly.")
     i.set_defaults(func=cmd_init)
 
     s = sub.add_parser("step", help="one ILC iteration from measured traces")

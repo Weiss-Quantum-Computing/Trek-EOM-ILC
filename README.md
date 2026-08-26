@@ -56,9 +56,12 @@ level. The full story, with the contraction numbers per band, is REPORT.md
 simulations that (correctly, given the fits) rejected the one-pole model.
 
 The ramp fits did get the group delay right (τ ≈ 28 µs = 2ζ/ωₙ), which is why
-the model-based first shot still works: `run_ilc.py init` seeds from the
+the model-based first shot worked: `run_ilc.py init` seeds from the
 `config.py` fit constants, and the loop's `--frf` path takes over from
-iteration 1.
+iteration 1. (Since 26 Aug the *default* first shot is a flat conversion —
+target / gain, no pre-distortion — so the chain's raw response is measured
+directly before any correction; `--model-first-shot` restores the
+pre-distorted seed.)
 
 ## Layout
 
@@ -74,6 +77,7 @@ iteration 1.
 | `waveforms/` | the current targets and iteration-0 drives (the one home for targets) |
 | `run/` | the **active campaign workspace**: states, iteration drives, measurements, and the measured FRFs — see `run/README.md` for the file taxonomy and where finished campaigns get filed |
 | `WORKFLOW.md` | **the bench procedure** — read this before touching hardware |
+| `WORKFLOW_GUI.md` | the same procedure as panel clicks: step-by-step for `ilc_gui.py`, from-scratch recipe included |
 | `docs/` | the campaign write-up (`REPORT.md` + `figures/`), `MKJ_FULL_NOTES.md` (what the MKJ waveform is, headroom arithmetic, DDS behaviour), and the Scope Grab averaging patch |
 | `archive/` | superseded bench outputs kept for the record (not tracked), including `report-era/` — the frozen 24–25 Aug analysis: the SCRX scratch campaigns, the probe-era files, and the still-runnable figure scripts behind `docs/figures/`, with their own README |
 
@@ -96,7 +100,9 @@ C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO1 --peak-hv
 C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO2 --peak-hv 5200 --step 2 --out waveforms\target_MKJX2.csv
 ```
 
-Model-based first shot:
+First shot — a **flat conversion** by default (target / gain, no
+pre-distortion, so the first measurement shows the chain's raw response;
+`--model-first-shot` restores the pre-distorted seed):
 
 ```powershell
 C:\ProgramData\anaconda3\python.exe run_ilc.py init --target waveforms\target_MKJX1.csv --channel EO1 --name MKJX1 --out run\drive_MKJX1_iter0.csv

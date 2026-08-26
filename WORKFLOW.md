@@ -2,6 +2,9 @@
 
 Two ways: by hand with the existing GUIs, or headless with `ilc_bench.py`.
 The manual route is worth doing once so you can watch what happens.
+For the panel version of this procedure — `ilc_gui.py`, click by click —
+see [WORKFLOW_GUI.md](WORKFLOW_GUI.md); the measurement physics below
+applies to both.
 
 Run everything with the Anaconda interpreter — `C:\ProgramData\anaconda3\python.exe`.
 It is the only one here with scipy, pandas and pyvisa together.

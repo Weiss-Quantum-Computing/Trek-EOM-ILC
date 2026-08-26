@@ -87,7 +87,7 @@ def main():
 
         loop = ilc.Loop(plant=ch.plant(amp, dt, model=model), target=v, dt=dt,
                         channel=ch, gamma=gamma, f_cut=20e3)
-        u = loop.first_shot()
+        u = loop.first_shot(flat=False)   # the parametric-era pre-distorted seed
         y = meas(u)
         e = [np.abs(v - y).max() * HV_PER_MON]
         for _ in range(a.iterations):

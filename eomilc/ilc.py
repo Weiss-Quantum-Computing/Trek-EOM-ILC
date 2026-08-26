@@ -110,8 +110,21 @@ class Loop:
     frf: "FRF | None" = None            # measured inverse; see class FRF
 
     # ---------------------------------------------------------------- drives
-    def first_shot(self) -> np.ndarray:
-        """Model-based pre-distortion. This alone should get you to ~1%."""
+    def first_shot(self, flat: bool = True) -> np.ndarray:
+        """The first drive to play.
+
+        flat=True (the default): the target scaled by the DC gain alone --
+        u = target / gain, no dynamics inverse, no Q filter -- so the first
+        measurement IS the chain's raw response to the waveform, and every
+        correction the loop applies afterwards is visible against it.
+
+        flat=False restores the model-based pre-distortion (full model
+        inverse plus Q filter).  It lands closer on the first shot, at the
+        cost of baking the model's opinion into the very measurement you
+        would use to judge the model.
+        """
+        if flat:
+            return _limit_ends(np.asarray(self.target, float) / self.plant.gain)
         u = self.plant.inverse(self.target)
         return _limit_ends(smooth(u, self.dt, self.f_cut))
 
