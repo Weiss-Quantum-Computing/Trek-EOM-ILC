@@ -201,13 +201,17 @@ class FRF:
     the MEASURED response sidesteps the model question entirely, in whatever
     band the measurement is coherent.
 
-    Loads the CSV sysid_fit writes. The inverse is regularised two ways:
-    tones below `min_coherence` are dropped, and the correction band is
+    Loads the CSV sysid_fit writes. The inverse is regularised three ways:
+    tones below `min_coherence` are dropped, the correction band is
     tapered to zero between `f_use` and `f_max` with a raised cosine so the
-    update never acts where nothing was measured.
+    update never acts where nothing was measured, and the correction is
+    raised-cosined to zero over the first and last `t_guard` seconds so the
+    loop does not chase the record-boundary settling transients (see the
+    note in `lead`).
     """
 
-    def __init__(self, path, min_coherence=0.9, f_use=15e3, f_max=22e3):
+    def __init__(self, path, min_coherence=0.9, f_use=15e3, f_max=22e3,
+                 t_guard=0.5e-3):
         if not 0 < f_use < f_max:
             raise ValueError(
                 f"the taper needs 0 < f_use < f_max, got {f_use:g}/{f_max:g}."
@@ -223,6 +227,7 @@ class FRF:
         self.logmag = np.log(np.abs(H))
         self.phase = np.unwrap(np.angle(H))
         self.f_use, self.f_max = f_use, f_max
+        self.t_guard = t_guard
         self.path = str(path)
 
     def interp(self, f):
@@ -258,7 +263,21 @@ class FRF:
         taper[band] = 0.5 * (1 + np.cos(np.pi * (f[band] - self.f_use)
                                         / (self.f_max - self.f_use)))
         taper[f > self.f_max] = 0.0
-        return gamma * np.fft.irfft(taper * E / H, n=m)[:n]
+        u = gamma * np.fft.irfft(taper * E / H, n=m)[:n]
+        # Time guard: decline to chase the record-boundary settling
+        # transients.  They are sharp, so their 20-60 kHz content is broad,
+        # and 1/|H| up there is 15-80x -- with the wrap fixed, the loop
+        # dutifully built ~0.23 V of drive at the record end to buy the
+        # last ~2 mV of edge error (fresh PRFRX1A, i00-i05).  That hammers
+        # the Trek at frequencies it cannot follow for error outside the
+        # window anyone cares about.  Raised-cosine the CORRECTION (never
+        # the drive -- see the f_cut note above) to zero at the ends.
+        g = int(round(self.t_guard / dt))
+        if g > 0 and 2 * g < n:
+            ramp = 0.5 * (1 - np.cos(np.pi * np.arange(g) / g))   # 0 -> 1
+            u[:g] *= ramp
+            u[n - g:] *= ramp[::-1]
+        return u
 
 
 def _limit_ends(u: np.ndarray, cap: float = LIMITS.idle_awg) -> np.ndarray:
