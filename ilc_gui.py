@@ -48,11 +48,14 @@ try:
     import scipy  # noqa: F401 -- eomilc.plant needs it; fail early and clearly
 except ModuleNotFoundError as _e:
     _r = tk.Tk(); _r.withdraw()
-    messagebox.showerror(
-        "EOM-ILC GUI",
-        f"Missing package: {_e.name}.\n\nRun this with the Anaconda "
-        f"interpreter -- C:\\ProgramData\\anaconda3\\pythonw.exe -- which is "
-        f"the only one on this machine with scipy, pandas and pyvisa together.")
+    _hint = ("Run this with the Anaconda interpreter -- "
+             "C:\\ProgramData\\anaconda3\\pythonw.exe -- which is the only "
+             "one on this machine with scipy, pandas and pyvisa together."
+             if sys.platform == "win32" else
+             "Install the analysis stack first:\n"
+             "    pip install numpy scipy pandas matplotlib\n"
+             "(pyvisa is only needed for the bench buttons, not here.)")
+    messagebox.showerror("EOM-ILC GUI", f"Missing package: {_e.name}.\n\n{_hint}")
     raise SystemExit(1)
 
 import matplotlib
@@ -68,9 +71,19 @@ import ilc_bench            # the debugged bench helpers; main() is guarded
 import run_ilc              # load_target and the state-file conventions
 
 # Remembered between sessions, kept out of the repo so a git pull cannot
-# clobber it -- same convention as the sibling panels.
-CONFIG_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
-                           "EOM-ILC-GUI", "config.json")
+# clobber it -- same convention as the sibling panels. Off Windows there is
+# no APPDATA: macOS gets its native equivalent, anything else the home dir.
+CONFIG_PATH = os.path.join(
+    os.environ.get("APPDATA")
+    or (os.path.expanduser("~/Library/Application Support")
+        if sys.platform == "darwin" else os.path.expanduser("~")),
+    "EOM-ILC-GUI", "config.json")
+
+# Consolas is a Windows font; Tk elsewhere would silently substitute a
+# PROPORTIONAL face and wreck the log/summary column alignment.
+MONO = (("Consolas", 8) if sys.platform == "win32"
+        else ("Menlo", 10) if sys.platform == "darwin"
+        else ("Courier", 9))
 
 RUN_DIR = os.path.join(HERE, "run")
 LOG_PATH = os.path.join(RUN_DIR, "ilc_gui.log")   # timestamped copy of the log
@@ -434,7 +447,7 @@ class App:
         self._actions.append(b)
 
         self.summary = ttk.Label(sf, text="no session loaded", justify="left",
-                                 font=("Consolas", 8))
+                                 font=MONO)
         self.summary.grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 0))
         sf.columnconfigure(1, weight=1)
 
@@ -607,7 +620,7 @@ class App:
         # ---- log ------------------------------------------------------
         lf = ttk.LabelFrame(left, text="Log", padding=2)
         lf.pack(fill="both", expand=True)
-        self.log_text = tk.Text(lf, width=64, height=10, font=("Consolas", 8),
+        self.log_text = tk.Text(lf, width=64, height=10, font=MONO,
                                 state="disabled", wrap="none")
         ysb = ttk.Scrollbar(lf, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=ysb.set)
@@ -2576,14 +2589,13 @@ class App:
         after the active session. History supplies the metrics (it carries
         the model tag); snapshots add what only they know -- the played
         drive's peak, the wall-clock time, the dt against the reference."""
-        def row(stem, s, it, run, m, sn):
+        def row(stem, s, it, run, model, m, sn):
             def num(key):
                 v = m.get(key) if isinstance(m, dict) else None
                 return f"{v:.3f}" if v is not None else ""
             u = sn.get("u") if sn else None
             tw = sn.get("t_wall") if sn else None
-            return (stem, it, f"r{run}" if run is not None else "",
-                    (m.get("model") or "") if isinstance(m, dict) else "",
+            return (stem, it, f"r{run}" if run is not None else "", model,
                     num("peak_err_hv"), num("rms_err_hv"),
                     num("peak_pct"), num("rms_pct"),
                     f"{np.abs(u).max():.3f}" if u is not None else "",
@@ -2596,14 +2608,27 @@ class App:
                        [(g[0], g[1]) for g in cmp]:
             by_it = self._snaps_by_it(s)
             hist = list(s.loop.history)
+
+            # the model column names the model that BUILT the row's drive.
+            # history[i] is tagged with the model that consumed measurement
+            # i (making drive i+1), so the row reads the tag one back --
+            # and iteration 0 stays blank: its drive is Init's first shot,
+            # no model involved. A hold run replays its base iteration's
+            # drive, so it inherits the same label.
+            def drive_model(i):
+                if 1 <= i <= len(hist) and isinstance(hist[i - 1], dict):
+                    return hist[i - 1].get("model") or ""
+                return ""
+
             for i in sorted(set(range(len(hist))) | set(by_it)):
                 sn = by_it.get(i)
                 m = hist[i] if i < len(hist) else sn["m"]
-                rows.append(row(stem, s, i, None, m, sn))
+                rows.append(row(stem, s, i, None, drive_model(i), m, sn))
                 for r in sorted((x for x in s.snapshots
                                  if x["it"] == i and x.get("run") is not None),
                                 key=lambda x: x["run"]):
-                    rows.append(row(stem, s, i, r["run"], r["m"], r))
+                    rows.append(row(stem, s, i, r["run"], drive_model(i),
+                                    r["m"], r))
         return rows
 
     def _fill_table(self, cmp=()):

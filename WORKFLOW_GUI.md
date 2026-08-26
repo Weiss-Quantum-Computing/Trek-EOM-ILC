@@ -20,6 +20,24 @@ with scipy, pandas and pyvisa together. For **bench mode**, close the AWG
 GUI and Scope Grab first: both hold their VISA sessions open, and the
 instruments only accept one.
 
+**On a Mac (or any non-bench machine):** everything except the bench
+buttons works —
+
+```bash
+pip install numpy scipy pandas matplotlib
+python ilc_gui.py
+```
+
+Load state, Step from captured CSVs, Build/preview targets, Fit, the
+Compare box, every plot tab and the Table all run offline; pyvisa is only
+imported when a bench action (Auto-set / Upload / Bench loop / Hold) is
+actually pressed, so it does not need to be installed. Those bench
+actions are the one hard limit: they need a VISA layer plus the
+instruments, which live on the bench PC. Campaign data is not in git —
+copy the `run\` folder (state + `meas_*.npy` + drive CSVs) over and
+point **State** at it. The config lives in `~/Library/Application
+Support/EOM-ILC-GUI/` there rather than `%APPDATA%`.
+
 ## 1. The window at a glance
 
 | panel | what it does |
@@ -243,7 +261,7 @@ every draw and overrides anything the sliders set.
 | **Error** | target − measured for the selected iterations. Peak/rms of the newest in the title. The stuck peak at t = 0 is the burst-entry transient — the loop cannot fix the idle level (WORKFLOW.md). |
 | **Error spectrum** | where the residual lives. The update only acts left of the drawn band edge (f_cut line, or the shaded FRF taper). Error growing *right* of the edge while the in-band falls is the model diverging — tighten the band or climb the ladder. |
 | **Convergence** | peak and rms error vs iteration, log scale, with model-change annotations. Flat-lining means the current inverse has given what it can. |
-| **Table** | the ledger: one row per stored iteration and hold run — model, peak/rms error (V and %FS), the played drive's peak, wall-clock timestamp, Δt against the reference — compare stems included, the Iterations box deliberately *not* applied. **Save CSV…** writes exactly what the table shows (this tab's equivalent of the figures' toolbar save). |
+| **Table** | the ledger: one row per stored iteration and hold run — peak/rms error (V and %FS), the played drive's peak, wall-clock timestamp, Δt against the reference — compare stems included, the Iterations box deliberately *not* applied. The *model* column names the model that **built that row's drive**: iteration 0 is blank (Init's flat first shot involves no model), hold runs inherit their base iteration's label, and a model whose drive was never measured does not appear. **Save CSV…** writes exactly what the table shows (this tab's equivalent of the figures' toolbar save). |
 | **FRF** | measured magnitude/phase/coherence, dropped tones flagged, taper band shaded, current parametric model overlaid. |
 
 ## 8. Files every step writes

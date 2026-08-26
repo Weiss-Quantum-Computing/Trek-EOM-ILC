@@ -500,6 +500,13 @@ gx = [r for r in rows if r[0] == "GENX"]
 assert len(mk) == 9, [r[:3] for r in mk]     # history 0..8, no runs
 assert len(gx) == 3 and gx[2][2] == "r3", gx
 assert any(r[3] for r in mk), "model tags missing from the table"
+# the model column names the model that BUILT the row's drive: iteration 0
+# is Init's flat first shot (blank), and a hold run inherits its base
+# iteration's label since it replays the same drive
+assert mk[0][1] == "0" and mk[0][3] == "", \
+    f"iteration 0 must stay unlabeled (flat Init shot): {mk[0]}"
+assert gx[0][3] == "" and gx[1][3] == "gain only" == gx[2][3], \
+    f"drive-model column misaligned on GENX rows: {[r[:4] for r in gx]}"
 assert mk[-1][4] and mk[-1][9], \
     f"newest MKJX1 row lacks metrics or a timestamp: {mk[-1]}"
 tcsv = os.path.join(SCRATCH, "iterations_test.csv")
