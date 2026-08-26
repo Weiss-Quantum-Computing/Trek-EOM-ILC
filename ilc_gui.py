@@ -226,6 +226,15 @@ AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 16384))
 # 5301-point records so far, so the true ceiling is unprobed -- if a dense
 # upload is refused on hardware, lower BK4063B_MAX_PTS and re-measure.
 
+PROBE_NYQ_MARGIN = 0.5
+# Top probe tone <= this fraction of the probe grid's Nyquist: >= 4 samples
+# per period at the top tone. The first cut allowed 0.98 -- tones riding
+# just under Nyquist keep barely 2 samples per period, and although the
+# Y/U division cancels the DAC's zero-order-hold droop (both channels are
+# measured), it does NOT cancel the images folding back near Nyquist or
+# the resampling fidelity loss, and the coherence up there pays for both.
+# Dense records cost nothing, so buy the margin instead.
+
 
 def plan_frf_grid(n_sess, dt_sess, f_hi, max_pts=None):
     """Pick the probe's own record (mode, n, dt) for a requested f_hi.
@@ -245,7 +254,7 @@ def plan_frf_grid(n_sess, dt_sess, f_hi, max_pts=None):
                    and the scope window tightens (both restored at the
                    end); the frequency bins coarsen to 1/record.
 
-    dt is chosen so f_hi <= 0.4/dt -- tones keep headroom under Nyquist."""
+    dt is chosen so f_hi <= PROBE_NYQ_MARGIN of the grid's Nyquist."""
     max_pts = max_pts or AWG_MAX_PTS
     t_sess = n_sess * dt_sess
     if f_hi > 5e6:
@@ -253,12 +262,13 @@ def plan_frf_grid(n_sess, dt_sess, f_hi, max_pts=None):
             f"f hi {f_hi/1e6:g} MHz is past the 5 MHz sanity ceiling: the "
             f"monitor chain is long dead up there and the scope record "
             f"cannot carry it")
-    if f_hi <= 0.98 * 0.5 / dt_sess:
+    if f_hi <= PROBE_NYQ_MARGIN * 0.5 / dt_sess:
         return "session", n_sess, dt_sess
-    n_dense = int(np.ceil(2.5 * f_hi * t_sess))      # dt = T/n, f_hi = 0.4/dt
+    dt_need = PROBE_NYQ_MARGIN * 0.5 / f_hi
+    n_dense = int(np.ceil(t_sess / dt_need))
     if n_dense <= max_pts:
         return "dense", n_dense, t_sess / n_dense
-    return "short", max_pts, 0.4 / f_hi
+    return "short", max_pts, dt_need
 
 
 def probe_demand(u, dt, plant_gain, ch, lim=LIMITS):
@@ -2195,7 +2205,7 @@ class App:
                 row=i, column=1, sticky="w")
         ttk.Label(fr, foreground="#666666", text=(
             f"Tones sit on integer bins of the probe's record. Up to "
-            f"{0.98*nyq/1e3:.0f} kHz the probe reuses this\nsession's "
+            f"{PROBE_NYQ_MARGIN*nyq/1e3:.0f} kHz the probe reuses this\nsession's "
             f"{len(s.t)*s.loop.dt*1e3:.3f} ms record; higher bands get a "
             f"denser record (DDS plays the same\nperiod), and past the arb "
             f"memory a shorter one (FRQ + scope window changed for\nthe "
@@ -2439,7 +2449,7 @@ class App:
                 win = float(scope.get(":TIMebase:RANGe"))
             except Exception:
                 win = 1.3 * (t_grid[-1] - t_grid[0])
-            pts = scope_points_for(4.0 * f_top * win)
+            pts = scope_points_for(6.0 * f_top * win)
             print(f"scope readout: {pts} points over the {win*1e3:.3g} ms "
                   f"window for the {f_top/1e3:.0f} kHz band")
         Hs = []

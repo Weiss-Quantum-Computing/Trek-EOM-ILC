@@ -637,10 +637,10 @@ for bad in ((260e3, "past Nyquist"), (0.98 * 0.5 / dtG * 1.01, "at ceiling")):
 # the grid planner: the 2 us grid is the CARD's constraint, not the bench's
 mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 100e3)
 assert mode == "session" and (np_, dtp) == (nG, dtG), (mode, np_, dtp)
-mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 500e3)
+mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 300e3)
 assert mode == "dense" and np_ <= ilc_gui.AWG_MAX_PTS, (mode, np_)
 assert abs(np_ * dtp - nG * dtG) < 1e-12, "dense mode changed the duration"
-assert 500e3 <= 0.4 / dtp + 1, f"dense dt {dtp} cannot carry 500 kHz"
+assert 300e3 <= ilc_gui.PROBE_NYQ_MARGIN * 0.5 / dtp + 1,     f"dense dt {dtp} leaves less than the margin at 300 kHz"
 mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 2e6)
 assert mode == "short" and np_ == ilc_gui.AWG_MAX_PTS, (mode, np_)
 assert np_ * dtp < nG * dtG, "short mode did not shorten the record"
@@ -649,11 +649,15 @@ try:
     raise AssertionError("6 MHz was not refused")
 except RuntimeError:
     pass
-# a dense-grid probe carries tones far past the session Nyquist
+# past the arb memory the record shortens, and the margin holds:
+# tones to 500 kHz keep >= 4 samples per period on the probe grid
 mode, npD, dtD = ilc_gui.plan_frf_grid(nG, dtG, 500e3)
+assert mode == "short" and npD == ilc_gui.AWG_MAX_PTS, (mode, npD)
 u_d, bins_d = ilc_gui.build_frf_probe(npD, dtD, 2.0, 400.0, 500e3, 96)
 recD = npD * dtD
-assert bins_d[-1] / recD > 400e3, f"dense band stopped at {bins_d[-1]/recD:.0f}"
+assert recD < nG * dtG, "short mode kept the full record"
+assert bins_d[-1] / recD > 400e3, f"band stopped at {bins_d[-1]/recD:.0f}"
+assert bins_d[-1] / recD <= ilc_gui.PROBE_NYQ_MARGIN * 0.5 / dtD + 1,     "top tone past the Nyquist margin"
 assert abs(u_d[0]) < 1e-12 and abs(u_d[-1]) < 1e-12
 # the demand gate's numbers: a hot high-band probe exceeds the 610E specs
 # on the flat-gain measure (-> confirmation dialog); a small probe passes
@@ -667,10 +671,11 @@ slw2, ipk2, _ = ilc_gui.probe_demand(u_small, dtG, sN.loop.plant.gain,
                                      sN.loop.channel)
 assert ipk2 < ilc_gui.LIMITS.current and slw2 < ilc_gui.LIMITS.slew_hv, \
     f"a 50 mV probe should pass clean: {ipk2*1e3:.2f} mA"
-print(f"[37] FRF grids: session to {0.98*0.5/dtG/1e3:.0f} kHz, dense "
-      f"({npD} pts, same {recG*1e3:.2f} ms record) to "
-      f"{bins_d[-1]/recD/1e3:.0f} kHz, short past the arb memory, "
-      f"6 MHz refused; demand gate maths: 2 V @ 500 kHz asks "
+print(f"[37] FRF grids: session to "
+      f"{ilc_gui.PROBE_NYQ_MARGIN*0.5/dtG/1e3:.0f} kHz, dense above, short "
+      f"past the arb memory ({npD} pts, {recD*1e3:.2f} ms record to "
+      f"{bins_d[-1]/recD/1e3:.0f} kHz at >= 4 samples/period), 6 MHz "
+      f"refused; demand gate maths: 2 V @ 500 kHz asks "
       f"{ipk*1e3:.0f} mA (confirm), 50 mV @ 24 kHz {ipk2*1e3:.2f} mA (clean)")
 
 # FRF measurement maths: a fake scope plays the probe through a known
@@ -698,7 +703,7 @@ app.fuse_var.set("100e3"); app.fmax_var.set("150e3")
 app._adopt_frf(fpath); root.update()
 assert app.frf_var.get() == fpath, "FRF field not pointed at the result"
 frf_obj = ilc_gui.ilc.FRF(fpath, f_use=100e3, f_max=150e3)
-# the same maths on the DENSE grid: tones past the session's 250 kHz
+# the same maths on the finer grid: tones past the session's 250 kHz
 # Nyquist come back exactly, and a too-coarse scope record is refused
 tD = np.arange(npD) * dtD
 frD = np.fft.rfftfreq(npD, dtD)
@@ -727,8 +732,8 @@ try:
 except RuntimeError as e:
     assert "too coarse" in str(e), e
 print(f"[38] FRF maths: one-pole plant recovered exactly on the session "
-      f"grid AND at {bins_d[-1]/recD/1e3:.0f} kHz on the dense grid; "
-      f"coarse scope record refused; CSV loads as an ilc.FRF")
+      f"grid AND at {bins_d[-1]/recD/1e3:.0f} kHz on the shortened fine "
+      f"grid; coarse scope record refused; CSV loads as an ilc.FRF")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
