@@ -1,10 +1,10 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-38 numbered checks: state round-trips, the span guard, the model ladder,
+39 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
-probe + measurement maths, the iteration
+probe + measurement maths + overlay viewer, the iteration
 table, dot density, linked time axes. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
@@ -735,6 +735,29 @@ print(f"[38] FRF maths: one-pole plant recovered exactly on the session "
       f"grid AND at {bins_d[-1]/recD/1e3:.0f} kHz on the shortened fine "
       f"grid; coarse scope record refused; CSV loads as an ilc.FRF")
 
+# FRF overlay: ';'-separated paths (or globs) draw together for the
+# amplitude-family comparison; the measured-FRF MODEL refuses a list
+app.frf_var.set(FRF + ";" + fpath)
+app.do_show_frf(); root.update()
+mlabs = [l.get_label() for l in app.ax_frf[0].get_lines()
+         if not l.get_label().startswith("_")]
+assert "WIDE_X1" in mlabs and "AUTOTST" in mlabs, mlabs
+old_model = app.model_var.get()
+app.model_var.set("measured FRF (nonparametric)")
+try:
+    app._gather_settings()
+    raise AssertionError("the model accepted a multi-file FRF field")
+except RuntimeError as e:
+    assert "ONE" in str(e), e
+app.frf_var.set(fpath)
+cfgF = app._gather_settings()
+assert cfgF["frf_path"] == fpath, cfgF["frf_path"]
+app.model_var.set(old_model)
+app.frf_var.set(FRF + ";" + fpath)   # left overlaid for the screenshots
+app.do_show_frf(); root.update()
+print("[39] FRF overlay: two files side by side with per-file labels, "
+      "model refuses the list, single path still drives")
+
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
 root.update()
@@ -761,7 +784,8 @@ try:
     for name, fig in (("wave", app.fig_wave), ("dcorr", app.fig_dcor),
                       ("dspec", app.fig_dspec), ("ddelta", app.fig_ddel),
                       ("err", app.fig_err), ("spec", app.fig_spec),
-                      ("conv", app.fig_conv)):
+                      ("conv", app.fig_conv),
+                      ("frf", app.fig_frf)):
         fig.savefig(os.path.join(SCRATCH, f"fig_{name}.png"), dpi=100)
     print("[10b] figure PNGs saved from the canvases")
 except Exception:

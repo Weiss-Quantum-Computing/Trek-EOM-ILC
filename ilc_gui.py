@@ -1546,13 +1546,18 @@ class App:
         cfg = self._floats(gamma=self.gamma_var, f_cut=self.fcut_var,
                            t_offset_us=self.toff_var)
         cfg["mode"] = self._model_key()
-        cfg["frf_path"] = self.frf_var.get().strip()
+        fpaths = self._frf_paths()
+        cfg["frf_path"] = fpaths[0] if fpaths else ""
         if cfg["mode"] == "frf":
-            if not cfg["frf_path"]:
+            if not fpaths:
                 raise RuntimeError("the measured-FRF model needs an FRF file "
-                                   "-- browse to run\\frf_WIDE_<ch>.csv, or "
-                                   "make one with tools/sysid_make.py + "
-                                   "tools/sysid_fit.py")
+                                   "-- browse to run\\frf_<name>.csv, or "
+                                   "measure one (Measure FRF...)")
+            if len(fpaths) > 1:
+                raise RuntimeError(
+                    f"the FRF field lists {len(fpaths)} files (the overlay "
+                    f"view) -- the measured-FRF model divides by exactly "
+                    f"ONE. Keep the one to drive with.")
             cfg.update(self._floats(f_use=self.fuse_var, f_max=self.fmax_var))
         else:
             cfg["params"] = self._entry_params(cfg["mode"], strict=True)
@@ -3413,27 +3418,69 @@ class App:
         ax.grid(True, which="both", alpha=0.3)
         self.fig_conv._canvas.draw_idle()
 
+    def _frf_paths(self):
+        """The FRF field, expanded: semicolon-separated entries, each a
+        path or a glob (Windows paths carry spaces, so ';' separates).
+        Show FRF overlays every match -- amplitude families side by side;
+        the measured-FRF MODEL requires exactly one."""
+        out = []
+        for part in self.frf_var.get().split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if "*" in part or "?" in part:
+                out += sorted(glob.glob(part))
+            else:
+                out.append(part)
+        seen = set()
+        return [p for p in out if not (p in seen or seen.add(p))]
+
     def do_show_frf(self):
-        path = self.frf_var.get().strip()
-        if not os.path.exists(path):
-            return messagebox.showerror("FRF", f"not found: {path!r}")
+        paths = self._frf_paths()
+        if not paths:
+            return messagebox.showerror("FRF", "the FRF field is empty "
+                                        "(or the glob matched nothing)")
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            return messagebox.showerror("FRF", f"not found: {missing[0]!r}")
         try:
             f = self._floats(f_use=self.fuse_var, f_max=self.fmax_var)
         except RuntimeError as e:
             return messagebox.showerror("FRF", str(e))
-        d = pd.read_csv(path)
-        ok = d["coherence"].to_numpy() >= 0.9         # FRF's own default cut
         axm, axp, axc = self.ax_frf
         for ax in self.ax_frf:
             ax.clear()
-        axm.loglog(d["f_Hz"][ok], d["H_mag"][ok], "o-", ms=3, lw=0.9,
-                   color="#1f77b4", label="measured")
-        axm.loglog(d["f_Hz"][~ok], d["H_mag"][~ok], "o", ms=3, mfc="none",
-                   color="#c62828", label="coherence < 0.9 (dropped)")
+        multi = len(paths) > 1
+        names, any_dropped = [], False
+        f_lo_all, f_hi_all = np.inf, 0.0
+        for i, path in enumerate(paths):
+            d = pd.read_csv(path)
+            ok = d["coherence"].to_numpy() >= 0.9     # FRF's own default cut
+            any_dropped = any_dropped or bool((~ok).any())
+            col = ("#1f77b4" if i == 0
+                   else CMP_COLOURS[(i - 1) % len(CMP_COLOURS)])
+            name = re.sub(r"^frf_|\.csv$", "", os.path.basename(path))
+            names.append(name)
+            f_lo_all = min(f_lo_all, float(d["f_Hz"].min()))
+            f_hi_all = max(f_hi_all, float(d["f_Hz"].max()))
+            axm.loglog(d["f_Hz"][ok], d["H_mag"][ok], "o-", ms=3, lw=0.9,
+                       color=col, label=name if multi else "measured")
+            axm.loglog(d["f_Hz"][~ok], d["H_mag"][~ok], "o", ms=3,
+                       mfc="none", color=col if multi else "#c62828",
+                       label=None if multi
+                       else "coherence < 0.9 (dropped)")
+            ph = np.degrees(np.unwrap(
+                np.radians(d["H_phase_deg"][ok].to_numpy())))
+            axp.semilogx(d["f_Hz"][ok], ph, "o-", ms=3, lw=0.9, color=col)
+            axc.semilogx(d["f_Hz"], d["coherence"], "o-", ms=3, lw=0.9,
+                         color=col if multi else "#2e7d32")
+            self.log(f"FRF {name}: {int(ok.sum())}/{len(d)} tones coherent, "
+                     f"{d['f_Hz'].min():.0f}-{d['f_Hz'].max():.0f} Hz")
         axm.set_ylabel("|H| (mon V / AWG V)")
-        axm.set_title(os.path.basename(path))
-        ph = np.degrees(np.unwrap(np.radians(d["H_phase_deg"][ok].to_numpy())))
-        axp.semilogx(d["f_Hz"][ok], ph, "o-", ms=3, lw=0.9, color="#1f77b4")
+        axm.set_title(", ".join(names))
+        if multi and any_dropped:
+            self._plot_note(axm, "open markers: coherence < 0.9 "
+                                 "(dropped on load)", loc="sw")
         axp.set_ylabel("phase, unwrapped (deg)")
 
         # Overlay the current parametric model, if one is selected and filled
@@ -3448,7 +3495,7 @@ class App:
             except RuntimeError:
                 overlay = None
         if overlay:
-            fg = d["f_Hz"].to_numpy(float)
+            fg = np.geomspace(f_lo_all, f_hi_all, 300)
             w = 2j * np.pi * fg
             H = np.full(fg.shape, overlay["gain"], complex)
             if "tau" in overlay:
@@ -3460,22 +3507,18 @@ class App:
                        label=f"model: {DESC_FOR[key]}")
             axp.semilogx(fg, np.degrees(np.unwrap(np.angle(H))), "--",
                          lw=1.1, color="#c68000")
-        axc.semilogx(d["f_Hz"], d["coherence"], "o-", ms=3, lw=0.9,
-                     color="#2e7d32")
         axc.axhline(0.9, color="#c62828", lw=0.7, ls=":")
         axc.set_ylabel("coherence")
         axc.set_xlabel("frequency (Hz)")
         for ax in self.ax_frf:
             ax.axvspan(f["f_use"], f["f_max"], color="#c68000", alpha=0.15)
             ax.grid(True, which="both", alpha=0.3)
-        if (~ok).any() or overlay:
+        if multi or any_dropped or overlay:
             axm.legend(loc="best", fontsize=7)
         self.fig_frf._canvas.draw_idle()
-        self.nb.select(6)
-        self.log(f"FRF {os.path.basename(path)}: "
-                 f"{ok.sum()}/{len(d)} tones coherent, "
-                 f"{d['f_Hz'].min():.0f}-{d['f_Hz'].max():.0f} Hz, "
-                 f"taper {f['f_use']/1e3:g}-{f['f_max']/1e3:g} kHz")
+        # by frame, not index -- tab positions have moved before (measured)
+        self.nb.select(self.fig_frf._canvas.get_tk_widget().master)
+        self.log(f"taper {f['f_use']/1e3:g}-{f['f_max']/1e3:g} kHz shaded")
 
 
 def main():
