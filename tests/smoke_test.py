@@ -16,7 +16,9 @@ Run with the Anaconda interpreter:
 
 Everything the GUI writes is redirected into a per-run scratch folder in
 %TEMP% (reset on every start), so the real run/ state and the AWG
-Waveforms library are never touched.
+Waveforms library are never touched. The MKJX1 campaign data it runs
+against is the committed fixture set in tests/data/ (plus the tracked
+run/frf_WIDE_X1.csv), so a fresh clone can run the whole suite.
 """
 import os, shutil, sys, glob, tempfile, traceback
 import numpy as np
@@ -27,7 +29,9 @@ SCRATCH = os.path.join(tempfile.gettempdir(), "eom-ilc-smoke")
 if os.path.isdir(SCRATCH):
     shutil.rmtree(SCRATCH)
 os.makedirs(SCRATCH)
-shutil.copy(os.path.join(REPO, "run", "drive_MKJX1.state.npz"), SCRATCH)
+FIXTURES = os.path.join(REPO, "tests", "data")   # committed MKJX1 set --
+# the suite runs from a fresh clone; run/ is live scratch and untracked
+shutil.copy(os.path.join(FIXTURES, "drive_MKJX1.state.npz"), SCRATCH)
 sys.path.insert(0, REPO)
 
 import ilc_gui
@@ -47,7 +51,7 @@ os.makedirs(ilc_gui.RUN_DIR, exist_ok=True)
 
 STATE = os.path.join(SCRATCH, "drive_MKJX1.state.npz")
 FRF = os.path.join(REPO, "run", "frf_WIDE_X1.csv")
-MEAS = sorted(glob.glob(os.path.join(REPO, "run", "meas_MKJX1_i*.npy")))[-1]
+MEAS = sorted(glob.glob(os.path.join(FIXTURES, "meas_MKJX1_i*.npy")))[-1]
 
 # ---- 1. pure-library checks -------------------------------------------------
 s = ilc_gui.load_session(STATE)
@@ -150,7 +154,7 @@ assert os.path.exists(os.path.join(ilc_gui.RUN_DIR, "drive_TSTX1.state.npz"))
 # tabs have content, then take a second step so the ghost overlay shows;
 # real meas files beside the state exercise the recall-on-load path too
 import shutil
-for f in sorted(glob.glob(os.path.join(REPO, "run", "meas_MKJX1_i*.npy")))[-2:]:
+for f in sorted(glob.glob(os.path.join(FIXTURES, "meas_MKJX1_i*.npy")))[-2:]:
     shutil.copy(f, SCRATCH)
 app.state_var.set(STATE)
 app.do_load()

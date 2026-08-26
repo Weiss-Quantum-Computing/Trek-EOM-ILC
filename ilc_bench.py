@@ -63,6 +63,22 @@ from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
 from eomilc.config import CHANNELS, HV_PER_MON
 
 
+def find_scope_grab(siblings):
+    """The scope repo was renamed keysight-scope-grab on GitHub (26 Aug
+    2026); a pre-rename checkout (this bench PC) keeps the old folder
+    name. Prefer the new name, fall back to the old, and when neither
+    exists return the NEW path so the error message names the right thing
+    to clone. The SCOPE_GRAB env var overrides everything."""
+    env = os.environ.get("SCOPE_GRAB")
+    if env:
+        return env
+    for name in ("keysight-scope-grab", "scope-grab"):
+        p = os.path.join(siblings, name, "scope_grab.py")
+        if os.path.exists(p):
+            return p
+    return os.path.join(siblings, "keysight-scope-grab", "scope_grab.py")
+
+
 def load_module(path, name):
     """Import one of the bench programs by file path."""
     spec = importlib.util.spec_from_file_location(name, path)
@@ -311,10 +327,7 @@ def main():
     ap.add_argument("--outdir", default="run")
     # sibling repos found relative to this one -- see run_ilc.SIBLINGS
     siblings = os.path.dirname(HERE)
-    ap.add_argument("--scope-grab",
-                    default=os.environ.get(
-                        "SCOPE_GRAB",
-                        os.path.join(siblings, "scope-grab", "scope_grab.py")))
+    ap.add_argument("--scope-grab", default=find_scope_grab(siblings))
     ap.add_argument("--awg-gui",
                     default=os.environ.get(
                         "AWG_GUI",

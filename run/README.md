@@ -20,7 +20,9 @@ stay local.
 | `ilc_gui.log` | timestamped append-only copy of everything the panel logged | `ilc_gui.py` |
 
 `frf_WIDE_X1.csv` / `frf_WIDE_X2.csv` are the production inverses from the
-24–25 Aug 2026 probe campaign — the GUI points at them by default. Keep them.
+24–25 Aug 2026 probe campaign — the GUI points at them by default. They are
+the only run\ data files **tracked in git** (a clone needs a measured
+inverse); everything else here is untracked scratch.
 
 ## Outputs land in more than one place, on purpose
 

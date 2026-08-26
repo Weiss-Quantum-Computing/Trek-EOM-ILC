@@ -2142,9 +2142,9 @@ class App:
 
     def _bench_modules(self):
         if self._modules is None:
-            sg = os.environ.get("SCOPE_GRAB",
-                                os.path.join(SIBLINGS, "scope-grab",
-                                             "scope_grab.py"))
+            # renamed keysight-scope-grab on GitHub; old checkouts keep the
+            # old folder name -- ilc_bench tries both (SCOPE_GRAB overrides)
+            sg = ilc_bench.find_scope_grab(SIBLINGS)
             # bk4063b.py, not the GUI file: that repo moved the instrument
             # class out of the panel (its commit 18142f9)
             ag = os.environ.get("AWG_GUI",

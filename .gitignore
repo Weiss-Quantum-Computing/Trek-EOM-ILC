@@ -1,9 +1,12 @@
 # run/ is the ACTIVE campaign workspace -- states, drives, measurements and
 # FRFs for whatever is currently being iterated. The committed waveforms live
-# in waveforms/; finished campaigns get filed under archive/. Only the README
-# describing the workspace is tracked.
+# in waveforms/; finished campaigns get filed under archive/. Tracked here:
+# the README describing the workspace, and the production wide-probe FRFs
+# that README.md documents as shipping (a clone needs a measured inverse).
 run/*
 !run/README.md
+!run/frf_WIDE_X1.csv
+!run/frf_WIDE_X2.csv
 
 # ... and the same artefacts wherever else they land
 *.state.npz
@@ -17,6 +20,11 @@ archive/
 # The raw scope captures live outside the repo (~260 MB); see EOM_RAMPS_DIR
 cache/
 *.npy
+
+# Committed test fixtures: the minimal MKJX1 set the smoke suite runs from
+# on a fresh clone (state + two measurements, ~220 KB). Must come after the
+# global *.npy / *.state.npz / meas_*.npy excludes above.
+!tests/data/*
 
 __pycache__/
 *.pyc

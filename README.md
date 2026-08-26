@@ -6,7 +6,7 @@ control (ILC) then converges on the residual by dividing the measured error by
 the chain's own measured frequency response H(f).
 
 Built around the two bench programs that already exist —
-[scope-grab](https://github.com/Weiss-Quantum-Computing/scope-grab) and
+[keysight-scope-grab](https://github.com/Weiss-Quantum-Computing/keysight-scope-grab) (a pre-rename checkout may still sit in a `scope-grab` folder -- the bench code accepts either) and
 [BK4063B-AWG-GUI](https://github.com/Weiss-Quantum-Computing/BK4063B-AWG-GUI) —
 whose instrument layers this imports rather than reimplementing, so there is no
 second copy of SCPI to keep in step.
