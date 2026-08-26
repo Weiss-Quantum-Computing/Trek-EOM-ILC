@@ -1,6 +1,6 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-42 numbered checks: state round-trips, the span guard, the model ladder,
+43 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
@@ -827,6 +827,27 @@ assert str(st_rec2["model"]) == "static" and str(st_rec2["frf_path"]) == ""
 assert "gain only" in app.summary.cget("text")
 print("[42] model record: init writes model+FRF+taper into the state, the "
       "summary names it, Load restores panel, fields and loop.frf")
+
+# the FRF edge guard fades the correction's FAST part at the record ends
+# (the truncated-ringing/clamp fight measured on PRFRX1A) but passes the
+# SLOW part -- the idle-offset trim must survive
+frfL = ilc_gui.ilc.FRF(fpath, f_use=100e3, f_max=150e3)
+nT, dtT = 5501, 2e-6
+cC = frfL.lead(np.full(nT, 1e-3), dtT)          # constant (idle-ish) error
+assert abs(cC[0]) > 0.3 * abs(cC[nT // 2]), \
+    f"the guard killed the idle trim: corr[0]={cC[0]:.2e} vs mid " \
+    f"{cC[nT//2]:.2e}"
+eS = np.zeros(nT)
+eS[-40:] = 5e-3                                  # a sharp end transient
+gwin = int(0.2e-3 / dtT)
+ring_on = np.abs(np.diff(frfL.lead(eS, dtT)[-gwin:])).max()
+frfL.t_guard = 0
+ring_off = np.abs(np.diff(frfL.lead(eS, dtT)[-gwin:])).max()
+assert ring_on < 0.2 * ring_off, \
+    f"edge guard not suppressing end ringing: {ring_on:.2e} vs {ring_off:.2e}"
+print(f"[43] FRF edge guard: end ringing {ring_off*1e3:.2f} -> "
+      f"{ring_on*1e3:.3f} mV/sample, idle trim passes "
+      f"(corr[0] {cC[0]*1e3:.2f} vs mid {cC[nT//2]*1e3:.2f} mV)")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")

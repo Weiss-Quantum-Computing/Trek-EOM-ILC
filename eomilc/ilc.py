@@ -274,9 +274,20 @@ class FRF:
         # the drive -- see the f_cut note above) to zero at the ends.
         g = int(round(self.t_guard / dt))
         if g > 0 and 2 * g < n:
+            # Fade only the FAST part of the correction. The slow residue
+            # (below ~0.25/t_guard) is the idle-offset trim -- the reason
+            # _limit_ends allows +/-100 mV at the record ends at all (the
+            # chain's own offsets once parked the EOMs at -9 V when sample
+            # 0 was forced to file-zero) -- and content that slow cannot
+            # ring against the clamp. Zeroing the whole correction here
+            # would freeze the ends at the flat shot's level and leave the
+            # standing idle error uncorrectable forever.
+            base = smooth(u, dt, 0.25 / self.t_guard)
             ramp = 0.5 * (1 - np.cos(np.pi * np.arange(g) / g))   # 0 -> 1
-            u[:g] *= ramp
-            u[n - g:] *= ramp[::-1]
+            w = np.ones(n)
+            w[:g] = ramp
+            w[n - g:] = ramp[::-1]
+            u = base + (u - base) * w
         return u
 
 
