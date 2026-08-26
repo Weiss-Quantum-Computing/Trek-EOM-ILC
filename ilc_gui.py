@@ -209,6 +209,46 @@ def avg_spectrum(e, dt, k=1):
     return f[1:], (acc / m)[1:] * 2 / w.sum()
 
 
+AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 16384))
+# 16384 is the 4063B's datasheet arb memory; this bench has only stored
+# 5301-point records so far, so the true ceiling is unprobed -- if a dense
+# upload is refused on hardware, lower BK4063B_MAX_PTS and re-measure.
+
+
+def plan_frf_grid(n_sess, dt_sess, f_hi, max_pts=None):
+    """Pick the probe's own record (mode, n, dt) for a requested f_hi.
+
+    The 2 us campaign grid is a DOWNSTREAM constraint -- the analog card's
+    lookup table updates every 2 us -- not a bench one: in DDS mode the
+    4063B resamples the whole stored record into one period of FRQ, so the
+    effective sample interval is period/points and a denser record probes
+    higher with nothing else changing. Three regimes:
+
+      'session' -- f_hi fits the session grid: probe on (n_sess, dt_sess),
+                   instruments untouched beyond the upload.
+      'dense'   -- same record duration, more points (fits arb memory):
+                   FRQ, burst, trigger and scope window all unchanged.
+      'short'   -- past what the arb memory carries at full duration: the
+                   record shortens to max_pts * dt, FRQ rises to 1/record
+                   and the scope window tightens (both restored at the
+                   end); the frequency bins coarsen to 1/record.
+
+    dt is chosen so f_hi <= 0.4/dt -- tones keep headroom under Nyquist."""
+    max_pts = max_pts or AWG_MAX_PTS
+    t_sess = n_sess * dt_sess
+    if f_hi > 5e6:
+        raise RuntimeError(
+            f"f hi {f_hi/1e6:g} MHz is past the 5 MHz sanity ceiling: the "
+            f"monitor chain is long dead up there and the scope record "
+            f"cannot carry it")
+    if f_hi <= 0.98 * 0.5 / dt_sess:
+        return "session", n_sess, dt_sess
+    n_dense = int(np.ceil(2.5 * f_hi * t_sess))      # dt = T/n, f_hi = 0.4/dt
+    if n_dense <= max_pts:
+        return "dense", n_dense, t_sess / n_dense
+    return "short", max_pts, 0.4 / f_hi
+
+
 def build_frf_probe(n, dt, peak, f_lo, f_hi, n_tones):
     """Schroeder multitone on the session's own record (tools/sysid_make
     maths): tones on integer FFT bins so the analysis is leak-free, cosine
@@ -224,8 +264,8 @@ def build_frf_probe(n, dt, peak, f_lo, f_hi, n_tones):
         raise RuntimeError(
             f"f hi {f_hi/1e3:g} kHz is past what the {dt*1e6:g} us record "
             f"can carry: probe tones live on this grid's FFT bins, ceiling "
-            f"98% of Nyquist = {0.98*nyq/1e3:.0f} kHz. A higher band needs "
-            f"a finer-dt campaign grid, not a bigger number here.")
+            f"98% of Nyquist = {0.98*nyq/1e3:.0f} kHz. (plan_frf_grid picks "
+            f"a denser record for bands like this -- go through it.)")
     if f_lo < 2 / rec:
         raise RuntimeError(f"f lo {f_lo:g} Hz is below the record's second "
                            f"bin (~{2/rec:.0f} Hz)")
@@ -2128,10 +2168,13 @@ class App:
             ttk.Entry(fr, textvariable=fvars[lab], width=12).grid(
                 row=i, column=1, sticky="w")
         ttk.Label(fr, foreground="#666666", text=(
-            f"Tones sit on integer bins of this session's "
-            f"{len(s.t)*s.loop.dt*1e3:.3f} ms record;\n"
-            f"f hi can go to {0.98*nyq/1e3:.0f} kHz (98% of the grid "
-            f"Nyquist). Uses the bench\npanel's channels/repeats/wait; "
+            f"Tones sit on integer bins of the probe's record. Up to "
+            f"{0.98*nyq/1e3:.0f} kHz the probe reuses this\nsession's "
+            f"{len(s.t)*s.loop.dt*1e3:.3f} ms record; higher bands get a "
+            f"denser record (DDS plays the same\nperiod), and past the arb "
+            f"memory a shorter one (FRQ + scope window changed for\nthe "
+            f"run, restored after; low-f bins coarsen). Sanity ceiling "
+            f"5 MHz. Uses the bench\npanel's channels/repeats/wait; "
             f"output-on asks first, off at the end.\n"
             f"Writes run\\frf_<name>.csv and points the FRF field at it.")
             ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -2148,8 +2191,8 @@ class App:
                 if peak <= 0 or peak > s.full_scale:
                     raise RuntimeError(f"probe peak must be 0 < peak <= "
                                        f"full scale ({s.full_scale:g} V)")
-                u, bins = build_frf_probe(len(s.t), s.loop.dt, peak,
-                                          f_lo, f_hi, tones)
+                mode, n_p, dt_p = plan_frf_grid(len(s.t), s.loop.dt, f_hi)
+                u, bins = build_frf_probe(n_p, dt_p, peak, f_lo, f_hi, tones)
                 f = self._floats(awg_ch=self.awgch_var,
                                  scope_ch=self.scopech_var,
                                  repeats=self.repeats_var, wait=self.wait_var)
@@ -2163,7 +2206,7 @@ class App:
                                                int(f["awg_ch"]),
                                                int(f["scope_ch"]),
                                                int(f["repeats"]), f["wait"],
-                                               fmax_now),
+                                               fmax_now, mode, dt_p),
                 "measuring FRF...")
 
         bb = ttk.Frame(fr)
@@ -2174,8 +2217,13 @@ class App:
             side="left", expand=True, fill="x")
 
     def _measure_frf_work(self, u, bins, name, awg_ch, scope_ch, repeats,
-                          wait_s, fmax_now):
+                          wait_s, fmax_now, mode="session", dt_p=None):
         s = self.session
+        dt_p = dt_p or s.loop.dt
+        n_p = len(u)
+        rec = n_p * dt_p                     # the PROBE's record
+        t_sess = len(s.t) * s.loop.dt        # the session's record
+        t_grid = np.arange(n_p) * dt_p
         scopemod, awgmod = self._bench_modules()
         limit = getattr(awgmod, "MAX_ARB_NAME", NAME_LIMIT)
         if len(name) > limit:
@@ -2186,6 +2234,7 @@ class App:
         print("Scope:", scope.connect())
         uploaded = False
         switched_on = False
+        retune = False           # short mode changed FRQ + scope window
         try:
             problems, notes = ilc_bench.check_awg_channel(
                 awg, awg_ch, full_scale=s.full_scale)
@@ -2203,6 +2252,12 @@ class App:
                       "(Auto-set instruments does it). The FRF has no "
                       "'skip': a wrong AMP rescales H silently.")
                 return
+            if mode == "short" and awg.is_on(awg_ch):
+                print(f"REFUSING: this band needs a shorter record, which "
+                      f"changes FRQ -- and FRQ must not move under a live "
+                      f"output. Switch CH{awg_ch} OFF; the run asks before "
+                      f"switching it back on.")
+                return
             stored = awg.list_waveforms(user_only=True)
             clash = next((n for n in stored
                           if n.lower() == name.lower()), None)
@@ -2213,18 +2268,41 @@ class App:
                     f"cannot read a waveform back out).\n\nOverwrite?"):
                 print(f"FRF cancelled: {clash} left as stored")
                 return
-            ok, switched_on = self._ensure_output_on(awg, awg_ch)
-            if not ok:
-                return
             n_pts, frac = ilc_bench.upload_drive(awg, awg_ch, name, u,
                                                  s.full_scale)
             uploaded = True
-            rec = len(s.t) * s.loop.dt
-            print(f"probe uploaded: {name}, {len(bins)} tones "
-                  f"{bins[0]/rec:.0f} Hz - {bins[-1]/rec/1e3:.1f} kHz, peak "
-                  f"{np.abs(u).max():.3f} V ({100*frac:.1f}% of DAC range)")
+            print(f"probe uploaded: {name}, {n_pts} pts on a "
+                  f"{rec*1e3:.3f} ms record (effective dt {dt_p*1e6:.3g} us"
+                  + (", the session's own grid" if mode == "session" else
+                     f" vs the session's {s.loop.dt*1e6:g} us -- DDS plays "
+                     f"the denser record over the same period" if
+                     mode == "dense" else
+                     f"; record shortened from {t_sess*1e3:.3f} ms, "
+                     f"frequency bins coarsen to {1/rec:.0f} Hz") + ")")
+            print(f"  {len(bins)} tones {bins[0]/rec:.0f} Hz - "
+                  f"{bins[-1]/rec/1e3:.1f} kHz, peak {np.abs(u).max():.3f} V "
+                  f"({100*frac:.1f}% of DAC range)")
+            if mode == "short":
+                # FRQ while the output is still off (checked above), in the
+                # ordering apply_channel honours; scope window to match
+                missed = awg.apply_channel(
+                    awg_ch, {"BSWV": {"FRQ": 1.0 / rec}},
+                    log=lambda m: print("      ", m))
+                if missed:
+                    raise RuntimeError(f"FRQ for the probe record did not "
+                                       f"take: {missed}")
+                rng = nice_setting(1.3 * rec)
+                scope.put(":TIMebase:RANGe", f"{rng:.6g}")
+                scope.put(":TIMebase:POSition", f"{rec/2:.6g}")
+                retune = True
+                print(f"  AWG FRQ -> {1.0/rec:.6g} Hz, scope window -> "
+                      f"{rng*1e3:.4g} ms (both restored at the end)")
+            ok, switched_on = self._ensure_output_on(awg, awg_ch)
+            if not ok:
+                return
             H, coh = self._frf_capture(scope, awg_ch, scope_ch, bins,
-                                       s.t, s.t_off, repeats, wait_s)
+                                       t_grid, s.t_off, repeats, wait_s,
+                                       f_top=bins[-1] / rec)
             f_hz = bins / rec
             path = os.path.join(RUN_DIR, f"frf_{name}.csv")
             write_frf_csv(path, f_hz, H, coh)
@@ -2245,12 +2323,31 @@ class App:
                     print(f"CH{awg_ch} output OFF (end of run)")
                 except Exception as e:
                     print(f"could not switch CH{awg_ch} output off: {e}")
+            if retune:
+                # output is off again -- put the bench back the way the
+                # session's drives expect it
+                try:
+                    missed = awg.apply_channel(
+                        awg_ch, {"BSWV": {"FRQ": 1.0 / t_sess}},
+                        log=lambda m: print("      ", m))
+                    rng = nice_setting(1.3 * t_sess)
+                    scope.put(":TIMebase:RANGe", f"{rng:.6g}")
+                    scope.put(":TIMebase:POSition", f"{t_sess/2:.6g}")
+                    print(f"restored: AWG FRQ {1.0/t_sess:.6g} Hz, scope "
+                          f"window {rng*1e3:.4g} ms. The probe is still the "
+                          f"SELECTED waveform -- the bench loop re-selects "
+                          f"its own drive on upload, or press Auto-set."
+                          + (f" FRQ restore did NOT take: {missed}"
+                             if missed else ""))
+                except Exception as e:
+                    print(f"could not restore FRQ/scope window: {e} -- "
+                          f"press Auto-set instruments before the next run")
             awg.close()
             scope.close()
             print("instruments closed")
 
     def _frf_capture(self, scope, drive_ch, mon_ch, bins, t_grid, t_off,
-                     repeats, wait_s, settle=0.5):
+                     repeats, wait_s, settle=0.5, f_top=None):
         """Per shot: read BOTH the drive and the monitor from the same
         acquisition (the record is frozen between :SINGle and run), put
         them on the record grid, and take H = Y/U at the probe's tone
@@ -2269,6 +2366,17 @@ class App:
             tu, vu = scope.waveform(drive_ch)
             ty, vy = scope.waveform(mon_ch)
             scope.run()
+            if i == 0 and f_top is not None:
+                # measured, not assumed: the scope's record must actually
+                # carry the band before H at the top tones means anything
+                dt_sc = float(np.median(np.diff(tu)))
+                if 0.5 / dt_sc < f_top:
+                    raise RuntimeError(
+                        f"the scope record is too coarse for this band: "
+                        f"{len(tu)} pts at {dt_sc*1e9:.0f} ns puts its "
+                        f"Nyquist at {0.5/dt_sc/1e3:.0f} kHz, below the "
+                        f"top tone ({f_top/1e3:.0f} kHz). Tighten the "
+                        f"window or lower f hi.")
             uu = scopeio.resample(tu, vu, t_grid, t_offset=t_off)
             yy = scopeio.resample(ty, vy, t_grid, t_offset=t_off)
             U = np.fft.rfft(uu - uu.mean())

@@ -634,8 +634,31 @@ for bad in ((260e3, "past Nyquist"), (0.98 * 0.5 / dtG * 1.01, "at ceiling")):
         raise AssertionError(f"f hi {bad[1]} was not refused")
     except RuntimeError:
         pass
-print(f"[37] FRF probe: {len(bins)} tones 400 Hz - {bins[-1]/recG/1e3:.0f} "
-      f"kHz on the session grid, Nyquist ceiling enforced")
+# the grid planner: the 2 us grid is the CARD's constraint, not the bench's
+mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 100e3)
+assert mode == "session" and (np_, dtp) == (nG, dtG), (mode, np_, dtp)
+mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 500e3)
+assert mode == "dense" and np_ <= ilc_gui.AWG_MAX_PTS, (mode, np_)
+assert abs(np_ * dtp - nG * dtG) < 1e-12, "dense mode changed the duration"
+assert 500e3 <= 0.4 / dtp + 1, f"dense dt {dtp} cannot carry 500 kHz"
+mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 2e6)
+assert mode == "short" and np_ == ilc_gui.AWG_MAX_PTS, (mode, np_)
+assert np_ * dtp < nG * dtG, "short mode did not shorten the record"
+try:
+    ilc_gui.plan_frf_grid(nG, dtG, 6e6)
+    raise AssertionError("6 MHz was not refused")
+except RuntimeError:
+    pass
+# a dense-grid probe carries tones far past the session Nyquist
+mode, npD, dtD = ilc_gui.plan_frf_grid(nG, dtG, 500e3)
+u_d, bins_d = ilc_gui.build_frf_probe(npD, dtD, 2.0, 400.0, 500e3, 96)
+recD = npD * dtD
+assert bins_d[-1] / recD > 400e3, f"dense band stopped at {bins_d[-1]/recD:.0f}"
+assert abs(u_d[0]) < 1e-12 and abs(u_d[-1]) < 1e-12
+print(f"[37] FRF grids: session to {0.98*0.5/dtG/1e3:.0f} kHz, dense "
+      f"({npD} pts, same {recG*1e3:.2f} ms record) to "
+      f"{bins_d[-1]/recD/1e3:.0f} kHz, short past the arb memory, "
+      f"6 MHz refused")
 
 # FRF measurement maths: a fake scope plays the probe through a known
 # one-pole plant; the fitted H must match the analytic transfer
@@ -662,8 +685,36 @@ app.fuse_var.set("100e3"); app.fmax_var.set("150e3")
 app._adopt_frf(fpath); root.update()
 assert app.frf_var.get() == fpath, "FRF field not pointed at the result"
 frf_obj = ilc_gui.ilc.FRF(fpath, f_use=100e3, f_max=150e3)
-print(f"[38] FRF maths: one-pole plant recovered exactly at {len(bins)} "
-      f"tones, CSV loads as an ilc.FRF, field adopted + drawn")
+# the same maths on the DENSE grid: tones past the session's 250 kHz
+# Nyquist come back exactly, and a too-coarse scope record is refused
+tD = np.arange(npD) * dtD
+frD = np.fft.rfftfreq(npD, dtD)
+yD = np.fft.irfft(np.fft.rfft(u_d) / (1 + 2j * np.pi * frD * tau_p), n=npD)
+
+class _DenseScope:
+    def single(self, wait_s=None): return True
+    def waveform(self, ch): return (tD + sN.t_off, u_d if ch == 1 else yD)
+    def run(self): pass
+
+class _CoarseScope(_DenseScope):     # a 2 us record cannot carry 500 kHz
+    def waveform(self, ch):
+        return (sN.t + sN.t_off, np.interp(sN.t, tD, u_d if ch == 1 else yD))
+
+HD, cohD = app._frf_capture(_DenseScope(), 1, 3, bins_d, tD, sN.t_off,
+                            repeats=2, wait_s=1, settle=0,
+                            f_top=bins_d[-1] / recD)
+HtrueD = 1.0 / (1.0 + 2j * np.pi * (bins_d / recD) * tau_p)
+assert np.allclose(HD, HtrueD, rtol=1e-6), \
+    f"dense-grid H off by {np.abs(HD - HtrueD).max():.2e}"
+try:
+    app._frf_capture(_CoarseScope(), 1, 3, bins_d, tD, sN.t_off,
+                     repeats=2, wait_s=1, settle=0, f_top=bins_d[-1] / recD)
+    raise AssertionError("coarse scope record was not refused")
+except RuntimeError as e:
+    assert "too coarse" in str(e), e
+print(f"[38] FRF maths: one-pole plant recovered exactly on the session "
+      f"grid AND at {bins_d[-1]/recD/1e3:.0f} kHz on the dense grid; "
+      f"coarse scope record refused; CSV loads as an ilc.FRF")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
