@@ -113,21 +113,32 @@ the parametric model from each iteration's own data as it steps.
 
 ## 5. The hands-off bench loop
 
-1. Both other GUIs closed; scope in HRES on the full window; outputs on;
-   burst firing (the external trigger running).
+1. Both other GUIs closed; burst firing (the external trigger running).
 2. Check **AWG ch / scope ch** (auto-set per channel), **iterations**, and
    **repeats** (64 = the campaign standard; 16 is a usable quick check).
-3. Press **Run bench loop**. Before touching the generator it verifies the
+3. **Auto-set instruments** configures both from what the session already
+   knows: the AWG gets the record's period as its arb frequency (DDS),
+   AMP = 2× full scale / OFST 0, load HZ, and the NCYC-1 EXT burst; the
+   scope gets a window 1.3× the period with the waveform starting at the
+   left edge (position = half the period), HRES acquisition, and verticals
+   sized from the drive and target spans. It **refuses if the channel's
+   output is ON** (changing FRQ/AMP under a live output moves real
+   voltage), and never touches an output switch or the trigger — confirm
+   the shot still fires, then turn the output on in the AWG GUI.
+4. Press **Run bench loop**. Before touching the generator it verifies the
    channel is set up the way the drive file assumes (AMP 20 Vpp, OFST ~0,
    DDS, HRES, enough repeats) and **refuses** on any mismatch — fix the
    setup rather than ticking *skip setup checks*. On the first iteration
    it also cross-checks the trigger alignment against the drive it just
    uploaded and refuses if `t-offset` looks stale.
-4. Each iteration: upload → 64 HRES singles averaged in software (progress
+5. Each iteration: upload → 64 HRES singles averaged in software (progress
    bar; ~25 s at the 20 Hz trigger) → metrics → plots → update → state
    saved. Every measurement is kept as `run\meas_<stem>_iNN.npy`.
-5. **Stop** finishes cleanly: a stop mid-capture discards only that
-   iteration; the state on disk is whatever was last completed.
+6. **Stop** finishes cleanly: a stop mid-capture discards only that
+   iteration; the state on disk is whatever was last completed. When any
+   run that actually played something ends — finished, stopped, or died —
+   the driven channel's **output switches OFF** automatically; a run
+   refused at the setup checks leaves the bench exactly as it found it.
 
 ## 6. Stepping through the model ladder (the demo)
 
@@ -265,4 +276,5 @@ Three kinds of persistence, marked in the tables:
 | **repeats** *(config)* | HRES single shots averaged in software per iteration. 64 is the campaign standard (~25 s at the 20 Hz trigger, dithers the scope's 2.5 mV word lattice to its 0.16 mV floor); 16 is a usable quick check; below 16 is refused. |
 | **wait s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
 | **skip setup checks** *(panel)* | Uploads without verifying AMP/OFST/clock/acquisition mode. A mismatch silently rescales the drive, which is the one error the loop cannot see. Don't. |
-| **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. |
+| **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst; scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. |
+| **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something switches the driven channel's output OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |

@@ -25,12 +25,16 @@ Both GUIs hold their own VISA sessions; close or disconnect them first.
 
 SAFETY POSTURE
 --------------
-This script does NOT set amplitude, offset, load, sample clock, or the output
-state.  Set the channel up in the AWG GUI, turn the output on there, and confirm
-on the monitor that you are where you expect.  This script only:
+This script does NOT set amplitude, offset, load, sample clock, and never
+switches an output ON.  Set the channel up in the AWG GUI, turn the output on
+there, and confirm on the monitor that you are where you expect.  This script
+only:
 
   * uploads a waveform into user memory and selects it,
-  * arms the scope and reads a trace back.
+  * arms the scope and reads a trace back,
+  * switches the driven channel's output OFF when a run that actually played
+    something ends -- off is the harmless direction, and a finished run must
+    not leave the chain driving.
 
 Before the first upload it VERIFIES the channel is configured the way the drive
 file assumes, and refuses to run if it is not.  A mismatch here silently
@@ -68,6 +72,21 @@ def load_module(path, name):
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def make_awg(mod):
+    """Build the generator object from whichever module carries the class.
+
+    The instrument layer moved out of bk4063b_awg_gui.py into bk4063b.py
+    (that repo's commit 18142f9, 'One instrument layer'), renaming Awg to
+    BK4063B whose constructor connects immediately unless told not to.
+    Accept either vintage, and never auto-connect -- the callers here print
+    the IDN from an explicit connect()."""
+    cls = getattr(mod, "BK4063B", None) or getattr(mod, "Awg")
+    try:
+        return cls(connect=False)
+    except TypeError:                    # the old class took no such kwarg
+        return cls()
 
 
 # --------------------------------------------------------------------- AWG
@@ -249,7 +268,9 @@ def main():
                     default=os.environ.get(
                         "AWG_GUI",
                         os.path.join(siblings, "BK4063B-AWG-GUI",
-                                     "bk4063b_awg_gui.py")))
+                                     "bk4063b.py")),
+                    help="the AWG instrument layer -- bk4063b.py since that "
+                         "repo moved the class out of its GUI file")
     ap.add_argument("--awg-dir",
                     default=os.environ.get(
                         "BK4063B_WAVEFORMS",
@@ -348,7 +369,7 @@ def main():
                  history=np.array(loop.history, dtype=object))
 
     # ---- instruments
-    awg = _AWGMOD.Awg()
+    awg = make_awg(_AWGMOD)
     print("AWG:  ", awg.connect())
     scope = scopemod.Scope()
     print("Scope:", scope.connect())
@@ -380,6 +401,7 @@ def main():
 
     os.makedirs(a.outdir, exist_ok=True)
 
+    uploaded_any = False
     try:
         for k in range(k0, k0 + a.iterations + 1):
             rep = loop.check(u)
@@ -389,6 +411,7 @@ def main():
 
             name = f"{stem}_i{k:02d}"                    # <= MAX_ARB_NAME
             n, frac = upload_drive(awg, a.awg_ch, name, u, full_scale)
+            uploaded_any = True
             print(f"\niter {k}: uploaded {name} ({n} pts, {100*frac:.1f}% of DAC range, "
                   f"peak {np.abs(u).max():.4f} V)")
             outputs.write_awg_csv(os.path.join(a.outdir, f"drive_{name}.csv"), t, u)
@@ -414,6 +437,15 @@ def main():
                 u = loop.update(u, y)
                 save_state(k + 1, u)
     finally:
+        # A finished (or died) run leaves nothing driving the chain. Only if
+        # something was actually played: a run refused at the setup checks
+        # leaves the bench exactly as it found it.
+        if uploaded_any:
+            try:
+                awg.set_output(a.awg_ch, False)
+                print(f"CH{a.awg_ch} output OFF (end of run)")
+            except Exception as e:
+                print(f"could not switch CH{a.awg_ch} output off: {e}")
         scope.close()
         awg.close()
 

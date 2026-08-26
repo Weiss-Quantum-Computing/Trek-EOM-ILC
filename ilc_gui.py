@@ -218,6 +218,16 @@ def build_target_waveform(shape, peak, lead_ms, rise_ms, hold_ms, fall_ms,
     return np.arange(len(v)) * dt, v
 
 
+def nice_setting(value):
+    """Smallest 'nice' instrument setting >= value: 1-1.5-2-2.5-3-4-5-7.5-10
+    per decade, the values front panels actually offer."""
+    e = 10.0 ** np.floor(np.log10(value))
+    for m in (1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10):
+        if m * e >= value * (1 - 1e-9):
+            return m * e
+    return 10 * e
+
+
 class _QueueWriter(io.TextIOBase):
     """Routes print() output from the library helpers into the GUI log."""
 
@@ -485,7 +495,12 @@ class App:
         self.skip_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bf, text="skip setup checks (don't)",
                         variable=self.skip_var).grid(row=1, column=0, sticky="w")
-        r2 = ttk.Frame(bf); r2.grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        b = ttk.Button(bf, text="Auto-set instruments  (AWG timing + ampl, "
+                                "scope window + verticals)",
+                       command=self.do_autoset)
+        b.grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        self._actions.append(b)
+        r2 = ttk.Frame(bf); r2.grid(row=3, column=0, sticky="ew", pady=(3, 0))
         self.bench_btn = ttk.Button(r2, text="Run bench loop", command=self.do_bench)
         self.bench_btn.pack(side="left", fill="x", expand=True)
         self._actions.append(self.bench_btn)
@@ -493,8 +508,9 @@ class App:
                                    state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
         ttk.Label(bf, text="Close the AWG GUI and Scope Grab first -- both hold\n"
-                           "their VISA sessions. Scope in HRES, full window.",
-                  foreground="#666666").grid(row=3, column=0, sticky="w")
+                           "their VISA sessions. Outputs switch OFF when a run\n"
+                           "that played anything ends.",
+                  foreground="#666666").grid(row=4, column=0, sticky="w")
         bf.columnconfigure(0, weight=1)
 
         # ---- log ------------------------------------------------------
@@ -1259,6 +1275,88 @@ class App:
         self.msgs.put(("call", lambda: (self._refresh_summary(),
                                         self._show_iteration(u_next, y, m, it))))
 
+    # -------------------------------------------------------------- autoset
+    def do_autoset(self):
+        """Configure the AWG and scope from what the session already knows:
+        the record's period sets the arb frequency and the scope window, the
+        drive and target spans set the verticals. Never touches an output
+        switch, and refuses to reconfigure a channel that is live."""
+        if self.session is None:
+            return messagebox.showerror("Auto-set",
+                                        "load or init a session first -- the "
+                                        "settings come from its timing and "
+                                        "amplitudes")
+        s = self.session
+        try:
+            f = self._floats(awg_ch=self.awgch_var, scope_ch=self.scopech_var)
+        except RuntimeError as e:
+            return messagebox.showerror("Auto-set", str(e))
+        period = float(s.t[-1]) + float(s.loop.dt)
+        u, v = s.u, s.loop.target
+        self.run_worker(lambda: self._autoset_work(
+            period, float(u.min()), float(u.max()),
+            float(v.min()), float(v.max()), s.full_scale,
+            int(f["awg_ch"]), int(f["scope_ch"])),
+            "auto-setting instruments...")
+
+    def _autoset_work(self, period, u_lo, u_hi, v_lo, v_hi, fs,
+                      awg_ch, scope_ch):
+        scopemod, awgmod = self._bench_modules()
+
+        awg = ilc_bench.make_awg(awgmod)
+        print("AWG:  ", awg.connect())
+        try:
+            if awg.is_on(awg_ch):
+                print(f"REFUSING to auto-set CH{awg_ch}: its output is ON, "
+                      f"and changing FRQ/AMP under a live output moves real "
+                      f"voltage at the chain. Switch it off first.")
+                return
+            # apply_channel writes in the only order the 4063B honours
+            # (load before BSWV, SRATE before BSWV, burst last)
+            awg.apply_channel(awg_ch, {
+                "OUTP": {"LOAD": "HZ"},
+                "SRATE": {"MODE": "DDS"},
+                "BSWV": {"WVTP": "ARB", "FRQ": 1.0 / period,
+                         "AMP": 2 * fs, "OFST": 0},
+                "BTWV": {"STATE": "ON", "GATE_NCYC": "NCYC",
+                         "TIME": 1, "TRSR": "EXT"},
+            }, log=lambda m: print("      ", m))
+            print(f"AWG CH{awg_ch}: ARB, DDS, period {period*1e3:.4f} ms "
+                  f"(FRQ {1.0/period:.6g} Hz), AMP {2*fs:g} Vpp, OFST 0, "
+                  f"load HZ, burst NCYC 1 trig EXT -- output left "
+                  f"{'ON' if awg.is_on(awg_ch) else 'OFF'}")
+        finally:
+            awg.close()
+
+        scope = scopemod.Scope()
+        print("Scope:", scope.connect())
+        try:
+            # full window with settle room, waveform start at the left edge:
+            # position (trigger -> screen centre) = half the period
+            rng = nice_setting(1.3 * period)
+            scope.put(":TIMebase:RANGe", f"{rng:.6g}")
+            scope.put(":TIMebase:POSition", f"{period/2:.6g}")
+            scope.put(":ACQuire:TYPE", "HRES")
+            for ch, lo, hi, what in ((awg_ch, u_lo, u_hi, "drive"),
+                                     (scope_ch, v_lo, v_hi, "monitor")):
+                span = max(hi - lo, 1e-3)
+                scale = nice_setting(1.25 * span / 8)      # 8 vertical divs
+                mid = 0.5 * (hi + lo)
+                scope.put(f":CHANnel{ch}:DISPlay", "1")
+                scope.put(f":CHANnel{ch}:SCALe", f"{scale:.6g}")
+                scope.put(f":CHANnel{ch}:OFFSet", f"{mid:.6g}")
+                print(f"scope CH{ch} ({what}): {scale:.3g} V/div, offset "
+                      f"{mid:+.3g} V (signal {lo:+.3g}..{hi:+.3g} V)")
+            print(f"scope: {rng*1e3:.4g} ms window ({rng/10*1e3:.4g} ms/div), "
+                  f"position +{period/2*1e3:.4g} ms, acquisition HRES")
+            print("trigger source and level NOT touched -- they belong to "
+                  "the burst-pulse wiring; confirm the shot still fires")
+            errs = scope.errors()
+            if errs:
+                print("scope reported:", errs)
+        finally:
+            scope.close()
+
     # ------------------------------------------------------------ bench run
     def do_bench(self):
         if self.session is None:
@@ -1282,9 +1380,11 @@ class App:
             sg = os.environ.get("SCOPE_GRAB",
                                 os.path.join(SIBLINGS, "scope-grab",
                                              "scope_grab.py"))
+            # bk4063b.py, not the GUI file: that repo moved the instrument
+            # class out of the panel (its commit 18142f9)
             ag = os.environ.get("AWG_GUI",
                                 os.path.join(SIBLINGS, "BK4063B-AWG-GUI",
-                                             "bk4063b_awg_gui.py"))
+                                             "bk4063b.py"))
             print(f"instrument layers: {sg}")
             print(f"                   {ag}")
             self._modules = (ilc_bench.load_module(sg, "scope_grab"),
@@ -1303,10 +1403,11 @@ class App:
             raise RuntimeError(f"stem {s.stem!r} + '_iNN' is past the "
                                f"{limit}-char name cap")
 
-        awg = awgmod.Awg()
+        awg = ilc_bench.make_awg(awgmod)
         print("AWG:  ", awg.connect())
         scope = scopemod.Scope()
         print("Scope:", scope.connect())
+        uploaded_any = False
         try:
             problems, notes = ilc_bench.check_awg_channel(
                 awg, awg_ch, full_scale=s.full_scale)
@@ -1345,6 +1446,7 @@ class App:
                 wname = f"{s.stem}_i{k:02d}"
                 n, frac = ilc_bench.upload_drive(awg, awg_ch, wname, u,
                                                  s.full_scale)
+                uploaded_any = True
                 print(f"\niter {k}: uploaded {wname} ({n} pts, "
                       f"{100*frac:.1f}% of DAC range, peak {np.abs(u).max():.4f} V)")
                 s.u = u
@@ -1373,6 +1475,14 @@ class App:
                     s.iteration = k + 1
                     save_session(s)
         finally:
+            # a finished (or died) run leaves nothing driving the chain --
+            # but a run refused at the setup checks leaves the bench as found
+            if uploaded_any:
+                try:
+                    awg.set_output(awg_ch, False)
+                    print(f"CH{awg_ch} output OFF (end of run)")
+                except Exception as e:
+                    print(f"could not switch CH{awg_ch} output off: {e}")
             scope.close()
             awg.close()
             print("instruments closed")
@@ -1459,12 +1569,18 @@ class App:
         ax.clear()
         ax.plot(tms, u, color=c, lw=0.9,
                 label=f"drive u (iteration {s.iteration})")
+        fs = s.full_scale
+        ax.axhline(fs, color="#c62828", lw=0.8, ls="--")
+        ax.axhline(-fs, color="#c62828", lw=0.8, ls="--",
+                   label=f"+/-{fs:g} V full scale (AMP {2*fs:g} Vpp, OFST 0)")
         cap = LIMITS.idle_awg
         ax.axhline(cap, color="#c62828", lw=0.6, ls=":")
         ax.axhline(-cap, color="#c62828", lw=0.6, ls=":")
         ax.plot([tms[0], tms[-1]], [u[0], u[-1]], "o", color=c, ms=4, mfc="none")
-        ax.annotate(f"idle {u[0]*1e3:+.1f} mV", (tms[0], u[0]), fontsize=7,
-                    xytext=(4, 8), textcoords="offset points")
+        pk = float(np.abs(u).max())
+        ax.set_title(f"drive peak {pk:.3f} V = {100*pk/fs:.1f}% of DAC range,  "
+                     f"idle {u[0]*1e3:+.1f}/{u[-1]*1e3:+.1f} mV of "
+                     f"{cap*1e3:.0f} mV cap", fontsize=8)
         ax.set_xlabel("time (ms)")
         ax.set_ylabel("AWG drive (V)")
         ax.legend(loc="best", fontsize=7)
