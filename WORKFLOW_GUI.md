@@ -30,7 +30,7 @@ instruments only accept one.
 | **Step from captured files** | one ILC iteration from scope CSVs you captured yourself |
 | **Bench loop** | the hands-off cycle: upload → capture → update |
 | **Log** | everything the loop reports. A timestamped copy appends to `run\ilc_gui.log` |
-| right side | seven plot tabs, refreshed at every step, with an iteration selector above them — see §7 |
+| right side | nine tabs (eight figures plus the Table ledger), refreshed at every step, with the iteration selector and Compare box above them — see §7 |
 
 Every individual field is documented in §10.
 
@@ -209,8 +209,8 @@ optionally with the Iterations grammar after a colon, blank meaning that
 stem's last measured iteration). Their states load read-only from the
 active state's directory and are never saved or stepped; each stem draws
 in its own colour, on its own time grid and monitor scale, against its
-own reference drive. The Convergence tab always shows a compared stem's
-whole peak-error history — that is usually the comparison that matters
+own reference drive. The Convergence tab and the Table always show a compared stem's
+whole campaign — that is usually the comparison that matters
 (X1 vs X2, or the same target before and after a model change).
 
 Hold **runs** draw dashed on the Error and Error spectrum tabs, labelled
@@ -238,10 +238,12 @@ every draw and overrides anything the sliders set.
 |---|---|
 | **Waveforms** | target vs measured output (top); the drive with its first/last-sample idle markers against the ±100 mV cap (bottom). After Init: the model-predicted output instead of a measurement. |
 | **Drive corrections** | the drive side of the Error tab: each selected iteration's AWG waveform minus the target's flat conversion (or minus the stored iteration-0 drive when it exists) — what the loop has learned to *add* at the input, in mV at the AWG. Growth here without matching error shrinkage is the loop learning noise or a wrong inverse. |
+| **Drive spectrum** | the corrections of the tab above, in frequency: where the learned correction lives, mirroring the Error spectrum (band edge drawn the same way). The update cannot put power right of the band edge — content there came from a hand-edited drive, a stale state, or a band that was wider earlier, and the current band cannot remove it. Base measurements only (hold runs replay the same drive), iterations without a stored drive skipped. |
 | **Drive updates** | `u_k − u_(k−1)`: the update each shown iteration actually applied, against the immediately prior iteration's drive (which may come from any stored iteration, selected or not). Shrinking updates are convergence seen from the input; updates that stop shrinking while the error flat-lines mean the loop is re-learning the same correction against noise or drift. |
 | **Error** | target − measured for the selected iterations. Peak/rms of the newest in the title. The stuck peak at t = 0 is the burst-entry transient — the loop cannot fix the idle level (WORKFLOW.md). |
 | **Error spectrum** | where the residual lives. The update only acts left of the drawn band edge (f_cut line, or the shaded FRF taper). Error growing *right* of the edge while the in-band falls is the model diverging — tighten the band or climb the ladder. |
 | **Convergence** | peak and rms error vs iteration, log scale, with model-change annotations. Flat-lining means the current inverse has given what it can. |
+| **Table** | the ledger: one row per stored iteration and hold run — model, peak/rms error (V and %FS), the played drive's peak, wall-clock timestamp, Δt against the reference — compare stems included, the Iterations box deliberately *not* applied. **Save CSV…** writes exactly what the table shows (this tab's equivalent of the figures' toolbar save). |
 | **FRF** | measured magnitude/phase/coherence, dropped tones flagged, taper band shaded, current parametric model overlaid. |
 
 ## 8. Files every step writes
@@ -356,7 +358,7 @@ Three kinds of persistence, marked in the tables:
 | field | what it does |
 |---|---|
 | **Iterations shown** *(config)* | Which stored iterations the Drive corrections, Drive updates, Error and Error spectrum tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
-| **Compare** *(config)* | Other campaigns overlaid on the same plots, read-only: space-separated stems, each optionally `stem:ITERS` with the Iterations grammar (`OLDX1 OLDX2:all OLDX3:0,3`); a blank selection means that stem's last measured iteration. States load from the active state's directory (`drive_<stem>.state.npz` plus its `meas_*.npy` / `drive_*_iNN.csv`), never saved or stepped. Each stem gets one colour, older selected iterations fading; hold runs ride along dashed when **runs** is on. Overlays land on Error, Error spectrum, Drive corrections, Drive updates (each stem against its *own* reference and prior drives, on its *own* time grid and monitor scale), Convergence (the stem's whole peak-error history, regardless of the iteration selection), and the Waveforms output pane (last selected measurement, plus that stem's target when it differs). Δt labels stay active-session-only. A stem with no state or no measurements is reported in the log once per spec. |
+| **Compare** *(config)* | Other campaigns overlaid on the same plots, read-only: space-separated stems, each optionally `stem:ITERS` with the Iterations grammar (`OLDX1 OLDX2:all OLDX3:0,3`); a blank selection means that stem's last measured iteration. States load from the active state's directory (`drive_<stem>.state.npz` plus its `meas_*.npy` / `drive_*_iNN.csv`), never saved or stepped. Each stem gets one colour (hues chosen clear of the active session's viridis ramp), older selected iterations blending toward white; hold runs ride along dashed when **runs** is on. Overlays land on Error, Error spectrum, Drive corrections, Drive spectrum, Drive updates (each stem against its *own* reference and prior drives, on its *own* time grid and monitor scale), Convergence (the stem's whole peak-error history, regardless of the iteration selection), and the Waveforms output pane (last selected measurement, plus that stem's target when it differs). Δt labels stay active-session-only. A stem with no state or no measurements is reported in the log once per spec. |
 | **dot every Nth sample** *(config)* | Marker density on every data trace: blank = auto (~180 dots per trace), a number = that literal subsampling step, `1` = every real sample gets a dot. Enter or **Redraw** applies everywhere, the Waveforms tab and target preview included. |
 | **runs** *(config)* | Show or hide Hold runs on the Error / Error spectrum / Convergence tabs. Runs of every selected iteration draw dashed after their base trace. |
 | **Δt labels** *(config)* | Append wall-clock offsets to legend labels: runs relative to their iteration's base measurement, base iterations relative to the previous one. Off by default — plot clutter only when the timing question is live. |

@@ -1,8 +1,9 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-31 numbered checks: state round-trips, the span guard, the model ladder,
+33 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
-overlays, compare-stem overlays, dot density, linked time axes. No instruments are touched --
+overlays, compare-stem overlays, drive spectrum, the iteration
+table, dot density, linked time axes. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
 scratch folder for eyeballing.
@@ -472,6 +473,42 @@ app.cmpsel_var.set("GENX:all")               # left set for the screenshots
 app._redraw_iterations(); root.update()
 print("[31] compare grammar: blank = last iter, 'GENX:0' picks iteration 0")
 
+# drive-corrections spectrum: same shape as the error spectrum, base
+# measurements only, each stem against its own reference drive
+labs = [l.get_label() for l in app.ax_dspec.get_lines()]
+assert any(l.startswith("iter ") for l in labs), labs
+assert "GENX iter 1" in labs, labs           # drive_GENX_i01.csv exists
+assert "GENX iter 0" not in labs, labs       # the init drive was never stored
+assert not any(" r" in l for l in labs), \
+    f"hold runs leaked into the drive spectrum: {labs}"
+print("[32] drive spectrum drew the stored corrections, runs and "
+      "drive-less iterations excluded")
+
+# compare gradient is a lightness ramp (distinct colours), not alpha
+g0 = next(l for l in app.ax_err.get_lines() if l.get_label() == "GENX iter 0")
+g1 = next(l for l in app.ax_err.get_lines() if l.get_label() == "GENX iter 1")
+assert g0.get_color() != g1.get_color(), "compare gradient collapsed"
+assert g0.get_alpha() in (None, 1.0), "alpha ramp is back"
+
+# Table tab: one row per stored iteration and run, ignoring the
+# Iterations box; CSV save mirrors it exactly
+rows = [app.table.item(i, "values") for i in app.table.get_children()]
+assert {r[0] for r in rows} == {"MKJX1", "GENX"}, rows
+mk = [r for r in rows if r[0] == "MKJX1"]
+gx = [r for r in rows if r[0] == "GENX"]
+assert len(mk) == 9, [r[:3] for r in mk]     # history 0..8, no runs
+assert len(gx) == 3 and gx[2][2] == "r3", gx
+assert any(r[3] for r in mk), "model tags missing from the table"
+assert mk[-1][4] and mk[-1][9], \
+    f"newest MKJX1 row lacks metrics or a timestamp: {mk[-1]}"
+tcsv = os.path.join(SCRATCH, "iterations_test.csv")
+app._save_table_csv(tcsv)
+tdf = pd.read_csv(tcsv)
+assert len(tdf) == len(rows) == 12, (len(tdf), len(rows))
+assert "peak err (V)" in tdf.columns, list(tdf.columns)
+print(f"[33] table: {len(mk)} MKJX1 + {len(gx)} GENX rows (r3 included), "
+      f"CSV mirror saved; compare gradient is colour, not alpha")
+
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
 root.update()
@@ -479,8 +516,9 @@ try:
     from PIL import ImageGrab
     import time
     root.lift(); root.update(); time.sleep(0.4)
-    for i, name in enumerate(["waveforms", "dcorr", "ddelta", "error",
-                              "spectrum", "convergence", "frf"]):
+    for i, name in enumerate(["waveforms", "dcorr", "dspec", "ddelta",
+                              "error", "spectrum", "convergence",
+                              "table", "frf"]):
         app.nb.select(i)
         root.update(); time.sleep(0.25); root.update()
         x, ypos = root.winfo_rootx(), root.winfo_rooty()

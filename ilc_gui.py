@@ -99,9 +99,10 @@ CH_DEFAULTS = {
 }
 TARGET_COLOUR = "#222222"
 PRED_COLOUR = "#8a8a8a"
-# compare-stem overlays: one colour per stem, chosen clear of the channel
-# colours above and of viridis (the active session's iteration ramp)
-CMP_COLOURS = ["#9467bd", "#e377c2", "#17becf", "#bcbd22", "#8c564b",
+# compare-stem overlays: one colour per stem, leading with hues far from
+# viridis (the active session's dark-purple-to-yellow iteration ramp) --
+# purple and cyan sit last because they can pass for viridis endpoints
+CMP_COLOURS = ["#ff7f0e", "#e377c2", "#8c564b", "#9467bd", "#17becf",
                "#7f7f7f"]
 
 # The model ladder: what the update divides the error by, in increasing order
@@ -674,10 +675,12 @@ class App:
         self.nb.pack(fill="both", expand=True)
         self.fig_wave, (self.ax_out, self.ax_drv) = self._tab("Waveforms", 2, sharex=True)
         self.fig_dcor, (self.ax_dcor,) = self._tab("Drive corrections", 1)
+        self.fig_dspec, (self.ax_dspec,) = self._tab("Drive spectrum", 1)
         self.fig_ddel, (self.ax_ddel,) = self._tab("Drive updates", 1)
         self.fig_err, (self.ax_err,) = self._tab("Error", 1)
         self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1)
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
+        self._table_tab()
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True)
 
         # Home on any TIME-domain figure homes them all: the nav stacks of
@@ -703,6 +706,38 @@ class App:
         fig._canvas = canvas
         fig._toolbar = tb
         return fig, axes
+
+    def _table_tab(self):
+        """The one non-figure tab: a ledger of every stored iteration,
+        saveable as CSV the way the figures save as PNG."""
+        frame = ttk.Frame(self.nb)
+        self.nb.add(frame, text="Table")
+        cols = ("stem", "iter", "run", "model", "peak_v", "rms_v",
+                "peak_pct", "rms_pct", "u_pk", "at", "dt")
+        self._table_heads = ("stem", "iter", "run", "model", "peak err (V)",
+                             "rms err (V)", "peak %FS", "rms %FS",
+                             "drive pk (V)", "measured at", "dt")
+        widths = (54, 36, 36, 104, 82, 82, 72, 72, 82, 122, 72)
+        bar = ttk.Frame(frame)
+        bar.pack(side="bottom", fill="x")
+        b = ttk.Button(bar, text="Save CSV...", command=self._save_table)
+        b.pack(side="right", padx=2, pady=2)
+        self._actions.append(b)
+        ttk.Label(bar, text="every stored iteration and hold run, compare "
+                            "stems included -- the Iterations box does not "
+                            "filter this ledger",
+                  foreground="#666666").pack(side="left", padx=4)
+        tv = ttk.Treeview(frame, columns=cols, show="headings")
+        for c, h, w in zip(cols, self._table_heads, widths):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, stretch=(c == "model"),
+                      anchor="w" if c in ("stem", "model", "at", "dt")
+                      else "e")
+        ysb = ttk.Scrollbar(frame, command=tv.yview)
+        tv.configure(yscrollcommand=ysb.set)
+        ysb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        self.table = tv
 
     def _path_row(self, parent, row, label, var, browse):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
@@ -2057,9 +2092,15 @@ class App:
                            CMP_COLOURS[len(groups) % len(CMP_COLOURS)]))
         return groups
 
-    def _cmp_alpha(self, idx, n):
-        """Within one compare stem, older selected iterations fade."""
-        return 1.0 if n <= 1 else 0.45 + 0.55 * idx / (n - 1)
+    def _cmp_colour(self, base, idx, n):
+        """Within one compare stem, older selected iterations blend toward
+        white -- a lightness ramp stays readable where an alpha ramp
+        washed into the background and into the active session's traces."""
+        if n <= 1 or idx == n - 1:
+            return base
+        w = 0.65 * (1 - idx / (n - 1))       # oldest = 65% toward white
+        r, g, b = (int(base[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        return (r + (1 - r) * w, g + (1 - g) * w, b + (1 - b) * w)
 
     def _cmp_label(self, stem, sn):
         lab = f"{stem} iter {sn['it']}"
@@ -2080,25 +2121,26 @@ class App:
                 lab += f"  {suf}"
         return lab
 
-    def _dt_suffix(self, sn):
+    def _dt_suffix(self, sn, s=None):
         """Time offset for the Δt legend labels: a hold run against its
         iteration's base measurement (or the first run when no base was
         measured); a base iteration against the latest earlier iteration."""
+        s = s or self.session
         t = sn.get("t_wall")
         if t is None:
             return ""
         ref = None
         if sn.get("run") is not None:
-            base = self._snaps_by_it().get(sn["it"])
+            base = self._snaps_by_it(s).get(sn["it"])
             if base is not None and base.get("t_wall"):
                 ref = base["t_wall"]
             else:
-                rr = [x["t_wall"] for x in self.session.snapshots
+                rr = [x["t_wall"] for x in s.snapshots
                       if x["it"] == sn["it"] and x.get("run") is not None
                       and x.get("t_wall")]
                 ref = min(rr) if rr else None
         else:
-            earlier = [x["t_wall"] for x in self._snaps_by_it().values()
+            earlier = [x["t_wall"] for x in self._snaps_by_it(s).values()
                        if x["it"] < sn["it"] and x.get("t_wall")]
             ref = max(earlier) if earlier else None
         if ref is None or t <= ref:
@@ -2204,8 +2246,10 @@ class App:
         self._plot_error(snaps, cmp)
         self._plot_spectrum(snaps, cmp)
         self._plot_dcorr(snaps, cmp)
+        self._plot_dspec(snaps, cmp)
         self._plot_ddelta(snaps, cmp)
         self._plot_convergence(cmp)
+        self._fill_table(cmp)
         if self._wave_redraw is not None:
             self._wave_redraw()
 
@@ -2307,8 +2351,9 @@ class App:
             csc = cs.loop.channel.mon_scale
             k = len(csnaps)
             for idx, sn in enumerate(csnaps):
-                ax.plot(ctms, (cs.loop.target - sn["y"]) * csc, color=col,
-                        lw=0.9, alpha=self._cmp_alpha(idx, k),
+                ax.plot(ctms, (cs.loop.target - sn["y"]) * csc,
+                        color=self._cmp_colour(col, idx, k),
+                        lw=1.1 if idx == k - 1 else 0.8,
                         ls="--" if sn.get("run") is not None else "-",
                         label=self._cmp_label(stem, sn),
                         **self._dot_kw(len(ctms), ms=2.6))
@@ -2356,8 +2401,8 @@ class App:
             k = len(csnaps)
             for idx, sn in enumerate(csnaps):
                 fe, ae = asd(cs.loop.target - sn["y"], cs.loop.dt, csc)
-                ax.loglog(fe, ae, color=col, lw=0.8,
-                          alpha=self._cmp_alpha(idx, k),
+                ax.loglog(fe, ae, color=self._cmp_colour(col, idx, k),
+                          lw=1.0 if idx == k - 1 else 0.7,
                           ls="--" if sn.get("run") is not None else "-",
                           label=self._cmp_label(stem, sn),
                           **self._dot_kw(len(fe), ms=2.2))
@@ -2432,8 +2477,9 @@ class App:
                 if u is None or len(u) != len(cs.t):
                     skipped.append(f"{stem} {sn['it']}")
                     continue
-                ax.plot(ctms, (u - c_ref) * 1e3, color=col, lw=0.9,
-                        alpha=self._cmp_alpha(idx, k),
+                ax.plot(ctms, (u - c_ref) * 1e3,
+                        color=self._cmp_colour(col, idx, k),
+                        lw=1.1 if idx == k - 1 else 0.8,
                         label=self._cmp_label(stem, sn),
                         **self._dot_kw(len(ctms), ms=2.6))
                 cshown += 1
@@ -2459,6 +2505,132 @@ class App:
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(ax)
         self.fig_dcor._canvas.draw_idle()
+
+    def _plot_dspec(self, snaps, cmp=()):
+        """Spectrum of the drive corrections, mirroring the error spectrum:
+        where the LEARNED correction lives. In-band structure is the loop
+        doing its job; content right of the band edge is correction the
+        update could not have put there and did not remove -- a hand-edited
+        drive, a stale state, or a band that was wider earlier."""
+        s = self.session
+        ax = self.ax_dspec
+        ax.clear()
+
+        def asd(e, dt):
+            npts = len(e)
+            f = np.fft.rfftfreq(npts, dt)
+            return f[1:], np.abs(np.fft.rfft(e))[1:] * 2 / npts
+
+        # same drive -> same correction: base measurements only, like the
+        # Drive corrections tab
+        snaps = [sn for sn in snaps if sn.get("run") is None]
+        u_ref, _ = self._dcorr_ref(s, gui_gain=True)
+        n = len(snaps)
+        shown = 0
+        for idx, sn in enumerate(snaps):
+            u = sn.get("u")
+            if u is None or len(u) != len(s.t):
+                continue
+            fe, ae = asd((u - u_ref) * 1e3, s.loop.dt)
+            ax.loglog(fe, ae, color=self._iter_colour(idx, n),
+                      lw=1.0 if idx == n - 1 else 0.7,
+                      label=self._snap_label(sn),
+                      **self._dot_kw(len(fe), ms=2.2))
+            shown += 1
+        for stem, cs, csnaps, col in cmp:
+            csnaps = [sn for sn in csnaps if sn.get("run") is None]
+            c_ref, _ = self._dcorr_ref(cs)   # each stem vs its OWN reference
+            k = len(csnaps)
+            for idx, sn in enumerate(csnaps):
+                u = sn.get("u")
+                if u is None or len(u) != len(cs.t):
+                    continue
+                fe, ae = asd((u - c_ref) * 1e3, cs.loop.dt)
+                ax.loglog(fe, ae, color=self._cmp_colour(col, idx, k),
+                          lw=1.0 if idx == k - 1 else 0.7,
+                          label=self._cmp_label(stem, sn),
+                          **self._dot_kw(len(fe), ms=2.2))
+                shown += 1
+        if s.loop.frf is not None:
+            ax.axvspan(s.loop.frf.f_use, s.loop.frf.f_max, color="#c68000",
+                       alpha=0.15, label="FRF taper band")
+            ax.axvline(s.loop.frf.f_max, color="#c68000", lw=0.7, ls="--")
+        else:
+            ax.axvline(s.loop.f_cut, color="#c68000", lw=0.7, ls="--",
+                       label=f"f_cut {s.loop.f_cut/1e3:g} kHz")
+        ax.set_xlabel("frequency (Hz)")
+        ax.set_ylabel("correction amplitude at the AWG (mV)")
+        ax.set_title("where the learned correction lives -- the update "
+                     "cannot put power right of the band edge")
+        if shown:
+            ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
+        else:
+            ax.text(0.5, 0.5, "no drives stored for the selected iterations",
+                    ha="center", va="center", transform=ax.transAxes,
+                    color="#888888")
+        ax.grid(True, which="both", alpha=0.3)
+        self.fig_dspec._canvas.draw_idle()
+
+    def _table_rows(self, cmp=()):
+        """One row per stored base iteration and hold run, compare stems
+        after the active session. History supplies the metrics (it carries
+        the model tag); snapshots add what only they know -- the played
+        drive's peak, the wall-clock time, the dt against the reference."""
+        def row(stem, s, it, run, m, sn):
+            def num(key):
+                v = m.get(key) if isinstance(m, dict) else None
+                return f"{v:.3f}" if v is not None else ""
+            u = sn.get("u") if sn else None
+            tw = sn.get("t_wall") if sn else None
+            return (stem, it, f"r{run}" if run is not None else "",
+                    (m.get("model") or "") if isinstance(m, dict) else "",
+                    num("peak_err_hv"), num("rms_err_hv"),
+                    num("peak_pct"), num("rms_pct"),
+                    f"{np.abs(u).max():.3f}" if u is not None else "",
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tw))
+                    if tw else "",
+                    self._dt_suffix(sn, s) if sn else "")
+
+        rows = []
+        for stem, s in [(self.session.stem, self.session)] + \
+                       [(g[0], g[1]) for g in cmp]:
+            by_it = self._snaps_by_it(s)
+            hist = list(s.loop.history)
+            for i in sorted(set(range(len(hist))) | set(by_it)):
+                sn = by_it.get(i)
+                m = hist[i] if i < len(hist) else sn["m"]
+                rows.append(row(stem, s, i, None, m, sn))
+                for r in sorted((x for x in s.snapshots
+                                 if x["it"] == i and x.get("run") is not None),
+                                key=lambda x: x["run"]):
+                    rows.append(row(stem, s, i, r["run"], r["m"], r))
+        return rows
+
+    def _fill_table(self, cmp=()):
+        tv = self.table
+        tv.delete(*tv.get_children())
+        for r in self._table_rows(cmp):
+            tv.insert("", "end", values=r)
+
+    def _save_table(self):
+        if self.session is None or not self.table.get_children():
+            return messagebox.showerror("Table", "nothing to save yet")
+        path = filedialog.asksaveasfilename(
+            title="Save iteration table", defaultextension=".csv",
+            initialdir=RUN_DIR,
+            initialfile=f"iterations_{self.session.stem}.csv",
+            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        self._save_table_csv(path)
+        self.log(f"table saved to {path}")
+
+    def _save_table_csv(self, path):
+        """Exactly what the Table tab shows, as CSV."""
+        rows = [self.table.item(i, "values")
+                for i in self.table.get_children()]
+        pd.DataFrame(rows, columns=self._table_heads).to_csv(path,
+                                                             index=False)
 
     def _plot_ddelta(self, snaps, cmp=()):
         """Iteration-to-iteration drive change: u_k minus u_(k-1) -- the
@@ -2502,8 +2674,9 @@ class App:
                         or len(u) != len(cs.t) or len(up) != len(cs.t)):
                     skipped.append(f"{stem} {sn['it']}")
                     continue
-                ax.plot(ctms, (u - up) * 1e3, color=col, lw=0.9,
-                        alpha=self._cmp_alpha(idx, k),
+                ax.plot(ctms, (u - up) * 1e3,
+                        color=self._cmp_colour(col, idx, k),
+                        lw=1.1 if idx == k - 1 else 0.8,
                         label=f"{self._cmp_label(stem, sn)} "
                               f"- iter {sn['it'] - 1}",
                         **self._dot_kw(len(ctms), ms=2.6))
