@@ -152,6 +152,10 @@ class Session:
         self.full_scale = float(full_scale)
         self.t_off = float(t_off)
         self.snapshots = []          # [{it, y, m}] measurements seen this session
+        self.model_key = ""          # which inverse drives the campaign --
+        self.frf_path = ""           # recorded in the state so the runs
+        self.frf_use = 0.0           # are self-documenting and a resumed
+        self.frf_max = 0.0           # session restores the same model
 
     @property
     def channel(self):
@@ -161,10 +165,21 @@ class Session:
 def load_session(path) -> Session:
     st = run_ilc.load_state(path)
     loop = run_ilc.build_loop(st)
-    return Session(state_path=os.path.abspath(path), loop=loop,
-                   t=st["t"], u=st["u"], iteration=int(st["iteration"]),
-                   stem=str(st["name"]), full_scale=float(st["full_scale"]),
-                   t_off=float(st["t_offset"]))
+    s = Session(state_path=os.path.abspath(path), loop=loop,
+                t=st["t"], u=st["u"], iteration=int(st["iteration"]),
+                stem=str(st["name"]), full_scale=float(st["full_scale"]),
+                t_off=float(st["t_offset"]))
+    # model record (absent in pre-27-Aug states -- everything defaults off)
+    s.model_key = str(st["model"]) if "model" in st else ""
+    s.frf_path = str(st["frf_path"]) if "frf_path" in st else ""
+    s.frf_use = float(st["frf_use"]) if "frf_use" in st else 0.0
+    s.frf_max = float(st["frf_max"]) if "frf_max" in st else 0.0
+    if s.model_key == "frf" and s.frf_path and os.path.exists(s.frf_path):
+        try:                       # the loop resumes with its recorded inverse
+            loop.frf = ilc.FRF(s.frf_path, f_use=s.frf_use, f_max=s.frf_max)
+        except (ValueError, OSError, KeyError):
+            pass                   # the panel will complain at the next step
+    return s
 
 
 def save_session(s: Session):
@@ -175,7 +190,9 @@ def save_session(s: Session):
              offset=lp.plant.offset, tau2=lp.plant.tau2, fn=lp.plant.fn,
              zeta=lp.plant.zeta, full_scale=s.full_scale, name=s.stem,
              gamma=lp.gamma, f_cut=lp.f_cut, iteration=s.iteration,
-             t_offset=s.t_off, history=np.array(lp.history, dtype=object))
+             t_offset=s.t_off, history=np.array(lp.history, dtype=object),
+             model=s.model_key, frf_path=s.frf_path,
+             frf_use=s.frf_use, frf_max=s.frf_max)
 
 
 def avg_spectrum(e, dt, k=1):
@@ -1404,6 +1421,17 @@ class App:
         self.fs_var.set(f"{s.full_scale:g}")
         self._set_param_entries(s.loop.plant)
         self._apply_channel_defaults(s.channel)
+        if s.model_key:
+            self.model_var.set(KEY2LABEL.get(s.model_key,
+                                             self.model_var.get()))
+            self._update_model_fields()
+            if s.model_key == "frf" and s.frf_path:
+                self.frf_var.set(s.frf_path)
+                self.fuse_var.set(f"{s.frf_use:g}")
+                self.fmax_var.set(f"{s.frf_max:g}")
+                if not os.path.exists(s.frf_path):
+                    self.log(f"NOTE: the state's recorded FRF file is "
+                             f"missing: {s.frf_path}")
         self.log(f"loaded {path}")
         self.log(f"  {s.channel} iteration {s.iteration}, stem {s.stem}, "
                  f"gamma {s.loop.gamma:g}, f_cut {s.loop.f_cut/1e3:g} kHz, "
@@ -1459,6 +1487,25 @@ class App:
         # it is the parametric model stored in the state, drives the
         # model-predicted-output trace, and is what parametric updates use.
         mode = self._model_key()
+        frf_rec = ("", 0.0, 0.0)
+        if mode == "frf":
+            fps = self._frf_paths()
+            if len(fps) != 1:
+                return messagebox.showerror(
+                    "Init", f"the measured-FRF model needs exactly ONE file "
+                            f"in the FRF field (it holds {len(fps)})")
+            if not os.path.exists(fps[0]):
+                return messagebox.showerror("Init",
+                                            f"FRF not found: {fps[0]!r}")
+            try:
+                fb = self._floats(f_use=self.fuse_var, f_max=self.fmax_var)
+            except RuntimeError as e:
+                return messagebox.showerror("Init", str(e))
+            if not 0 < fb["f_use"] < fb["f_max"]:
+                return messagebox.showerror(
+                    "Init", f"the taper needs 0 < f_use < f_max "
+                            f"(got {fb['f_use']:g}/{fb['f_max']:g})")
+            frf_rec = (fps[0], fb["f_use"], fb["f_max"])
         seed_key = "resonant" if mode == "frf" else mode
         # one-number bootstrap: a typed first-shot gain can seed a blank
         # model gain, so either box alone is enough to start from scratch
@@ -1503,6 +1550,8 @@ class App:
         s = Session(state_path=state_path, loop=loop, t=t, u=u, iteration=0,
                     stem=stem, full_scale=f["full_scale"],
                     t_off=f["t_offset_us"] * 1e-6)
+        s.model_key = mode
+        s.frf_path, s.frf_use, s.frf_max = frf_rec
         save_session(s)
         self.session = s
         self.state_var.set(state_path)
@@ -1522,7 +1571,10 @@ class App:
                  f"{np.abs(plant.forward(u)-v).max()*ch.mon_scale:.1f} V "
                  f"(the model's guess at what that measurement shows)")
         if mode == "frf":
-            self.log("  the measured FRF takes over at the first step")
+            self.log(f"  model       : measured FRF "
+                     f"{os.path.basename(frf_rec[0])}, taper "
+                     f"{frf_rec[1]/1e3:g}-{frf_rec[2]/1e3:g} kHz -- takes "
+                     f"over at the first step (recorded in the state)")
         self.log(f"  limit check : {rep}")
         self.log(f"  wrote {out}")
         self.log(f"        {gui}  (GUI-ready, upload with Normalise OFF)")
@@ -1540,13 +1592,23 @@ class App:
             text=f"Upload {s.stem}_i{s.iteration:02d} to AWG")
         lp = s.loop
         idle = (s.u[0] * 1e3, s.u[-1] * 1e3)
-        txt = (f"{s.channel}  '{s.stem}'  iteration {s.iteration}\n"
+        if s.model_key == "frf":
+            tag = (f"  --  FRF {os.path.basename(s.frf_path) or '?'} "
+                   f"{s.frf_use/1e3:g}-{s.frf_max/1e3:g}k")
+            band = ""
+        elif s.model_key:
+            tag = f"  --  {DESC_FOR.get(s.model_key, s.model_key)}"
+            band = f"f_cut {lp.f_cut/1e3:g} kHz, "
+        else:                        # a pre-record state: show what we know
+            tag = ""
+            band = f"f_cut {lp.f_cut/1e3:g} kHz, "
+        txt = (f"{s.channel}  '{s.stem}'  iteration {s.iteration}{tag}\n"
                f"target {np.ptp(lp.target)*lp.channel.mon_scale:.0f} V pk-pk, "
                f"{len(s.t)} pts, dt {lp.dt*1e6:.2f} us\n"
                f"drive peak {np.abs(s.u).max():.3f} V, idle "
                f"{idle[0]:+.1f}/{idle[1]:+.1f} mV of "
                f"{LIMITS.idle_awg*1e3:.0f} mV cap\n"
-               f"gamma {lp.gamma:g}, f_cut {lp.f_cut/1e3:g} kHz, "
+               f"gamma {lp.gamma:g}, {band}"
                f"t-offset {s.t_off*1e6:g} us, "
                f"history {len(lp.history)} iterations")
         self.summary.configure(text=txt)
@@ -1606,6 +1668,8 @@ class App:
                   f"({s.loop.frf.f[0]:.0f}-{s.loop.frf.f[-1]:.0f} Hz, "
                   f"taper {cfg['f_use']/1e3:g}-{cfg['f_max']/1e3:g} kHz)")
             cfg["desc"] = (f"FRF {cfg['f_use']/1e3:g}-{cfg['f_max']/1e3:g}k")
+            s.model_key, s.frf_path = "frf", cfg["frf_path"]
+            s.frf_use, s.frf_max = cfg["f_use"], cfg["f_max"]
         else:
             if s.loop.frf is not None:
                 print(f"FRF off -- {KEY2LABEL[cfg['mode']]} lead, confined to "
@@ -1617,6 +1681,8 @@ class App:
                 print(f"plant -> {new}")
             s.loop.plant = new
             cfg["desc"] = DESC_FOR[cfg["mode"]]
+            s.model_key = cfg["mode"]
+            s.frf_path, s.frf_use, s.frf_max = "", 0.0, 0.0
 
     def _write_iteration(self, wname):
         """Drive CSV in run\\, GUI-previewable copy in the AWG library --

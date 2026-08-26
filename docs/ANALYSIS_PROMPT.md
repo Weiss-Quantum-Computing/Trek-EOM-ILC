@@ -24,7 +24,10 @@ plotting helpers — the repo has them, use them.
   `history[i]` = metrics of measurement i. Its optional `"model"` tag names
   the model that CONSUMED measurement i to build drive i+1 — so the model
   that BUILT drive i is `history[i-1]`'s tag, and drive 0 is Init's flat
-  conversion `target/gain`, no model involved.
+  conversion `target/gain`, no model involved. States written from 27 Aug
+  also carry the CURRENT model record: `model`
+  (`static`/`one_pole`/`resonant`/`frf`) and, in frf mode,
+  `frf_path`/`frf_use`/`frf_max`.
 - `meas_<stem>_iNN.npy` — measurement of iteration NN (monitor V, on the
   state's `t` grid, already the average of 64 HRES scope repeats).
   `meas_<stem>_iNN_rMM.npy` — hold-mode re-measurement MM of the SAME

@@ -11,7 +11,7 @@ stay local.
 
 | pattern | what it is | written by |
 |---|---|---|
-| `drive_<stem>.state.npz` | **the loop's memory**: target, current drive, plant, gamma/f_cut/t-offset, iteration counter, error history. Loading it resumes the campaign; deleting it ends it. | `run_ilc.py init`, rewritten by every step |
+| `drive_<stem>.state.npz` | **the loop's memory**: target, current drive, plant, gamma/f_cut/t-offset, iteration counter, error history, and (27 Aug on) the model record — `model` key (`static`/`one_pole`/`resonant`/`frf`) plus `frf_path`/`frf_use`/`frf_max` when the measured inverse drives. Loading it resumes the campaign, model included; deleting it ends it. | `run_ilc.py init`, rewritten by every step |
 | `drive_<stem>_iNN.csv` / `_iterN.csv` | the drive played at iteration N (`time_us,voltage_V`) | each step / bench iteration |
 | `meas_<stem>_iNN.npy` | the averaged monitor trace measured at iteration N, on the waveform grid | `ilc_bench.py` and the GUI's bench loop |
 | `meas_<stem>_iNN[_rMM]_native.npz` | the same average at the SCOPE's own sample rate (`t` = waveform time, `y` = monitor V) — kept only when the GUI's *keep native-rate avg* box is ticked; feeds the native-rate spectrum | the GUI's bench loop and Hold |

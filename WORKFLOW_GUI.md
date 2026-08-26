@@ -98,7 +98,9 @@ looking. To switch campaigns, or if nothing was remembered:
 
 1. **State** → browse to `run\drive_<stem>.state.npz` → **Load state**.
    Everything — target, current drive, plant, γ, f_cut, t-offset, error
-   history — comes from the file. The last two measurements beside it are
+   history, and the model record (which rung of the ladder, and for the
+   measured FRF the file + taper, restored into the panel and the loop)
+   — comes from the file. The last two measurements beside it are
    recalled into the plots, so you see where the campaign stands.
 2. Channel defaults (AWG/scope channels, monitor column, the wide FRF with
    its 50/75 kHz taper) fill themselves from the state's channel.

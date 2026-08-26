@@ -1,6 +1,6 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-41 numbered checks: state round-trips, the span guard, the model ladder,
+42 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
@@ -789,6 +789,44 @@ except RuntimeError as e:
 app.fuse_var.set("100e3"); app.fmax_var.set("150e3")
 app.model_var.set(cur_model); app._update_model_fields()
 print("[41] zero-width/inverted tapers refused with the 0.9x guidance")
+
+# the state records which inverse drives the campaign, the summary shows
+# it, and Load restores the panel to it
+app.model_var.set("measured FRF (nonparametric)"); app._update_model_fields()
+app.target_var.set(os.path.join(REPO, "waveforms", "target_MKJX1.csv"))
+app.channel_var.set("EO1")
+app.stem_var.set("FRFREC")
+app.shotgain_var.set("0.8"); app.pgain_var.set("0.56")
+app.frf_var.set(fpath)
+app.fuse_var.set("100e3"); app.fmax_var.set("150e3")
+app.do_init(); root.update()
+st_rec = ilc_gui.run_ilc.load_state(
+    os.path.join(ilc_gui.RUN_DIR, "drive_FRFREC.state.npz"))
+assert str(st_rec["model"]) == "frf", st_rec.get("model")
+assert str(st_rec["frf_path"]).endswith("frf_AUTOTST.csv")
+assert float(st_rec["frf_use"]) == 100e3 and float(st_rec["frf_max"]) == 150e3
+assert "FRF frf_AUTOTST.csv 100-150k" in app.summary.cget("text"), \
+    app.summary.cget("text")
+# flip the panel away, reload the state, the panel comes back
+app.model_var.set("gain only (0th order)"); app._update_model_fields()
+app.frf_var.set("")
+app.state_var.set(os.path.join(ilc_gui.RUN_DIR, "drive_FRFREC.state.npz"))
+app.do_load(); root.update()
+assert app.model_var.get() == "measured FRF (nonparametric)", \
+    app.model_var.get()
+assert app.frf_var.get() == fpath and app.fuse_var.get() == "100000"
+assert app.session.loop.frf is not None, "loop resumed without its inverse"
+assert str(app._fcut_entry.cget("state")) == "disabled"  # fields followed
+# a parametric init records its rung too
+app.model_var.set("gain only (0th order)"); app._update_model_fields()
+app.stem_var.set("PARREC")
+app.do_init(); root.update()
+st_rec2 = ilc_gui.run_ilc.load_state(
+    os.path.join(ilc_gui.RUN_DIR, "drive_PARREC.state.npz"))
+assert str(st_rec2["model"]) == "static" and str(st_rec2["frf_path"]) == ""
+assert "gain only" in app.summary.cget("text")
+print("[42] model record: init writes model+FRF+taper into the state, the "
+      "summary names it, Load restores panel, fields and loop.frf")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
