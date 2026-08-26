@@ -655,10 +655,23 @@ u_d, bins_d = ilc_gui.build_frf_probe(npD, dtD, 2.0, 400.0, 500e3, 96)
 recD = npD * dtD
 assert bins_d[-1] / recD > 400e3, f"dense band stopped at {bins_d[-1]/recD:.0f}"
 assert abs(u_d[0]) < 1e-12 and abs(u_d[-1]) < 1e-12
+# the demand gate's numbers: a hot high-band probe exceeds the 610E specs
+# on the flat-gain measure (-> confirmation dialog); a small probe passes
+slw, ipk, hvpk = ilc_gui.probe_demand(u_d, dtD, sN.loop.plant.gain,
+                                      sN.loop.channel)
+assert ipk > ilc_gui.LIMITS.current and slw > ilc_gui.LIMITS.slew_hv, \
+    f"2 V @ 500 kHz should exceed the demand specs: {slw/1e6:.1f} V/us"
+assert hvpk < ilc_gui.LIMITS.hv_max, "2 V probe cannot near 6 kV"
+u_small, b_small = ilc_gui.build_frf_probe(nG, dtG, 0.05, 400.0, 24e3, 48)
+slw2, ipk2, _ = ilc_gui.probe_demand(u_small, dtG, sN.loop.plant.gain,
+                                     sN.loop.channel)
+assert ipk2 < ilc_gui.LIMITS.current and slw2 < ilc_gui.LIMITS.slew_hv, \
+    f"a 50 mV probe should pass clean: {ipk2*1e3:.2f} mA"
 print(f"[37] FRF grids: session to {0.98*0.5/dtG/1e3:.0f} kHz, dense "
       f"({npD} pts, same {recG*1e3:.2f} ms record) to "
       f"{bins_d[-1]/recD/1e3:.0f} kHz, short past the arb memory, "
-      f"6 MHz refused")
+      f"6 MHz refused; demand gate maths: 2 V @ 500 kHz asks "
+      f"{ipk*1e3:.0f} mA (confirm), 50 mV @ 24 kHz {ipk2*1e3:.2f} mA (clean)")
 
 # FRF measurement maths: a fake scope plays the probe through a known
 # one-pole plant; the fitted H must match the analytic transfer

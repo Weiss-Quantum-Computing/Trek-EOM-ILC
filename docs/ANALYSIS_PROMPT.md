@@ -85,7 +85,7 @@ from eomilc import plant as plantmod    # plantmod.identify(u, y, dt, model=...)
   (Nyquist 250 kHz at dt 2 µs). Content above that — and the top octave
   without the boxcar's sinc droop — needs the RAW Scope Grab CSVs or the bench-kept `meas_*_native.npz`,
   processed by interpolating the target onto the scope's time base (the
-  GUI's "Spectrum from captures" button does exactly this; do the same
+  GUI's "Native spectrum" button does exactly this; do the same
   in scripts rather than decimating first).
 
 ## What already exists (do not re-plot it)

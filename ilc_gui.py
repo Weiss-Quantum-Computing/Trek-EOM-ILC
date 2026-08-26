@@ -249,6 +249,19 @@ def plan_frf_grid(n_sess, dt_sess, f_hi, max_pts=None):
     return "short", max_pts, 0.4 / f_hi
 
 
+def probe_demand(u, dt, plant_gain, ch, lim=LIMITS):
+    """What the probe ASKS the amplifier for, under a flat-gain worst case:
+    peak EOM slew (V/s), the capacitive current that slew implies, and the
+    peak EOM voltage. Flat gain deliberately ignores the chain's rolloff --
+    the Trek cannot actually deliver these numbers above its band (its own
+    slew/current limiting caps what flows, which is precisely the point:
+    the figures measure how hard the probe pushes the amp into limiting,
+    not what the EOM will see)."""
+    hv = np.asarray(u, float) * plant_gain * ch.mon_scale
+    slew = float(np.abs(np.gradient(hv, dt)).max())
+    return slew, lim.load_capacitance * slew, float(np.abs(hv).max())
+
+
 def build_frf_probe(n, dt, peak, f_lo, f_hi, n_tones):
     """Schroeder multitone on the session's own record (tools/sysid_make
     maths): tones on integer FFT bins so the analysis is leak-free, cosine
@@ -500,8 +513,8 @@ class App:
         right.pack(side="left", fill="both", expand=True)
 
         # ---- session -------------------------------------------------
-        sf = ttk.LabelFrame(left, text="Session", padding=4)
-        sf.pack(fill="x", pady=(0, 4))
+        sf = ttk.LabelFrame(left, text="Session", padding=3)
+        sf.pack(fill="x", pady=(0, 2))
         self.state_var = tk.StringVar(value=self.cfg.get("state", ""))
         self._path_row(sf, 0, "State", self.state_var,
                        lambda: self._browse(self.state_var, "State files",
@@ -553,18 +566,18 @@ class App:
 
         b = ttk.Button(sf, text="Init  (first shot = flat conversion, "
                                 "target / gain)", command=self.do_init)
-        b.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(3, 0))
+        b.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         self._actions.append(b)
 
         self.summary = ttk.Label(sf, text="no session loaded", justify="left",
                                  font=MONO)
-        self.summary.grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.summary.grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
         sf.columnconfigure(1, weight=1)
 
         # ---- inverse model -------------------------------------------
         vf = ttk.LabelFrame(left, text="Inverse model (what the update "
-                                       "divides the error by)", padding=4)
-        vf.pack(fill="x", pady=(0, 4))
+                                       "divides the error by)", padding=3)
+        vf.pack(fill="x", pady=(0, 2))
         self.model_var = tk.StringVar(
             value=self.cfg.get("model", KEY2LABEL["frf"]))
         if self.model_var.get() not in LABEL2KEY:
@@ -639,8 +652,8 @@ class App:
         # nothing here touches the first shot, which is a pure flat
         # conversion. Applies to both Step and the bench loop.
         pf = ttk.LabelFrame(left, text="Capture post-processing "
-                                       "(Step + Bench)", padding=4)
-        pf.pack(fill="x", pady=(0, 4))
+                                       "(Step + Bench)", padding=3)
+        pf.pack(fill="x", pady=(0, 2))
         r0 = ttk.Frame(pf); r0.grid(row=0, column=0, sticky="ew")
         self.toff_var = tk.StringVar(value="0.0")
         self.zerobase_var = tk.BooleanVar(value=False)
@@ -655,8 +668,8 @@ class App:
         pf.columnconfigure(0, weight=1)
 
         # ---- manual step ---------------------------------------------
-        mf = ttk.LabelFrame(left, text="Step from captured files", padding=4)
-        mf.pack(fill="x", pady=(0, 4))
+        mf = ttk.LabelFrame(left, text="Step from captured files", padding=3)
+        mf.pack(fill="x", pady=(0, 2))
         self.meas_var = tk.StringVar(value=self.cfg.get("measured", ""))
         self._path_row(mf, 0, "Captures", self.meas_var, self._browse_measured)
         r1 = ttk.Frame(mf); r1.grid(row=1, column=0, columnspan=4, sticky="ew", pady=1)
@@ -668,20 +681,22 @@ class App:
         self.force_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(r1, text="refit plant", variable=self.refit_var).pack(side="left")
         ttk.Checkbutton(r1, text="force", variable=self.force_var).pack(side="left")
-        self.step_btn = ttk.Button(mf, text="Step  (average captures -> update drive)",
+        r2 = ttk.Frame(mf)
+        r2.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        self.step_btn = ttk.Button(r2, text="Step  (captures -> update drive)",
                                    command=self.do_step)
-        self.step_btn.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(3, 0))
+        self.step_btn.pack(side="left", fill="x", expand=True)
         self._actions.append(self.step_btn)
-        b = ttk.Button(mf, text="Spectrum from captures  (native scope rate)",
+        b = ttk.Button(r2, text="Native spectrum",
                        command=self.do_native_spec)
-        b.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        b.pack(side="left", padx=(4, 0))
         self._actions.append(b)
         mf.columnconfigure(1, weight=1)
 
         # ---- bench loop ----------------------------------------------
         bf = ttk.LabelFrame(left, text="Bench loop (upload -> capture -> update)",
-                            padding=4)
-        bf.pack(fill="x", pady=(0, 4))
+                            padding=3)
+        bf.pack(fill="x", pady=(0, 2))
         r0 = ttk.Frame(bf); r0.grid(row=0, column=0, sticky="ew")
         self.awgch_var = tk.StringVar(value="1")
         self.scopech_var = tk.StringVar(value="3")
@@ -704,7 +719,7 @@ class App:
         ttk.Checkbutton(r0b, text="keep native-rate avg",
                         variable=self.keepnative_var).pack(side="left",
                                                            padx=(10, 0))
-        rr = ttk.Frame(bf); rr.grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        rr = ttk.Frame(bf); rr.grid(row=2, column=0, sticky="ew", pady=(2, 0))
         b = ttk.Button(rr, text="Auto-set instruments", command=self.do_autoset)
         b.pack(side="left", fill="x", expand=True)
         self._actions.append(b)
@@ -712,14 +727,14 @@ class App:
                                      command=self.do_upload)
         self.upload_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self._actions.append(self.upload_btn)
-        r2 = ttk.Frame(bf); r2.grid(row=3, column=0, sticky="ew", pady=(3, 0))
+        r2 = ttk.Frame(bf); r2.grid(row=3, column=0, sticky="ew", pady=(2, 0))
         self.bench_btn = ttk.Button(r2, text="Run bench loop", command=self.do_bench)
         self.bench_btn.pack(side="left", fill="x", expand=True)
         self._actions.append(self.bench_btn)
         self.stop_btn = ttk.Button(r2, text="Stop", command=self.stop_evt.set,
                                    state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
-        r3 = ttk.Frame(bf); r3.grid(row=4, column=0, sticky="ew", pady=(3, 0))
+        r3 = ttk.Frame(bf); r3.grid(row=4, column=0, sticky="ew", pady=(2, 0))
         ttk.Label(r3, text="runs").pack(side="left")
         self.holdruns_var = tk.StringVar(value=str(self.cfg.get("hold_runs",
                                                                 "5")))
@@ -734,9 +749,8 @@ class App:
                        command=self.do_hold)
         b.pack(side="left", fill="x", expand=True)
         self._actions.append(b)
-        ttk.Label(bf, text="Close the AWG GUI and Scope Grab first -- both hold\n"
-                           "their VISA sessions. Outputs switch OFF when a run\n"
-                           "that played anything ends.",
+        ttk.Label(bf, text="Close the AWG GUI and Scope Grab first (both hold VISA).\n"
+                           "Outputs switch OFF when a run that played anything ends.",
                   foreground="#666666").grid(row=5, column=0, sticky="w")
         bf.columnconfigure(0, weight=1)
 
@@ -752,7 +766,7 @@ class App:
 
         # ---- status ---------------------------------------------------
         st = ttk.Frame(left)
-        st.pack(fill="x", pady=(3, 0))
+        st.pack(fill="x", pady=(2, 0))
         self.status = ttk.Label(st, text="ready")
         self.status.pack(side="left")
         self.progress = ttk.Progressbar(st, length=160, mode="determinate")
@@ -2193,6 +2207,12 @@ class App:
                                        f"full scale ({s.full_scale:g} V)")
                 mode, n_p, dt_p = plan_frf_grid(len(s.t), s.loop.dt, f_hi)
                 u, bins = build_frf_probe(n_p, dt_p, peak, f_lo, f_hi, tones)
+                slew, i_pk, hv_pk = probe_demand(u, dt_p, s.loop.plant.gain,
+                                                 s.loop.channel)
+                if hv_pk > LIMITS.hv_max:
+                    raise RuntimeError(
+                        f"flat-gain peak output {hv_pk:.0f} V exceeds the "
+                        f"{LIMITS.hv_max:.0f} V limit -- lower the probe peak")
                 f = self._floats(awg_ch=self.awgch_var,
                                  scope_ch=self.scopech_var,
                                  repeats=self.repeats_var, wait=self.wait_var)
@@ -2200,6 +2220,24 @@ class App:
             except (RuntimeError, ValueError) as e:
                 return messagebox.showerror("Measure FRF", str(e),
                                             parent=dlg)
+            if (slew > LIMITS.slew_hv or i_pk > LIMITS.current) and \
+                    not messagebox.askyesno(
+                        "Probe demand", parent=dlg, message=(
+                    f"Under a FLAT-GAIN worst case this probe asks the "
+                    f"amplifier for {slew/1e6:.0f} V/us "
+                    f"({i_pk*1e3:.1f} mA into "
+                    f"{LIMITS.load_capacitance*1e12:.0f} pF) -- past the "
+                    f"{LIMITS.slew_hv/1e6:.0f} V/us / "
+                    f"{LIMITS.current*1e3:.0f} mA 610E specs.\n\n"
+                    f"The Trek cannot actually exceed its own limits: above "
+                    f"its band the amp's slew/current limiting caps what "
+                    f"flows, so the real cost is time spent limiting during "
+                    f"the burst -- distortion and dead coherence up there, "
+                    f"before any hazard. The validated 24 kHz probes "
+                    f"(2 V and 6 V, played 24 Aug) carried 10-30 mA on this "
+                    f"same measure.\n\nHalving the peak halves the demand. "
+                    f"Run this probe?")):
+                return
             dlg.destroy()
             self.run_worker(
                 lambda: self._measure_frf_work(u, bins, name,
