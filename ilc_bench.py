@@ -100,10 +100,12 @@ def make_scope(mod):
     """Build the scope on the shared DEFAULT VISA, not Keysight's.
 
     Two measured traps (2026-08-26). First: scope_grab prefers ktvisa32.dll
-    whenever the file exists -- standalone that is harmless (the DLL fails
-    to load in a fresh process and the code falls back to NI), but once the
-    AWG has put NI's visa32.dll into the process, ktvisa32 suddenly loads,
-    enumerates the bus, and then fails every open_resource with
+    whenever the file exists. The DLL itself is healthy, but Python 3.8+
+    ctypes does not search PATH for a DLL's dependencies, so in a fresh
+    process it fails to load (harmless: scope_grab falls back to NI).
+    Once the AWG has put NI's visa32.dll into the process, though, enough
+    of the dependency chain is resident that ktvisa32 half-loads: it
+    enumerates the bus and then fails every open_resource with
     VI_ERROR_ALLOC, which Scope.connect swallows per-candidate and reports
     as 'No Keysight USB instrument found'. Second: Scope.close() closes its
     RM, which must not be the shared one -- see _shared_rm."""
