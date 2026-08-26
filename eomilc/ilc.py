@@ -211,7 +211,7 @@ class FRF:
     """
 
     def __init__(self, path, min_coherence=0.9, f_use=15e3, f_max=22e3,
-                 t_guard=0.5e-3):
+                 t_guard=None):
         if not 0 < f_use < f_max:
             raise ValueError(
                 f"the taper needs 0 < f_use < f_max, got {f_use:g}/{f_max:g}."
@@ -227,8 +227,25 @@ class FRF:
         self.logmag = np.log(np.abs(H))
         self.phase = np.unwrap(np.angle(H))
         self.f_use, self.f_max = f_use, f_max
+        # None = auto: three ring times of the inverse (the taper's
+        # transition width sets how long 1/H rings), floored at 100 us,
+        # capped at 1 ms. The first cut hardcoded 0.5 ms -- 30x wider than
+        # the ~15 us artifact it was built to stop -- and blocked the loop
+        # from correcting the chain's real settling transient in the last
+        # ~60 us of the record: PRFRX1B converged to 1.1 V mid-record but
+        # 52 V at the last sample (the one-pole loop, which corrects to the
+        # edge, left 0.8 V there). Explicit t_guard still overrides; 0
+        # disables (tests/diagnosis only).
         self.t_guard = t_guard
         self.path = str(path)
+
+    def edge_guard_s(self):
+        """The effective edge guard: explicit t_guard if set, else three
+        ring times of the inverse (1/(taper width)), floored at 100 us,
+        capped at 1 ms."""
+        if self.t_guard is not None:
+            return self.t_guard
+        return min(1e-3, max(100e-6, 3.0 / (self.f_max - self.f_use)))
 
     def interp(self, f):
         """H at arbitrary frequencies: log-magnitude and unwrapped phase,
@@ -272,7 +289,8 @@ class FRF:
         # the Trek at frequencies it cannot follow for error outside the
         # window anyone cares about.  Raised-cosine the CORRECTION (never
         # the drive -- see the f_cut note above) to zero at the ends.
-        g = int(round(self.t_guard / dt))
+        tg = self.edge_guard_s()
+        g = int(round(tg / dt))
         if g > 0 and 2 * g < n:
             # Fade only the FAST part of the correction. The slow residue
             # (below ~0.25/t_guard) is the idle-offset trim -- the reason
@@ -282,7 +300,7 @@ class FRF:
             # ring against the clamp. Zeroing the whole correction here
             # would freeze the ends at the flat shot's level and leave the
             # standing idle error uncorrectable forever.
-            base = smooth(u, dt, 0.25 / self.t_guard)
+            base = smooth(u, dt, 0.25 / tg)
             ramp = 0.5 * (1 - np.cos(np.pi * np.arange(g) / g))   # 0 -> 1
             w = np.ones(n)
             w[:g] = ramp

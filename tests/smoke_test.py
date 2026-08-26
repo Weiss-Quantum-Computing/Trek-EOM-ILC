@@ -832,26 +832,41 @@ assert "gain only" in app.summary.cget("text")
 print("[42] model record: init writes model+FRF+taper into the state, the "
       "summary names it, Load restores panel, fields and loop.frf")
 
-# the FRF edge guard fades the correction's FAST part at the record ends
-# (the truncated-ringing/clamp fight measured on PRFRX1A) but passes the
-# SLOW part -- the idle-offset trim must survive
+# the FRF edge guard: sized from the taper's ring time (PRFRX1B lesson --
+# the 0.5 ms first cut blocked the loop from the chain's real settling
+# transient, 52 V at the last sample vs the one-pole's 0.8 V), fades the
+# FAST part only at the extreme ends, passes the idle-offset trim
 frfL = ilc_gui.ilc.FRF(fpath, f_use=100e3, f_max=150e3)
+assert abs(frfL.edge_guard_s() - 100e-6) < 1e-9, frfL.edge_guard_s()
+assert abs(ilc_gui.ilc.FRF(fpath, f_use=40e3, f_max=60e3).edge_guard_s()
+           - 150e-6) < 1e-9, "guard does not scale with the taper width"
 nT, dtT = 5501, 2e-6
 cC = frfL.lead(np.full(nT, 1e-3), dtT)          # constant (idle-ish) error
 assert abs(cC[0]) > 0.3 * abs(cC[nT // 2]), \
     f"the guard killed the idle trim: corr[0]={cC[0]:.2e} vs mid " \
     f"{cC[nT//2]:.2e}"
 eS = np.zeros(nT)
-eS[-40:] = 5e-3                                  # a sharp end transient
-gwin = int(0.2e-3 / dtT)
-ring_on = np.abs(np.diff(frfL.lead(eS, dtT)[-gwin:])).max()
+eS[-5:] = 5e-3                       # error at the LAST samples: unfixable,
+w = slice(nT - 25, nT)               # the ringing there must stay suppressed
+ring_on = np.abs(np.diff(frfL.lead(eS, dtT)[w])).max()
 frfL.t_guard = 0
-ring_off = np.abs(np.diff(frfL.lead(eS, dtT)[-gwin:])).max()
-assert ring_on < 0.2 * ring_off, \
-    f"edge guard not suppressing end ringing: {ring_on:.2e} vs {ring_off:.2e}"
-print(f"[43] FRF edge guard: end ringing {ring_off*1e3:.2f} -> "
-      f"{ring_on*1e3:.3f} mV/sample, idle trim passes "
-      f"(corr[0] {cC[0]*1e3:.2f} vs mid {cC[nT//2]*1e3:.2f} mV)")
+ring_off = np.abs(np.diff(frfL.lead(eS, dtT)[w])).max()
+frfL.t_guard = None
+assert ring_on < 0.15 * ring_off, \
+    f"terminal ringing not suppressed: {ring_on:.2e} vs {ring_off:.2e}"
+eM = np.zeros(nT)
+eM[-120:-90] = 5e-3                  # a transient 200 us from the end: real
+z = slice(nT - 130, nT - 80)         # settling error the loop MUST chase
+p_on = np.abs(frfL.lead(eM, dtT)[z]).max()
+frfL.t_guard = 0
+p_off = np.abs(frfL.lead(eM, dtT)[z]).max()
+frfL.t_guard = None
+assert p_on > 0.9 * p_off, \
+    f"guard still blocking correctable settling error: {p_on:.2e} vs {p_off:.2e}"
+print(f"[43] FRF edge guard: auto {frfL.edge_guard_s()*1e6:.0f} us for the "
+      f"100-150k taper; terminal ringing x{ring_off/ring_on:.0f} down, a "
+      f"200 us-from-end transient passes at {p_on/p_off:.2f}, idle trim "
+      f"intact (corr[0] {cC[0]*1e3:.2f} vs mid {cC[nT//2]*1e3:.2f} mV)")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
