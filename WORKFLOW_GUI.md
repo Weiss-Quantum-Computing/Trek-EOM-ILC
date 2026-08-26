@@ -29,8 +29,8 @@ instruments only accept one.
 | **Capture post-processing** | how a measurement becomes an error: `t-offset` and baseline handling, shared by Step and Bench. Nothing here touches the first shot. |
 | **Step from captured files** | one ILC iteration from scope CSVs you captured yourself |
 | **Bench loop** | the hands-off cycle: upload → capture → update |
-| **Log** | everything the loop reports, timestamped |
-| right side | five plot tabs, refreshed at every step — see §7 |
+| **Log** | everything the loop reports. A timestamped copy appends to `run\ilc_gui.log` |
+| right side | six plot tabs, refreshed at every step, with an iteration selector above them — see §7 |
 
 Every individual field is documented in §10.
 
@@ -180,11 +180,20 @@ The **Model** combobox selects what the update divides the error by:
 
 ## 7. Reading the plots
 
+The **Iterations shown** box above the tabs picks which stored iterations
+the Error, Error spectrum and Drive corrections tabs overlay: blank shows
+the last two, `all` shows everything, `2-5` a range, `0,3,6` a list
+(Enter or **Redraw** applies it). Iterations are coloured dark-to-light by
+age, newest drawn heaviest. Every measurement the bench loop takes — and
+every one recalled from `meas_*.npy` beside the state at load — is
+available.
+
 | tab | what to look for |
 |---|---|
 | **Waveforms** | target vs measured output (top); the drive with its first/last-sample idle markers against the ±100 mV cap (bottom). After Init: the model-predicted output instead of a measurement. |
-| **Error** | target − measured, current iteration over the previous one ghosted. Peak/rms in the title. The stuck peak at t = 0 is the burst-entry transient — the loop cannot fix the idle level (WORKFLOW.md). |
+| **Error** | target − measured for the selected iterations. Peak/rms of the newest in the title. The stuck peak at t = 0 is the burst-entry transient — the loop cannot fix the idle level (WORKFLOW.md). |
 | **Error spectrum** | where the residual lives. The update only acts left of the drawn band edge (f_cut line, or the shaded FRF taper). Error growing *right* of the edge while the in-band falls is the model diverging — tighten the band or climb the ladder. |
+| **Drive corrections** | the drive side of the Error tab: each selected iteration's AWG waveform minus the target's flat conversion (or minus the stored iteration-0 drive when it exists) — what the loop has learned to *add* at the input, in mV at the AWG. Growth here without matching error shrinkage is the loop learning noise or a wrong inverse. |
 | **Convergence** | peak and rms error vs iteration, log scale, with model-change annotations. Flat-lining means the current inverse has given what it can. |
 | **FRF** | measured magnitude/phase/coherence, dropped tones flagged, taper band shaded, current parametric model overlaid. |
 
@@ -196,6 +205,7 @@ The **Model** combobox selects what the update divides the error by:
 | `drive_<stem>_iNN.csv` | `run\` | the iteration's drive, `time_us,voltage_V` |
 | `<stem>_iNN.csv` | the AWG GUI's `Waveforms\` | upload-ready copy (±1, Normalise OFF) |
 | `meas_<stem>_iNN.npy` | `run\` | bench mode's averaged measurement |
+| `ilc_gui.log` | `run\` | timestamped append-only copy of everything the panel logged |
 
 `run\README.md` has the full taxonomy and where finished campaigns get
 filed.
@@ -290,3 +300,9 @@ Three kinds of persistence, marked in the tables:
 | **Upload `<stem>_iNN` to AWG** | Uploads the session's current drive into the generator's user memory and selects it — the manual-workflow counterpart of what the bench loop does each iteration, at the same fixed ±full-scale mapping (never normalised). Asks before overwriting a stored waveform of the same name; no dialog when the name is free. Warns in the log when the output is live (the new waveform plays the moment it is selected). |
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
 | **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |
+
+### Plot bar
+
+| field | what it does |
+|---|---|
+| **Iterations shown** *(config)* | Which stored iterations the Error, Error spectrum and Drive corrections tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |

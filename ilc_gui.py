@@ -73,6 +73,7 @@ CONFIG_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
                            "EOM-ILC-GUI", "config.json")
 
 RUN_DIR = os.path.join(HERE, "run")
+LOG_PATH = os.path.join(RUN_DIR, "ilc_gui.log")   # timestamped copy of the log
 SIBLINGS = os.path.dirname(HERE)               # the folder holding all the bench repos
 AWG_WAVEFORMS = run_ilc.AWG_WAVEFORMS          # env-overridable, one definition
 
@@ -98,7 +99,6 @@ CH_DEFAULTS = {
 }
 TARGET_COLOUR = "#222222"
 PRED_COLOUR = "#8a8a8a"
-GHOST_ALPHA = 0.35
 
 # The model ladder: what the update divides the error by, in increasing order
 # of how much of the chain it knows about.  The first three are parametric
@@ -261,6 +261,7 @@ class App:
         root.geometry(self.cfg.get("geometry", "1380x880"))
 
         self._build_ui()
+        self.log(f"--- panel started; timestamped log appends to {LOG_PATH}")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.pump)
 
@@ -280,6 +281,7 @@ class App:
                  f_use=self.fuse_var.get(), f_max=self.fmax_var.get(),
                  model=self.model_var.get(), channel=self.channel_var.get(),
                  stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
+                 iter_sel=self.itersel_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -539,11 +541,25 @@ class App:
         self.progress.pack(side="right")
 
         # ---- plot notebook -------------------------------------------
+        sel = ttk.Frame(right)
+        sel.pack(fill="x", pady=(0, 2))
+        ttk.Label(sel, text="Iterations shown").pack(side="left")
+        self.itersel_var = tk.StringVar(value=self.cfg.get("iter_sel", ""))
+        e = ttk.Entry(sel, textvariable=self.itersel_var, width=14)
+        e.pack(side="left", padx=2)
+        e.bind("<Return>", lambda ev: self._redraw_iterations())
+        ttk.Label(sel, text="(blank = last two;  'all',  '2-5',  or '0,3,6')",
+                  foreground="#666666").pack(side="left")
+        b = ttk.Button(sel, text="Redraw", command=self._redraw_iterations)
+        b.pack(side="right")
+        self._actions.append(b)
+
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
         self.fig_wave, (self.ax_out, self.ax_drv) = self._tab("Waveforms", 2, sharex=True)
         self.fig_err, (self.ax_err,) = self._tab("Error", 1)
         self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1)
+        self.fig_dcor, (self.ax_dcor,) = self._tab("Drive corrections", 1)
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True)
 
@@ -592,12 +608,22 @@ class App:
 
     # ------------------------------------------------------------- plumbing
     def log(self, text):
-        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        """Panel log without timestamps (they were noise at reading width);
+        the file copy in run\\ilc_gui.log keeps them."""
+        lines = str(text).splitlines() or [""]
         self.log_text.configure(state="normal")
-        for line in str(text).splitlines() or [""]:
-            self.log_text.insert("end", f"{stamp}  {line}\n")
+        for line in lines:
+            self.log_text.insert("end", line + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            os.makedirs(RUN_DIR, exist_ok=True)
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                for line in lines:
+                    f.write(f"{stamp}  {line}\n")
+        except OSError:
+            pass                        # a full disk must not kill the loop
 
     def pump(self):
         try:
@@ -1026,7 +1052,7 @@ class App:
         # different step) are skipped rather than guessed at.
         pat = os.path.join(os.path.dirname(s.state_path),
                            f"meas_{s.stem}_i*.npy")
-        for f in sorted(glob.glob(pat))[-2:]:
+        for f in sorted(glob.glob(pat)):
             y = np.load(f)
             if len(y) != len(s.t):
                 continue
@@ -1040,7 +1066,10 @@ class App:
                 if len(du) == len(s.t):
                     snap["u"] = du
             s.snapshots.append(snap)
-            self.log(f"  recalled measurement {os.path.basename(f)}")
+        if s.snapshots:
+            its = sorted({sn["it"] for sn in s.snapshots})
+            self.log(f"  recalled {len(its)} stored measurement(s): "
+                     f"iterations {', '.join(str(i) for i in its)}")
         self._refresh_summary()
         self._show_session(select_tab=True)
 
@@ -1663,31 +1692,81 @@ class App:
     def _out_name(self):
         return self.session.loop.channel.out_name
 
+    def _snaps_by_it(self):
+        """Stored measurements keyed by iteration; a re-measurement of the
+        same iteration replaces the earlier one."""
+        m = {}
+        for sn in self.session.snapshots:
+            m[sn["it"]] = sn
+        return m
+
+    def _selected_snaps(self):
+        """The iterations the plots show, per the 'Iterations shown' box:
+        blank = the last two, 'all', a range '2-5', or a list '0,3,6'."""
+        s = self.session
+        if s is None:
+            return []
+        by_it = self._snaps_by_it()
+        avail = sorted(by_it)
+        spec = self.itersel_var.get().strip().lower()
+        if not spec:
+            pick = avail[-2:]
+        elif spec in ("all", "*"):
+            pick = avail
+        else:
+            its = set()
+            try:
+                for part in spec.split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    if "-" in part:
+                        a, b = part.split("-", 1)
+                        its.update(range(int(a), int(b) + 1))
+                    else:
+                        its.add(int(part))
+            except ValueError:
+                self.log(f"iteration selection {spec!r} not understood -- "
+                         f"use 'all', '2-5', or '0,3,6'; showing last two")
+                its = set(avail[-2:])
+            pick = [i for i in avail if i in its]
+            if avail and not pick:
+                self.log(f"no stored measurements match {spec!r} "
+                         f"(available: {avail})")
+        return [by_it[i] for i in pick]
+
+    def _snap_label(self, sn):
+        d = sn["m"].get("model") if isinstance(sn.get("m"), dict) else None
+        return f"iter {sn['it']} ({d})" if d else f"iter {sn['it']}"
+
+    def _iter_colour(self, idx, n):
+        return matplotlib.colormaps["viridis"](0.1 + 0.75 * idx / max(n - 1, 1))
+
+    def _redraw_iterations(self):
+        """Re-render every per-iteration plot from the current selection."""
+        if self.session is None:
+            return
+        snaps = self._selected_snaps()
+        self._plot_error(snaps)
+        self._plot_spectrum(snaps)
+        self._plot_dcorr(snaps)
+        self._plot_convergence()
+
     def _show_session(self, select_tab=False):
         """Everything drawable from a freshly loaded/inited session: target,
         drive, model prediction, plus any recalled measurements."""
         s = self.session
         snap = s.snapshots[-1] if s.snapshots else None
-        y = snap["y"] if snap else None
-        m = snap["m"] if snap else None
-        it = snap["it"] if snap else None
         pred = None if snap else s.loop.plant.forward(s.u)
-        self._plot_waveforms(s.u, y, pred, it)
-        if snap:
-            self._plot_error(y, m, it)
-            self._plot_spectrum(y, it)
-        else:
-            self.ax_err.clear(); self.fig_err._canvas.draw_idle()
-            self.ax_spec.clear(); self.fig_spec._canvas.draw_idle()
-        self._plot_convergence()
+        self._plot_waveforms(s.u, snap["y"] if snap else None, pred,
+                             snap["it"] if snap else None)
+        self._redraw_iterations()
         if select_tab:
             self.nb.select(0)
 
     def _show_iteration(self, u, y, m, it):
         self._plot_waveforms(u, y, None, it)
-        self._plot_error(y, m, it)
-        self._plot_spectrum(y, it)
-        self._plot_convergence()
+        self._redraw_iterations()
 
     def _plot_waveforms(self, u, y, pred, it):
         s, c = self.session, self._colour()
@@ -1730,52 +1809,51 @@ class App:
         ax.grid(True, alpha=0.3)
         self.fig_wave._canvas.draw_idle()
 
-    def _plot_error(self, y, m, it):
-        s, c = self.session, self._colour()
+    def _plot_error(self, snaps):
+        s = self.session
         tms = s.t * 1e3
+        sc = self._out_scale()
         ax = self.ax_err
         ax.clear()
-        prev = next((sn for sn in reversed(s.snapshots)
-                     if sn["it"] < it and len(sn["y"]) == len(s.t)), None)
-        def tag(n, mm):
-            d = mm.get("model") if isinstance(mm, dict) else None
-            return f"iter {n} ({d})" if d else f"iter {n}"
-
-        sc = self._out_scale()
-        if prev is not None:
-            ax.plot(tms, (s.loop.target - prev["y"]) * sc, color=c,
-                    lw=0.8, alpha=GHOST_ALPHA, label=tag(prev["it"], prev["m"]))
-        e_hv = (s.loop.target - y) * sc
-        ax.plot(tms, e_hv, color=c, lw=0.9, label=tag(it, m))
+        n = len(snaps)
+        for idx, sn in enumerate(snaps):
+            ax.plot(tms, (s.loop.target - sn["y"]) * sc,
+                    color=self._iter_colour(idx, n),
+                    lw=1.1 if idx == n - 1 else 0.8,
+                    label=self._snap_label(sn))
+        if n:
+            m = snaps[-1]["m"]
+            ax.set_title(f"target - measured:  iter {snaps[-1]['it']} peak "
+                         f"{m['peak_err_hv']:.1f} V, rms {m['rms_err_hv']:.2f} V"
+                         f"  ({m['peak_pct']:.3f}% FS)")
+            ax.legend(loc="best", fontsize=7, ncols=2 if n > 6 else 1)
+        else:
+            ax.text(0.5, 0.5, "no measurements stored yet",
+                    ha="center", va="center", transform=ax.transAxes,
+                    color="#888888")
         ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
         ax.set_xlabel("time (ms)")
         ax.set_ylabel(f"error at the {self._out_name()} (V)")
-        ax.set_title(f"target - measured:  peak {m['peak_err_hv']:.1f} V, "
-                     f"rms {m['rms_err_hv']:.2f} V  ({m['peak_pct']:.3f}% FS)")
-        ax.legend(loc="best", fontsize=7)
         ax.grid(True, alpha=0.3)
         self.fig_err._canvas.draw_idle()
 
-    def _plot_spectrum(self, y, it):
-        s, c = self.session, self._colour()
+    def _plot_spectrum(self, snaps):
+        s = self.session
+        sc = self._out_scale()
         ax = self.ax_spec
         ax.clear()
 
-        sc = self._out_scale()
-
         def asd(e):
-            n = len(e)
-            f = np.fft.rfftfreq(n, s.loop.dt)
-            return f[1:], np.abs(np.fft.rfft(e * sc))[1:] * 2 / n
+            npts = len(e)
+            f = np.fft.rfftfreq(npts, s.loop.dt)
+            return f[1:], np.abs(np.fft.rfft(e * sc))[1:] * 2 / npts
 
-        prev = next((sn for sn in reversed(s.snapshots)
-                     if sn["it"] < it and len(sn["y"]) == len(s.t)), None)
-        if prev is not None:
-            fp, ap = asd(s.loop.target - prev["y"])
-            ax.loglog(fp, ap, color=c, lw=0.7, alpha=GHOST_ALPHA,
-                      label=f"iter {prev['it']}")
-        fe, ae = asd(s.loop.target - y)
-        ax.loglog(fe, ae, color=c, lw=0.8, label=f"iter {it}")
+        n = len(snaps)
+        for idx, sn in enumerate(snaps):
+            fe, ae = asd(s.loop.target - sn["y"])
+            ax.loglog(fe, ae, color=self._iter_colour(idx, n),
+                      lw=1.0 if idx == n - 1 else 0.7,
+                      label=self._snap_label(sn))
         if s.loop.frf is not None:
             ax.axvspan(s.loop.frf.f_use, s.loop.frf.f_max, color="#c68000",
                        alpha=0.15, label="FRF taper band")
@@ -1787,9 +1865,58 @@ class App:
         ax.set_ylabel(f"error amplitude at the {self._out_name()} (V)")
         ax.set_title("where the residual lives -- the update only acts left "
                      "of the band edge")
-        ax.legend(loc="best", fontsize=7)
+        if n:
+            ax.legend(loc="best", fontsize=7, ncols=2 if n > 6 else 1)
         ax.grid(True, which="both", alpha=0.3)
         self.fig_spec._canvas.draw_idle()
+
+    def _plot_dcorr(self, snaps):
+        """The drive side of the error plot: each iteration's AWG waveform
+        minus the target's flat conversion -- the correction the loop has
+        accumulated at the input, in millivolts at the AWG."""
+        s = self.session
+        tms = s.t * 1e3
+        ax = self.ax_dcor
+        ax.clear()
+        by_it = self._snaps_by_it()
+        if 0 in by_it and by_it[0].get("u") is not None:
+            u_ref, ref_lab = by_it[0]["u"], "the iteration-0 drive"
+        else:
+            try:
+                g = self._first_shot_gain()
+            except RuntimeError:
+                g = None
+            g = g or s.loop.plant.gain
+            u_ref = s.loop.target / g
+            ref_lab = f"the flat conversion target/{g:g}"
+        n = len(snaps)
+        shown = 0
+        skipped = []
+        for idx, sn in enumerate(snaps):
+            u = sn.get("u")
+            if u is None or len(u) != len(s.t):
+                skipped.append(sn["it"])
+                continue
+            ax.plot(tms, (u - u_ref) * 1e3, color=self._iter_colour(idx, n),
+                    lw=1.1 if idx == n - 1 else 0.8,
+                    label=self._snap_label(sn))
+            shown += 1
+        if shown:
+            ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
+        else:
+            ax.text(0.5, 0.5, "no drives stored for the selected iterations",
+                    ha="center", va="center", transform=ax.transAxes,
+                    color="#888888")
+        if skipped:
+            ax.annotate(f"no stored drive for iter {skipped}", (0.02, 0.02),
+                        xycoords="axes fraction", fontsize=7, color="#888888")
+        ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
+        ax.set_xlabel("time (ms)")
+        ax.set_ylabel("drive correction at the AWG (mV)")
+        ax.set_title(f"drive minus {ref_lab} -- what the loop has learned "
+                     f"to add at the input")
+        ax.grid(True, alpha=0.3)
+        self.fig_dcor._canvas.draw_idle()
 
     def _plot_convergence(self):
         s, c = self.session, self._colour()
@@ -1889,7 +2016,7 @@ class App:
         if (~ok).any() or overlay:
             axm.legend(loc="best", fontsize=7)
         self.fig_frf._canvas.draw_idle()
-        self.nb.select(4)
+        self.nb.select(5)
         self.log(f"FRF {os.path.basename(path)}: "
                  f"{ok.sum()}/{len(d)} tones coherent, "
                  f"{d['f_Hz'].min():.0f}-{d['f_Hz'].max():.0f} Hz, "

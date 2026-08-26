@@ -16,6 +16,7 @@ stay local.
 | `meas_<stem>_iNN.npy` | the averaged monitor trace measured at iteration N, on the waveform grid | `ilc_bench.py` and the GUI's bench loop |
 | `frf_<name>.csv` (+ `.png`) | a measured transfer function: magnitude, phase, per-tone coherence | `tools/sysid_fit.py` |
 | `sysid_<name>.npz` | the probe reference a sysid capture is fitted against | `tools/sysid_make.py` |
+| `ilc_gui.log` | timestamped append-only copy of everything the panel logged | `ilc_gui.py` |
 
 `frf_WIDE_X1.csv` / `frf_WIDE_X2.csv` are the production inverses from the
 24–25 Aug 2026 probe campaign — the GUI points at them by default. Keep them.
