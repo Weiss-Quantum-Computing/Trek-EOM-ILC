@@ -1,9 +1,9 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-35 numbered checks: state round-trips, the span guard, the model ladder,
+36 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
-averaging, the native-rate spectrum, the iteration
+averaging, the native-rate spectrum and its bench-kept files, the iteration
 table, dot density, linked time axes. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
@@ -585,6 +585,38 @@ assert "zoomed or mismatched" in app.log_text.get("1.0", "end"), \
 print(f"[35] native-rate spectrum: Nyquist {fx.max()/1e3:.0f} kHz, the "
       f"400 kHz tone recovered at {ay[sel].max():.2f} V (true {tone_hv:.1f}), "
       f"span guard held")
+
+# bench capture can keep the native-rate average, and the spectrum button
+# reads the kept npz (the instrument paths themselves stay bench-only)
+tf2 = np.arange(sN.t[0] - 0.5e-3, sN.t[-1] + 0.5e-3, sN.loop.dt / 4)
+fine2 = (np.interp(tf2, sN.t, sN.loop.target)
+         + 1e-3 * np.sin(2 * np.pi * 350e3 * tf2))
+
+class _FakeScope:
+    def single(self, wait_s=None): return True
+    def waveform(self, ch): return tf2 + sN.t_off, fine2
+    def run(self): pass
+
+natfile = os.path.join(SCRATCH, "meas_MKJX1_i99_native.npz")
+app.stop_evt.clear()
+y_grid = app._bench_capture(_FakeScope(), 3, sN.t, sN.t_off, repeats=4,
+                            wait_s=1, settle=0, native_path=natfile)
+assert len(y_grid) == len(sN.t), "grid average is off the waveform grid"
+d = np.load(natfile)
+assert len(d["t"]) == len(tf2) and np.allclose(d["y"], fine2), \
+    "kept native average does not match what the scope returned"
+assert np.allclose(d["t"], tf2), "native t is not in waveform time"
+app._redraw_iterations(); root.update()      # clear the [35] overlay
+app.meas_var.set(natfile)
+app.do_native_spec(); pump_until_idle(); root.update()
+nat2 = next(l for l in app.ax_spec.get_lines()
+            if l.get_label().startswith("native rate"))
+fx2, ay2 = nat2.get_xdata(), nat2.get_ydata()
+sel2b = np.abs(fx2 - 350e3) < 2e3
+assert ay2[sel2b].max() > 0.5 * 1e-3 * sN.loop.channel.mon_scale, \
+    "350 kHz tone lost through the kept-native round trip"
+print("[36] bench keep-native: npz saved in waveform time, spectrum "
+      "button reads it, 350 kHz tone survives the round trip")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")

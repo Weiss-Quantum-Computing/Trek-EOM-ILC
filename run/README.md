@@ -14,6 +14,7 @@ stay local.
 | `drive_<stem>.state.npz` | **the loop's memory**: target, current drive, plant, gamma/f_cut/t-offset, iteration counter, error history. Loading it resumes the campaign; deleting it ends it. | `run_ilc.py init`, rewritten by every step |
 | `drive_<stem>_iNN.csv` / `_iterN.csv` | the drive played at iteration N (`time_us,voltage_V`) | each step / bench iteration |
 | `meas_<stem>_iNN.npy` | the averaged monitor trace measured at iteration N, on the waveform grid | `ilc_bench.py` and the GUI's bench loop |
+| `meas_<stem>_iNN[_rMM]_native.npz` | the same average at the SCOPE's own sample rate (`t` = waveform time, `y` = monitor V) — kept only when the GUI's *keep native-rate avg* box is ticked; feeds the native-rate spectrum | the GUI's bench loop and Hold |
 | `frf_<name>.csv` (+ `.png`) | a measured transfer function: magnitude, phase, per-tone coherence | `tools/sysid_fit.py` |
 | `sysid_<name>.npz` | the probe reference a sysid capture is fitted against | `tools/sysid_make.py` |
 | `ilc_gui.log` | timestamped append-only copy of everything the panel logged | `ilc_gui.py` |

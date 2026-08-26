@@ -29,6 +29,10 @@ plotting helpers — the repo has them, use them.
   state's `t` grid, already the average of 64 HRES scope repeats).
   `meas_<stem>_iNN_rMM.npy` — hold-mode re-measurement MM of the SAME
   drive (thermal-drift studies); the file mtime IS the measurement time.
+- `meas_<stem>_iNN[_rMM]_native.npz` — optional (GUI 'keep native-rate
+  avg'): the same repeat average at the SCOPE's own sample rate, keys
+  `t` (waveform time, s) and `y` (monitor V). The only record of content
+  past the grid Nyquist for bench iterations.
 - `drive_<stem>_iNN.csv` — the AWG drive that PLAYED measurement NN
   (`time_us,voltage_V`, `#` comments).
 - `frf_WIDE_X<n>.csv` — measured FRF: `f_Hz, H_mag` (mon V per AWG V),
@@ -78,7 +82,7 @@ from eomilc import plant as plantmod    # plantmod.identify(u, y, dt, model=...)
   resolvable frequency by ~k.
 - The stored `meas_*.npy` are boxcar-decimated to the waveform grid
   (Nyquist 250 kHz at dt 2 µs). Content above that — and the top octave
-  without the boxcar's sinc droop — needs the RAW Scope Grab CSVs,
+  without the boxcar's sinc droop — needs the RAW Scope Grab CSVs or the bench-kept `meas_*_native.npz`,
   processed by interpolating the target onto the scope's time base (the
   GUI's "Spectrum from captures" button does exactly this; do the same
   in scripts rather than decimating first).

@@ -394,6 +394,7 @@ class App:
                  link_t=self.tlink_var.get(),
                  hold_runs=self.holdruns_var.get(),
                  hold_gap=self.holdgap_var.get(),
+                 keep_native=self.keepnative_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -615,8 +616,14 @@ class App:
             ttk.Label(r0, text=lab).pack(side="left", padx=(0, 2))
             ttk.Entry(r0, textvariable=var, width=w).pack(side="left", padx=(0, 6))
         self.skip_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bf, text="skip setup checks (don't)",
-                        variable=self.skip_var).grid(row=1, column=0, sticky="w")
+        r0b = ttk.Frame(bf); r0b.grid(row=1, column=0, sticky="w")
+        ttk.Checkbutton(r0b, text="skip setup checks (don't)",
+                        variable=self.skip_var).pack(side="left")
+        self.keepnative_var = tk.BooleanVar(
+            value=bool(self.cfg.get("keep_native", False)))
+        ttk.Checkbutton(r0b, text="keep native-rate avg",
+                        variable=self.keepnative_var).pack(side="left",
+                                                           padx=(10, 0))
         rr = ttk.Frame(bf); rr.grid(row=2, column=0, sticky="ew", pady=(3, 0))
         b = ttk.Button(rr, text="Auto-set instruments", command=self.do_autoset)
         b.pack(side="left", fill="x", expand=True)
@@ -1584,21 +1591,27 @@ class App:
             raise RuntimeError(f"no scope files matched {pattern!r}")
         t0, acc = None, 0.0
         for f in files:
-            tr = scopeio.load(f)
-            lo, hi = tr.t[0] - s.t_off, tr.t[-1] - s.t_off
-            if lo > s.t[0] + 1e-4 or hi < s.t[-1] - 1e-4:
+            if f.lower().endswith(".npz"):
+                # a bench-kept native average: t is already waveform time
+                d = np.load(f)
+                tt, yy = np.asarray(d["t"], float), np.asarray(d["y"], float)
+            else:                        # a raw Scope Grab CSV
+                tr = scopeio.load(f)
+                tt, yy = tr.t - s.t_off, tr[mon]
+            if tt[0] > s.t[0] + 1e-4 or tt[-1] < s.t[-1] - 1e-4:
                 raise RuntimeError(
-                    f"{os.path.basename(f)} spans {lo*1e3:.2f}..{hi*1e3:.2f} "
-                    f"ms but the waveform runs {s.t[0]*1e3:.2f}.."
-                    f"{s.t[-1]*1e3:.2f} ms. A zoomed or mismatched capture "
-                    f"matched the glob -- tighten the pattern.")
+                    f"{os.path.basename(f)} spans {tt[0]*1e3:.2f}.."
+                    f"{tt[-1]*1e3:.2f} ms but the waveform runs "
+                    f"{s.t[0]*1e3:.2f}..{s.t[-1]*1e3:.2f} ms. A zoomed or "
+                    f"mismatched capture matched the glob -- tighten the "
+                    f"pattern.")
             if t0 is None:
-                t0, y = tr.t, tr[mon]
+                t0, y = tt, yy
             else:                        # sequences share a time base; a
-                y = np.interp(t0, tr.t, tr[mon])   # stray one is aligned
+                y = np.interp(t0, tt, yy)          # stray one is aligned
             acc = acc + y
         y = acc / len(files)
-        ts = t0 - s.t_off
+        ts = t0
         m = (ts >= s.t[0]) & (ts <= s.t[-1])   # same span as the grid error
         ts, y = ts[m], y[m]
         dtn = float(np.median(np.diff(ts)))
@@ -1815,10 +1828,12 @@ class App:
         self.run_worker(lambda: self._hold_work(int(f["runs"]), f["gap_s"],
                                                 int(f["awg_ch"]),
                                                 int(f["scope_ch"]),
-                                                int(f["repeats"]), f["wait"]),
+                                                int(f["repeats"]), f["wait"],
+                                                self.keepnative_var.get()),
                         "hold: re-measuring...")
 
-    def _hold_work(self, runs, gap_s, awg_ch, scope_ch, repeats, wait_s):
+    def _hold_work(self, runs, gap_s, awg_ch, scope_ch, repeats,
+               wait_s, keep_native=False):
         s = self.session
         scopemod, awgmod = self._bench_modules()
         awg = ilc_bench.make_awg(awgmod)
@@ -1864,9 +1879,13 @@ class App:
                 if self.stop_evt.is_set():
                     print("hold stopped by user")
                     break
-                y = self._bench_capture(scope, scope_ch, s.t, s.t_off,
-                                        repeats, wait_s)
                 r = r0 + j
+                nat = (os.path.join(os.path.dirname(s.state_path),
+                                    f"meas_{s.stem}_i{it:02d}_r{r:02d}"
+                                    f"_native.npz")
+                       if keep_native else None)
+                y = self._bench_capture(scope, scope_ch, s.t, s.t_off,
+                                        repeats, wait_s, native_path=nat)
                 np.save(os.path.join(os.path.dirname(s.state_path),
                                      f"meas_{s.stem}_i{it:02d}_r{r:02d}.npy"),
                         y)
@@ -1911,7 +1930,8 @@ class App:
                                                  int(f["scope_ch"]),
                                                  int(f["iterations"]),
                                                  int(f["repeats"]), f["wait"],
-                                                 self.skip_var.get()),
+                                                 self.skip_var.get(),
+                                                 self.keepnative_var.get()),
                         "bench loop running...")
 
     def _bench_modules(self):
@@ -1932,7 +1952,7 @@ class App:
         return self._modules
 
     def _bench_work(self, cfg, awg_ch, scope_ch, iterations, repeats, wait_s,
-                    skip):
+                    skip, keep_native=False):
         s = self.session
         self._apply_settings(cfg)
         scopemod, awgmod = self._bench_modules()
@@ -1999,8 +2019,10 @@ class App:
                     time.sleep(0.5)
                     ilc_bench.verify_alignment(scope, awg_ch, u, s.t, s.t_off,
                                                wait_s)
+                nat = (os.path.join(RUN_DIR, f"meas_{wname}_native.npz")
+                       if keep_native else None)
                 y = self._bench_capture(scope, scope_ch, s.t, s.t_off,
-                                        repeats, wait_s)
+                                        repeats, wait_s, native_path=nat)
                 np.save(os.path.join(RUN_DIR, f"meas_{wname}.npy"), y)
                 m = s.loop.metrics(y)
                 m["model"] = cfg["desc"]
@@ -2056,11 +2078,17 @@ class App:
         return True, True
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
-                       settle=0.5):
+                       settle=0.5, native_path=None):
         """ilc_bench.capture with a progress bar and a stop check between
-        shots. The settle wait happens once, after the new upload."""
+        shots. The settle wait happens once, after the new upload.
+
+        native_path: also save the repeat average at the SCOPE's own sample
+        rate (npz, t = waveform time, y = monitor V) -- the boxcar
+        decimation onto t_grid discards everything past the grid Nyquist,
+        and this file is the only way to get it back after the fact."""
         time.sleep(settle)
         traces = []
+        t_nat, y_nat = None, 0.0
         self.msgs.put(("progress", 0, repeats))
         for i in range(repeats):
             if self.stop_evt.is_set():
@@ -2073,8 +2101,19 @@ class App:
             ts, vs = scope.waveform(ch)
             scope.run()
             traces.append(scopeio.resample(ts, vs, t_grid, t_offset=t_off))
+            if native_path is not None:
+                if t_nat is None:            # repeats share the scope
+                    t_nat = np.asarray(ts, float)   # config; align a stray
+                    y_nat = np.asarray(vs, float)   # one instead of dying
+                else:
+                    y_nat = y_nat + np.interp(t_nat, ts, vs)
             self.msgs.put(("progress", i + 1, repeats))
         self.msgs.put(("progress", 0, 1))
+        if native_path is not None and t_nat is not None:
+            np.savez(native_path, t=t_nat - t_off, y=y_nat / repeats)
+            print(f"  native-rate average kept: {os.path.basename(native_path)}"
+                  f" ({len(t_nat)} pts, dt "
+                  f"{np.median(np.diff(t_nat))*1e9:.0f} ns)")
         return ilc.averaged(traces)
 
     # ---------------------------------------------------------------- plots
