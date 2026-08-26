@@ -276,6 +276,7 @@ class App:
         self.busy = False
         self.session: Session | None = None
         self._modules = None          # (scope_grab, awg_gui) once bench-loaded
+        self._wave_redraw = None      # replays the Waveforms tab's last draw
         self.cfg = self._load_config()
         root.geometry(self.cfg.get("geometry", "1380x880"))
 
@@ -1013,6 +1014,7 @@ class App:
         ax2.grid(True, alpha=0.3)
         self.fig_wave._canvas.draw_idle()
         self.nb.select(0)
+        self._wave_redraw = lambda: self.do_preview_target(quiet=True)
 
     def do_build_target(self):
         """Build a target CSV from scratch, for a system with no target yet.
@@ -2011,6 +2013,8 @@ class App:
         self._plot_dcorr(snaps)
         self._plot_ddelta(snaps)
         self._plot_convergence()
+        if self._wave_redraw is not None:
+            self._wave_redraw()
 
     def _show_session(self, select_tab=False):
         """Everything drawable from a freshly loaded/inited session: target,
@@ -2029,6 +2033,10 @@ class App:
         self._redraw_iterations()
 
     def _plot_waveforms(self, u, y, pred, it):
+        # remember this draw so Redraw (dot spacing etc.) can replay it --
+        # the tab otherwise only refreshes when a step or load provides data
+        self._wave_redraw = (lambda u=u, y=y, pred=pred, it=it:
+                             self._plot_waveforms(u, y, pred, it))
         s, c = self.session, self._colour()
         sc = self._out_scale()
         tms = s.t * 1e3
