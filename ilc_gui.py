@@ -297,6 +297,7 @@ class App:
                  model=self.model_var.get(), channel=self.channel_var.get(),
                  stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
                  iter_sel=self.itersel_var.get(),
+                 dot_step=self.dotstep_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -565,9 +566,17 @@ class App:
         e.bind("<Return>", lambda ev: self._redraw_iterations())
         ttk.Label(sel, text="(blank = last two;  'all',  '2-5',  or '0,3,6')",
                   foreground="#666666").pack(side="left")
+        ttk.Label(sel, text="   dot every").pack(side="left")
+        self.dotstep_var = tk.StringVar(value=self.cfg.get("dot_step", ""))
+        e2 = ttk.Entry(sel, textvariable=self.dotstep_var, width=5)
+        e2.pack(side="left", padx=2)
+        e2.bind("<Return>", lambda ev: self._redraw_iterations())
+        ttk.Label(sel, text="th sample (blank = auto, 1 = all)",
+                  foreground="#666666").pack(side="left")
         b = ttk.Button(sel, text="Redraw", command=self._redraw_iterations)
         b.pack(side="right")
         self._actions.append(b)
+        self._dot_warned = None
 
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
@@ -925,7 +934,7 @@ class App:
         ax = self.ax_out
         ax.clear()
         ax.plot(tms, v * ch.mon_scale, color=TARGET_COLOUR, lw=1.0,
-                label="target (file contents)", **dot_kw(len(tms)))
+                label="target (file contents)", **self._dot_kw(len(tms)))
         ax.set_ylabel(f"{ch.out_name} voltage (V)")
         ax.set_title(f"{os.path.basename(path)} -- preview, nothing sent")
         ax.legend(loc="best", fontsize=7)
@@ -938,7 +947,7 @@ class App:
             pk = float(np.abs(u).max())
             ax2.plot(tms, u, color=c, lw=0.9,
                      label=f"predicted AWG output (target / {g:g})",
-                     **dot_kw(len(tms)))
+                     **self._dot_kw(len(tms)))
             ax2.axhline(fs, color="#c62828", lw=0.8, ls="--")
             ax2.axhline(-fs, color="#c62828", lw=0.8, ls="--",
                         label=f"+/-{fs:g} V full scale "
@@ -1777,6 +1786,22 @@ class App:
     def _iter_colour(self, idx, n):
         return matplotlib.colormaps["viridis"](0.1 + 0.75 * idx / max(n - 1, 1))
 
+    def _dot_kw(self, n, ms=3.0):
+        """dot_kw honouring the 'dot every Nth sample' box: blank = auto
+        (~180 dots per trace), a number = that literal subsampling step,
+        1 = every real sample drawn."""
+        txt = self.dotstep_var.get().strip()
+        if txt:
+            try:
+                return dict(marker=".", markersize=ms,
+                            markevery=max(1, int(float(txt))))
+            except ValueError:
+                if txt != self._dot_warned:
+                    self._dot_warned = txt
+                    self.log(f"dot spacing {txt!r} is not a number -- "
+                             f"using auto")
+        return dot_kw(n, ms=ms)
+
     def _redraw_iterations(self):
         """Re-render every per-iteration plot from the current selection."""
         if self.session is None:
@@ -1810,14 +1835,14 @@ class App:
         ax = self.ax_out
         ax.clear()
         ax.plot(tms, s.loop.target * sc, color=TARGET_COLOUR, lw=1.0,
-                label="target", **dot_kw(len(tms)))
+                label="target", **self._dot_kw(len(tms)))
         if pred is not None:
             # model output, not data -- dashed and dotless on purpose
             ax.plot(tms, pred * sc, color=PRED_COLOUR, lw=0.9, ls="--",
                     label="model-predicted output")
         if y is not None:
             ax.plot(tms, y * sc, color=c, lw=0.9,
-                    label=f"measured (iter {it})", **dot_kw(len(tms)))
+                    label=f"measured (iter {it})", **self._dot_kw(len(tms)))
         ax.set_ylabel(f"{self._out_name()} voltage (V)")
         ax.legend(loc="best", fontsize=7)
         ax.set_title(f"{s.channel} '{s.stem}' -- output vs target")
@@ -1826,7 +1851,7 @@ class App:
         ax = self.ax_drv
         ax.clear()
         ax.plot(tms, u, color=c, lw=0.9,
-                label=f"drive u (iteration {s.iteration})", **dot_kw(len(tms)))
+                label=f"drive u (iteration {s.iteration})", **self._dot_kw(len(tms)))
         fs = s.full_scale
         ax.axhline(fs, color="#c62828", lw=0.8, ls="--")
         ax.axhline(-fs, color="#c62828", lw=0.8, ls="--",
@@ -1857,7 +1882,7 @@ class App:
                     color=self._iter_colour(idx, n),
                     lw=1.1 if idx == n - 1 else 0.8,
                     label=self._snap_label(sn),
-                    **dot_kw(len(tms), ms=2.6))
+                    **self._dot_kw(len(tms), ms=2.6))
         if n:
             m = snaps[-1]["m"]
             ax.set_title(f"target - measured:  iter {snaps[-1]['it']} peak "
@@ -1891,7 +1916,7 @@ class App:
             ax.loglog(fe, ae, color=self._iter_colour(idx, n),
                       lw=1.0 if idx == n - 1 else 0.7,
                       label=self._snap_label(sn),
-                      **dot_kw(len(fe), ms=2.2))
+                      **self._dot_kw(len(fe), ms=2.2))
         if s.loop.frf is not None:
             ax.axvspan(s.loop.frf.f_use, s.loop.frf.f_max, color="#c68000",
                        alpha=0.15, label="FRF taper band")
@@ -1938,7 +1963,7 @@ class App:
             ax.plot(tms, (u - u_ref) * 1e3, color=self._iter_colour(idx, n),
                     lw=1.1 if idx == n - 1 else 0.8,
                     label=self._snap_label(sn),
-                    **dot_kw(len(tms), ms=2.6))
+                    **self._dot_kw(len(tms), ms=2.6))
             shown += 1
         if shown:
             ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)

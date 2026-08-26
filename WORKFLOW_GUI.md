@@ -194,9 +194,11 @@ every one recalled from `meas_*.npy` beside the state at load — is
 available.
 
 Traces carry small dots marking **real samples** — every dot is actual
-data, thinned to roughly one per 30th sample so a 5301-point record stays
-readable (the line itself still passes through every sample; zoom in with
-the toolbar to inspect a region). About that toolbar: pan/zoom/home work
+data, and the *dot every Nth sample* box sets the density: blank = auto
+(~180 dots per trace, keeps a 5301-point record readable), any number =
+that literal step, `1` = every sample drawn (the line always passes
+through every sample regardless; zoom in with the toolbar to inspect a
+region). About that toolbar: pan/zoom/home work
 as expected, but the *Configure subplots* sliders are inert — the figures
 use matplotlib's constrained layout, which recomputes the margins on
 every draw and overrides anything the sliders set.
@@ -319,3 +321,4 @@ Three kinds of persistence, marked in the tables:
 | field | what it does |
 |---|---|
 | **Iterations shown** *(config)* | Which stored iterations the Error, Error spectrum and Drive corrections tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
+| **dot every Nth sample** *(config)* | Marker density on every data trace: blank = auto (~180 dots per trace), a number = that literal subsampling step, `1` = every real sample gets a dot. Enter or **Redraw** applies to the iteration tabs; the Waveforms/preview traces pick it up on their next draw. |
