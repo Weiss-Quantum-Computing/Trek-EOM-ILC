@@ -234,11 +234,23 @@ class FRF:
         ph = np.interp(lf, src, self.phase)
         return mag * np.exp(1j * ph)
 
+    # 1/H is ACAUSAL: the chain delays, so its inverse pre-acts.  In an
+    # unpadded FFT that pre-action wraps circularly onto the far END of the
+    # record, where _limit_ends then clamps it away -- the correction the
+    # record start needs is deleted every iteration, and the start error
+    # ratchets instead of converging (PRFRX1A: 28 mV at t=0 by i20, with a
+    # -230 mV ghost at the record end).  Pad well past the inverse's
+    # pre-action span (~0.1 ms) and crop; the discarded pre-action is
+    # unrealisable anyway -- sample 0 is the AWG's inter-burst hold level,
+    # nothing can play before it.
+    N_PAD = 1024
+
     def lead(self, e, dt, gamma=1.0):
         """gamma * IFFT( taper(f) * E(f) / H(f) ) -- the measured inverse."""
         n = len(e)
-        E = np.fft.rfft(e)
-        f = np.fft.rfftfreq(n, dt)
+        m = n + self.N_PAD
+        E = np.fft.rfft(e, m)
+        f = np.fft.rfftfreq(m, dt)
         H = self.interp(np.where(f > 0, f, self.f[0]))
         H[0] = np.abs(self.interp(np.array([self.f[0]])))[0]   # DC: real gain
         taper = np.ones_like(f)
@@ -246,7 +258,7 @@ class FRF:
         taper[band] = 0.5 * (1 + np.cos(np.pi * (f[band] - self.f_use)
                                         / (self.f_max - self.f_use)))
         taper[f > self.f_max] = 0.0
-        return gamma * np.fft.irfft(taper * E / H, n=n)
+        return gamma * np.fft.irfft(taper * E / H, n=m)[:n]
 
 
 def _limit_ends(u: np.ndarray, cap: float = LIMITS.idle_awg) -> np.ndarray:
