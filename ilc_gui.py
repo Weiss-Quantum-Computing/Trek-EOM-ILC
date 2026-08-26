@@ -632,6 +632,13 @@ class App:
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True)
 
+        # Home on any TIME-domain figure homes them all: the nav stacks of
+        # panes that were only ever synced programmatically are empty, so
+        # their own Home button would silently do nothing (measured).
+        for fig in (self.fig_wave, self.fig_err, self.fig_dcor,
+                    self.fig_ddel):
+            fig._toolbar.home = self._wrap_home(fig._toolbar)
+
         # the wiring fields (monitor col, AWG/scope channels, FRF autopoint)
         # follow the remembered channel -- they were built with EO1's values
         self._apply_channel_defaults()
@@ -644,8 +651,9 @@ class App:
         axes = np.atleast_1d(axes)
         canvas = FigureCanvasTkAgg(fig, master=frame)
         canvas.get_tk_widget().pack(fill="both", expand=True)
-        NavigationToolbar2Tk(canvas, frame)          # zoom/pan, scope habits
+        tb = NavigationToolbar2Tk(canvas, frame)     # zoom/pan, scope habits
         fig._canvas = canvas
+        fig._toolbar = tb
         return fig, axes
 
     def _path_row(self, parent, row, label, var, browse):
@@ -2009,6 +2017,45 @@ class App:
         if self.tlink_var.get() and self._t_range is not None:
             ax.set_xlim(self._t_range)
         ax.callbacks.connect("xlim_changed", self._on_xlim_changed)
+
+    def _wrap_home(self, tb):
+        orig = tb.home
+
+        def home(*args, **kw):
+            orig(*args, **kw)          # this pane's own y-reset still works
+            self._home_all_time_axes()
+        return home
+
+    def _home_all_time_axes(self):
+        """Release the linked window and x-autoscale every time plot.
+
+        The draws happen synchronously INSIDE the busy window: autoscale is
+        applied at draw time, and a deferred draw_idle would fire
+        xlim_changed after the guard lifted, re-capturing the full range as
+        if it were a zoom."""
+        if not self.tlink_var.get():
+            return
+        self._tlink_busy = True
+        try:
+            # ax_drv shares x with ax_out, and a shared group only
+            # autoscales when EVERY sibling has autoscale enabled -- so the
+            # whole group is re-enabled before anything draws
+            for ax in self._time_axes() + (self.ax_drv,):
+                ax.autoscale(enable=True, axis="x")
+            for fig in (self.fig_wave, self.fig_err, self.fig_dcor,
+                        self.fig_ddel):
+                fig._canvas.draw()
+            # a pane with no data (an empty corrections/updates tab) cannot
+            # autoscale -- conform everyone to the Waveforms axis, which
+            # always carries the target while a session is loaded
+            ref = self.ax_out.get_xlim()
+            for ax in self._time_axes():
+                if ax.get_xlim() != ref:
+                    ax.set_xlim(ref)
+                    ax.figure._canvas.draw()
+        finally:
+            self._tlink_busy = False
+        self._t_range = None
 
     def _on_xlim_changed(self, ax):
         """Toolbar zoom/pan/home on one time plot drives them all -- the
