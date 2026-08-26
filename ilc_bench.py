@@ -74,19 +74,68 @@ def load_module(path, name):
     return mod
 
 
+_SHARED_RM = None
+
+
+def _shared_rm(pyvisa_mod):
+    """One ResourceManager for the whole process, owned by neither instrument.
+
+    pyvisa hands every default ResourceManager() caller the same cached
+    instance, and both instrument layers close the RM they think they
+    created -- so one instrument's close() tears the other's session down
+    (measured 2026-08-26: the AWG's close killed the scope's session in the
+    middle of auto-set). This RM is handed to both and closed by nobody."""
+    global _SHARED_RM
+    if _SHARED_RM is not None:
+        try:
+            _SHARED_RM.session          # raises once the RM has been closed
+        except Exception:
+            _SHARED_RM = None
+    if _SHARED_RM is None:
+        _SHARED_RM = pyvisa_mod.ResourceManager()
+    return _SHARED_RM
+
+
+def make_scope(mod):
+    """Build the scope on the shared DEFAULT VISA, not Keysight's.
+
+    Two measured traps (2026-08-26). First: scope_grab prefers ktvisa32.dll
+    whenever the file exists -- standalone that is harmless (the DLL fails
+    to load in a fresh process and the code falls back to NI), but once the
+    AWG has put NI's visa32.dll into the process, ktvisa32 suddenly loads,
+    enumerates the bus, and then fails every open_resource with
+    VI_ERROR_ALLOC, which Scope.connect swallows per-candidate and reports
+    as 'No Keysight USB instrument found'. Second: Scope.close() closes its
+    RM, which must not be the shared one -- see _shared_rm."""
+    scope = mod.Scope()
+    scope._make_rm = lambda: _shared_rm(mod.pyvisa)
+    orig_close = scope.close
+
+    def close_keeping_rm():
+        scope.rm = None                 # the shared RM is not ours to close
+        orig_close()
+    scope.close = close_keeping_rm
+    return scope
+
+
 def make_awg(mod):
     """Build the generator object from whichever module carries the class.
 
     The instrument layer moved out of bk4063b_awg_gui.py into bk4063b.py
     (that repo's commit 18142f9, 'One instrument layer'), renaming Awg to
     BK4063B whose constructor connects immediately unless told not to.
-    Accept either vintage, and never auto-connect -- the callers here print
-    the IDN from an explicit connect()."""
+    Accept either vintage, never auto-connect (the callers print the IDN
+    from an explicit connect()), and hand over the shared RM -- a given RM
+    is one bk4063b never closes."""
     cls = getattr(mod, "BK4063B", None) or getattr(mod, "Awg")
     try:
-        return cls(connect=False)
-    except TypeError:                    # the old class took no such kwarg
-        return cls()
+        return cls(connect=False,
+                   resource_manager=_shared_rm(mod.pyvisa))
+    except TypeError:                    # the old class took no such kwargs
+        try:
+            return cls(connect=False)
+        except TypeError:
+            return cls()
 
 
 # --------------------------------------------------------------------- AWG
@@ -371,7 +420,7 @@ def main():
     # ---- instruments
     awg = make_awg(_AWGMOD)
     print("AWG:  ", awg.connect())
-    scope = scopemod.Scope()
+    scope = make_scope(scopemod)
     print("Scope:", scope.connect())
 
     problems, notes = check_awg_channel(awg, a.awg_ch, expect_rate=a.sample_rate,
@@ -446,8 +495,10 @@ def main():
                 print(f"CH{a.awg_ch} output OFF (end of run)")
             except Exception as e:
                 print(f"could not switch CH{a.awg_ch} output off: {e}")
-        scope.close()
+        # both closes leave the shared ResourceManager standing (make_awg /
+        # make_scope), so the order no longer matters
         awg.close()
+        scope.close()
 
     print("\n" + loop.report())
     print(f"\ndrives and measurements in {os.path.abspath(a.outdir)}")

@@ -1303,8 +1303,22 @@ class App:
                       awg_ch, scope_ch):
         scopemod, awgmod = self._bench_modules()
 
+        # Connect BOTH instruments before writing to either: a scope that
+        # does not answer (first live test: Scope Grab held its VISA session)
+        # must not leave a half-configured bench.
         awg = ilc_bench.make_awg(awgmod)
         print("AWG:  ", awg.connect())
+        scope = ilc_bench.make_scope(scopemod)
+        try:
+            print("Scope:", scope.connect())
+        except Exception as e:
+            awg.close()
+            raise RuntimeError(
+                f"{e}\nNothing was changed. If Scope Grab (or any other "
+                f"program) is open it holds the scope's VISA session -- "
+                f"close it and try again; otherwise check the scope's power "
+                f"and rear-panel USB.")
+
         try:
             if awg.is_on(awg_ch):
                 print(f"REFUSING to auto-set CH{awg_ch}: its output is ON, "
@@ -1312,24 +1326,29 @@ class App:
                       f"voltage at the chain. Switch it off first.")
                 return
             # apply_channel writes in the only order the 4063B honours
-            # (load before BSWV, SRATE before BSWV, burst last)
-            awg.apply_channel(awg_ch, {
+            # (load before BSWV, SRATE before BSWV, mode block last, and
+            # burst STATE,ON sent separately before its parameters -- the
+            # manual requires it, and a combined write drops the type switch)
+            missed = awg.apply_channel(awg_ch, {
                 "OUTP": {"LOAD": "HZ"},
                 "SRATE": {"MODE": "DDS"},
                 "BSWV": {"WVTP": "ARB", "FRQ": 1.0 / period,
                          "AMP": 2 * fs, "OFST": 0},
-                "BTWV": {"STATE": "ON", "GATE_NCYC": "NCYC",
-                         "TIME": 1, "TRSR": "EXT"},
+                "MODE": ("Burst", {"GATE_NCYC": "NCYC", "TIME": 1,
+                                   "TRSR": "EXT"}),
             }, log=lambda m: print("      ", m))
+            if missed:
+                print("       did NOT take (apply_channel readback):", missed)
+            # trust nothing: read the burst block back and show it
+            btwv = awg.query(f"C{awg_ch}:BTWV?").strip()
             print(f"AWG CH{awg_ch}: ARB, DDS, period {period*1e3:.4f} ms "
                   f"(FRQ {1.0/period:.6g} Hz), AMP {2*fs:g} Vpp, OFST 0, "
-                  f"load HZ, burst NCYC 1 trig EXT -- output left "
+                  f"load HZ -- output left "
                   f"{'ON' if awg.is_on(awg_ch) else 'OFF'}")
+            print(f"       burst readback: {btwv}")
         finally:
             awg.close()
 
-        scope = scopemod.Scope()
-        print("Scope:", scope.connect())
         try:
             # full window with settle room, waveform start at the left edge:
             # position (trigger -> screen centre) = half the period
@@ -1405,7 +1424,7 @@ class App:
 
         awg = ilc_bench.make_awg(awgmod)
         print("AWG:  ", awg.connect())
-        scope = scopemod.Scope()
+        scope = ilc_bench.make_scope(scopemod)
         print("Scope:", scope.connect())
         uploaded_any = False
         try:
@@ -1483,8 +1502,9 @@ class App:
                     print(f"CH{awg_ch} output OFF (end of run)")
                 except Exception as e:
                     print(f"could not switch CH{awg_ch} output off: {e}")
-            scope.close()
+            # both closes leave the shared ResourceManager standing
             awg.close()
+            scope.close()
             print("instruments closed")
         print("\n" + s.loop.report())
 
