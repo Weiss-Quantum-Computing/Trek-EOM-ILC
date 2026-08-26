@@ -278,7 +278,8 @@ class App:
                  state=self.state_var.get(), target=self.target_var.get(),
                  measured=self.meas_var.get(), frf=self.frf_var.get(),
                  f_use=self.fuse_var.get(), f_max=self.fmax_var.get(),
-                 model=self.model_var.get(),
+                 model=self.model_var.get(), channel=self.channel_var.get(),
+                 stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -327,8 +328,9 @@ class App:
         b = ttk.Button(sf, text="Plot", command=self.do_preview_target)
         b.grid(row=2, column=4, padx=2)
         self._actions.append(b)
-        self.channel_var = tk.StringVar(value="EO1")
-        self.stem_var = tk.StringVar(value="")
+        ch0 = self.cfg.get("channel", "EO1")
+        self.channel_var = tk.StringVar(value=ch0 if ch0 in CHANNELS else "EO1")
+        self.stem_var = tk.StringVar(value=self.cfg.get("stem", ""))
         r3 = ttk.Frame(sf); r3.grid(row=3, column=0, columnspan=4, sticky="ew", pady=1)
         ttk.Label(r3, text="Channel").pack(side="left")
         cb = ttk.Combobox(r3, textvariable=self.channel_var, width=5,
@@ -344,7 +346,9 @@ class App:
         # The first-shot gain is deliberately NOT the model gain: it fixes
         # what iteration 0 plays, and tuning the correction model afterwards
         # must not silently rescale it. Blank = fall back to the model gain.
-        self.shotgain_var = tk.StringVar(value="")
+        # Remembered between launches (it belongs to the remembered channel);
+        # still cleared when the channel is SWITCHED -- the prior-leak guard.
+        self.shotgain_var = tk.StringVar(value=self.cfg.get("shot_gain", ""))
         self.fs_var = tk.StringVar(value="10.0")
         ttk.Label(r4, text="first-shot gain").pack(side="left", padx=(0, 2))
         ttk.Entry(r4, textvariable=self.shotgain_var, width=7).pack(
@@ -542,6 +546,10 @@ class App:
         self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1)
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True)
+
+        # the wiring fields (monitor col, AWG/scope channels, FRF autopoint)
+        # follow the remembered channel -- they were built with EO1's values
+        self._apply_channel_defaults()
 
     def _tab(self, name, nrows, sharex=False):
         frame = ttk.Frame(self.nb)
@@ -1138,6 +1146,7 @@ class App:
         self.log(f"  state {state_path}")
         self._refresh_summary()
         self._show_session(select_tab=True)
+        self._save_config()          # stem/gain/channel survive even a kill
 
     def _refresh_summary(self):
         s = self.session
