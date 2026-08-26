@@ -274,6 +274,11 @@ class App:
         self.log(f"--- panel started; timestamped log appends to {LOG_PATH}")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self.pump)
+        # reopen where the last session left off: the remembered state (and
+        # every stored measurement sharing its stem) reloads on startup, so
+        # closing the panel never costs the plots
+        if self.cfg.get("state") and os.path.exists(self.cfg["state"]):
+            root.after(200, self._auto_reload)
 
     # ---------------------------------------------------------------- config
     def _load_config(self):
@@ -1035,6 +1040,13 @@ class App:
         ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(
             side="left", padx=(4, 0))
 
+    def _auto_reload(self):
+        try:
+            self.log("restoring the last session...")
+            self.do_load()
+        except Exception as e:
+            self.log(f"could not restore the last session: {e}")
+
     def do_load(self):
         path = self.state_var.get().strip()
         if not path:
@@ -1314,6 +1326,11 @@ class App:
         it = s.iteration
         m = s.loop.metrics(y)
         m["model"] = cfg["desc"]
+        # persist the averaged measurement beside the state, exactly as the
+        # bench loop does -- so a Step-measured iteration survives a close
+        # and reloads with the session
+        np.save(os.path.join(os.path.dirname(s.state_path),
+                             f"meas_{s.stem}_i{it:02d}.npy"), y)
         print(f"iteration {it}: error peak {m['peak_err_hv']:7.1f} V   "
               f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
         if refit:

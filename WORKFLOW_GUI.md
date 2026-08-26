@@ -73,6 +73,11 @@ Nothing carries over from the Trek chains unless you load it on purpose.
 
 ## 3. Resuming an existing campaign
 
+Launching the panel **restores the last session automatically**: the
+remembered state reloads with every stored measurement sharing its stem,
+so closing the program never costs the plots — reopen and continue
+looking. To switch campaigns, or if nothing was remembered:
+
 1. **State** → browse to `run\drive_<stem>.state.npz` → **Load state**.
    Everything — target, current drive, plant, γ, f_cut, t-offset, error
    history — comes from the file. The last two measurements beside it are
@@ -212,7 +217,7 @@ every draw and overrides anything the sliders set.
 | `drive_<stem>.state.npz` | `run\` | the campaign — rewritten every step |
 | `drive_<stem>_iNN.csv` | `run\` | the iteration's drive, `time_us,voltage_V` |
 | `<stem>_iNN.csv` | the AWG GUI's `Waveforms\` | upload-ready copy (±1, Normalise OFF) |
-| `meas_<stem>_iNN.npy` | `run\` | bench mode's averaged measurement |
+| `meas_<stem>_iNN.npy` | beside the state | the iteration's averaged measurement — bench mode and Step both save it, so every measured iteration reloads with the session |
 | `ilc_gui.log` | `run\` | timestamped append-only copy of everything the panel logged |
 
 `run\README.md` has the full taxonomy and where finished campaigns get
@@ -251,7 +256,7 @@ Three kinds of persistence, marked in the tables:
 
 | field | what it does |
 |---|---|
-| **State** *(config)* | Path to a `drive_<stem>.state.npz`. **Load state** rebuilds the whole campaign from it: target, current drive, plant, γ, f_cut, t-offset, iteration counter, error history — and recalls the last two `meas_*.npy` beside it into the plots. |
+| **State** *(config)* | Path to a `drive_<stem>.state.npz`. **Load state** rebuilds the whole campaign from it: target, current drive, plant, γ, f_cut, t-offset, iteration counter, error history — and recalls every `meas_*.npy` sharing the stem beside it into the plots. The remembered state reloads automatically at launch. |
 | **Target** *(config)* | CSV of the desired waveform: first column time (`time_us` or `time_s`), second column value in **output units** (EOM volts on EO1/EO2, measured volts on GEN — divided by the channel's `mon_scale` on load). Comment lines start with `#`. Auto-plots on selection. |
 | **Build…** | Generates a target from scratch. Dialog fields: *shape* (cosine-edged ramp up-hold-return, or half-sine pulse), *peak* in output units, *lead / rise / hold / fall / tail* in ms (lead and tail are flat zero — the level the AWG idles on), *dt* in µs (the loop grid; 2 µs is the campaign standard). |
 | **Plot** | Re-draws the target preview on demand: file contents on top, the predicted AWG output of the flat first shot below, against the ±full-scale rails. Sends nothing. |
