@@ -48,13 +48,14 @@ def check_limits(u_awg: np.ndarray, v_mon: np.ndarray, dt: float,
     trek_in = peak * ch.divider
     if trek_in > lim.trek_in_rail:
         ok = False
-        msgs.append(f"Trek input {trek_in:.3f} V exceeds {lim.trek_in_rail:.1f} V")
+        msgs.append(f"post-divider input {trek_in:.3f} V exceeds {lim.trek_in_rail:.1f} V")
 
-    hv = v_mon * HV_PER_MON
+    hv = v_mon * ch.mon_scale
     hv_pk = float(np.abs(hv).max())
     if hv_pk > lim.hv_max:
         ok = False
-        msgs.append(f"peak output {hv_pk:.0f} V exceeds the {lim.hv_max:.0f} V EOM limit")
+        msgs.append(f"peak output {hv_pk:.0f} V exceeds the {lim.hv_max:.0f} V "
+                    f"{ch.out_name} limit")
 
     slew = float(np.abs(np.gradient(hv, dt)).max())
     if slew > lim.slew_hv:
@@ -148,10 +149,11 @@ class Loop:
     def metrics(self, y: np.ndarray) -> dict:
         e = self.target - y
         span = float(np.ptp(self.target))
+        scale = self.channel.mon_scale       # the *_hv keys are in output units
         return dict(peak_err_mon=float(np.abs(e).max()),
                     rms_err_mon=float(e.std()),
-                    peak_err_hv=float(np.abs(e).max()) * HV_PER_MON,
-                    rms_err_hv=float(e.std()) * HV_PER_MON,
+                    peak_err_hv=float(np.abs(e).max()) * scale,
+                    rms_err_hv=float(e.std()) * scale,
                     peak_pct=100 * float(np.abs(e).max()) / span,
                     rms_pct=100 * float(e.std()) / span)
 

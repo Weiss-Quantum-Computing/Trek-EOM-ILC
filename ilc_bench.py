@@ -303,12 +303,12 @@ def main():
         if not (a.channel and a.target and a.t_offset is not None):
             sys.exit("--channel, --target and --t-offset are required "
                      "unless --resume supplies them")
+        ch = CHANNELS[a.channel]
         df = pd.read_csv(a.target, comment="#")
         t = df.iloc[:, 0].to_numpy(float)
         t = t * 1e-6 if "us" in df.columns[0].lower() else t
-        v = df.iloc[:, 1].to_numpy(float) / HV_PER_MON      # monitor volts
+        v = df.iloc[:, 1].to_numpy(float) / ch.mon_scale    # measured volts
         dt = float(np.median(np.diff(t)))
-        ch = CHANNELS[a.channel]
         amp = float(np.ptp(v))
         model = ch.plant(amp, dt, model=a.model)
         loop = ilc.Loop(plant=model, target=v, dt=dt, channel=ch,
@@ -335,7 +335,7 @@ def main():
                  f"that is {len(stem)+4}, past the {limit}-character cap.")
     print(f"channel {ch.name}: {model}")
     print(f"uploads as  : {stem}_i{k0:02d} ... {stem}_i{k0+a.iterations:02d}")
-    print(f"target  {np.ptp(v)*HV_PER_MON:.0f} V over {t[-1]*1e3:.2f} ms, "
+    print(f"target  {np.ptp(v)*ch.mon_scale:.0f} V over {t[-1]*1e3:.2f} ms, "
           f"{len(v)} points at {dt*1e6:.3f} us")
 
     def save_state(iteration, u_now):

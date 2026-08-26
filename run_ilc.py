@@ -45,15 +45,19 @@ AWG_WAVEFORMS = os.environ.get(
 
 
 # --------------------------------------------------------------------- utils
-def load_target(path: str):
-    """Target waveform in EOM volts -> (t seconds, v monitor volts)."""
+def load_target(path: str, scale: float = HV_PER_MON):
+    """Target waveform in OUTPUT units -> (t seconds, v measured volts).
+
+    `scale` is the channel's mon_scale: 1000 for the Trek chains (target in
+    EOM volts, measured on the 1 V/kV monitor), 1.0 for GEN (target already
+    in the units the scope measures)."""
     df = pd.read_csv(path, comment="#")
     cols = {c.lower(): c for c in df.columns}
     tcol = cols.get("time_us") or cols.get("time_s") or df.columns[0]
     vcol = cols.get("voltage_v") or df.columns[1]
     t = df[tcol].to_numpy(float)
     t = t * 1e-6 if "us" in tcol.lower() else t
-    return t, df[vcol].to_numpy(float) / HV_PER_MON
+    return t, df[vcol].to_numpy(float) / scale
 
 
 def save_state(path, **kw):
@@ -80,9 +84,9 @@ def build_loop(state):
 
 # ---------------------------------------------------------------------- init
 def cmd_init(a):
-    t, v = load_target(a.target)
-    dt = float(np.median(np.diff(t)))
     ch = CHANNELS[a.channel]
+    t, v = load_target(a.target, ch.mon_scale)
+    dt = float(np.median(np.diff(t)))
     amp = float(np.ptp(v))
 
     p = ch.plant(amp, dt, model=a.model)
@@ -100,10 +104,10 @@ def cmd_init(a):
     u = loop.first_shot()
 
     print(f"channel     : {ch.name}")
-    print(f"target      : {np.ptp(v)*HV_PER_MON:.0f} V peak-to-peak over {t[-1]*1e3:.2f} ms")
+    print(f"target      : {np.ptp(v)*ch.mon_scale:.0f} V peak-to-peak over {t[-1]*1e3:.2f} ms")
     print(f"plant       : {p}")
-    print(f"uncorrected : peak error {np.abs(p.forward(v/gain)-v).max()*HV_PER_MON:.0f} V")
-    print(f"modelled    : peak error {np.abs(p.forward(u)-v).max()*HV_PER_MON:.1f} V "
+    print(f"uncorrected : peak error {np.abs(p.forward(v/gain)-v).max()*ch.mon_scale:.0f} V")
+    print(f"modelled    : peak error {np.abs(p.forward(u)-v).max()*ch.mon_scale:.1f} V "
           f"(what the first shot should land at if the model is right)")
     print(f"drive       : peak {np.abs(u).max():.4f} V, "
           f"overshoot {(np.abs(u).max()-np.abs(v).max()/gain)*1e3:.0f} mV over the flat-top demand")
@@ -169,7 +173,7 @@ def cmd_step(a):
         tgt_base = st["target"][t < t[0] + 0.05 * (t[-1] - t[0])].mean()
         if abs(tgt_base) > 0.01 * np.ptp(st["target"]):
             print(f"  WARNING: --zero-baseline, but the target already averages "
-                  f"{tgt_base*HV_PER_MON:.0f} V over that window -- this is "
+                  f"{tgt_base*loop.channel.mon_scale:.0f} V over that window -- this is "
                   f"subtracting signal, not baseline.")
         y = y - base
 
@@ -217,7 +221,7 @@ def cmd_emit_ni(a):
         print("\n", cf)
         err = np.abs(cf.realised - u).max()
         print(f" worst quantisation error {err*1e6:.2f} uV "
-              f"= {err*ch.divider*ch.amp_mon_product*HV_PER_MON*1e3:.2f} mV at the EOM")
+              f"= {err*ch.divider*ch.amp_mon_product*ch.mon_scale*1e3:.2f} mV at the {ch.out_name}")
         outputs.write_awg_csv(f"ni_{ch.name}_coarse.csv", t, cf.coarse, "coarse channel")
         outputs.write_awg_csv(f"ni_{ch.name}_fine.csv", t, cf.fine, "fine channel (1:%d)" % ch.fine_ratio)
         print(f"wrote ni_{ch.name}_coarse.csv and ni_{ch.name}_fine.csv")
@@ -225,8 +229,8 @@ def cmd_emit_ni(a):
         q, lsb = outputs.quantise(u, bits=a.bits)
         err = np.abs(q - u).max()
         print(f"\n single channel, {a.bits} bit: LSB {lsb*1e6:.1f} uV "
-              f"= {lsb*ch.divider*ch.amp_mon_product*HV_PER_MON:.3f} V at the EOM")
-        print(f" worst quantisation error {err*ch.divider*ch.amp_mon_product*HV_PER_MON:.3f} V at the EOM")
+              f"= {lsb*ch.divider*ch.amp_mon_product*ch.mon_scale:.3f} V at the {ch.out_name}")
+        print(f" worst quantisation error {err*ch.divider*ch.amp_mon_product*ch.mon_scale:.3f} V at the {ch.out_name}")
         outputs.write_awg_csv(f"ni_{ch.name}_single.csv", t, q, "single channel, no fine trim")
         print(f"wrote ni_{ch.name}_single.csv")
 

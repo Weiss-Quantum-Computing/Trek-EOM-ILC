@@ -90,6 +90,11 @@ CH_DEFAULTS = {
                 frf="frf_WIDE_X1.csv", colour="#1f77b4"),
     "EO2": dict(mon_col="CH4", awg_ch=2, scope_ch=4,
                 frf="frf_WIDE_X2.csv", colour="#d62728"),
+    # GEN is the blank channel for any other system: unity scale, no
+    # calibration tables, and deliberately NO auto-pointed FRF -- nothing
+    # measured on the Trek chains applies until it is loaded on purpose.
+    "GEN": dict(mon_col="CH1", awg_ch=1, scope_ch=1,
+                frf=None, colour="#2e7d32"),
 }
 TARGET_COLOUR = "#222222"
 PRED_COLOUR = "#8a8a8a"
@@ -174,6 +179,43 @@ def read_captures(pattern, mon_col, t, t_off):
                 f"so only full-window captures of THIS iteration match.")
         traces.append(scopeio.resample(tr.t, tr[mon_col], t, t_offset=t_off))
     return ilc.averaged(traces), files
+
+
+TARGET_SHAPES = ("ramp up-hold-return", "half-sine pulse")
+
+
+def build_target_waveform(shape, peak, lead_ms, rise_ms, hold_ms, fall_ms,
+                          tail_ms, dt_us):
+    """A target from scratch: cosine-edged shapes on a uniform grid, for a
+    system that has no target waveform yet.
+
+    Cosine edges start and end with zero slope, so the demand carries no
+    corner the chain must chase, and the record begins and ends at zero --
+    the level the AWG idles on between bursts.  Times in ms, dt in us,
+    peak in OUTPUT units (what the target CSV column carries)."""
+    dt = dt_us * 1e-6
+    if dt <= 0:
+        raise RuntimeError("dt must be positive")
+
+    def n(ms):
+        return max(int(round(ms * 1e-3 / dt)), 0)
+
+    lead, rise, hold, fall, tail = (n(x) for x in (lead_ms, rise_ms,
+                                                   hold_ms, fall_ms, tail_ms))
+    if shape == "half-sine pulse":
+        body = peak * np.sin(np.pi * np.linspace(0.0, 1.0,
+                                                 max(rise + hold + fall, 2)))
+    else:                                    # cosine-edged ramp up-hold-return
+        up = peak * 0.5 * (1 - np.cos(np.pi * np.linspace(0.0, 1.0,
+                                                          max(rise, 2))))
+        down = (peak * 0.5 * (1 - np.cos(np.pi * np.linspace(0.0, 1.0,
+                                                             max(fall, 2)))))[::-1]
+        body = np.concatenate([up, np.full(hold, float(peak)), down])
+    v = np.concatenate([np.zeros(lead), body, np.zeros(tail)])
+    if len(v) < 8:
+        raise RuntimeError("target has fewer than 8 samples -- lengthen the "
+                           "segments or shorten dt")
+    return np.arange(len(v)) * dt, v
 
 
 class _QueueWriter(io.TextIOBase):
@@ -271,6 +313,9 @@ class App:
         self._path_row(sf, 2, "Target", self.target_var,
                        lambda: self._browse(self.target_var, "Target CSV",
                                             "*.csv", os.path.join(HERE, "waveforms")))
+        b = ttk.Button(sf, text="Build...", command=self.do_build_target)
+        b.grid(row=2, column=3, padx=2)
+        self._actions.append(b)
         self.channel_var = tk.StringVar(value="EO1")
         self.stem_var = tk.StringVar(value="")
         r3 = ttk.Frame(sf); r3.grid(row=3, column=0, columnspan=4, sticky="ew", pady=1)
@@ -278,7 +323,7 @@ class App:
         cb = ttk.Combobox(r3, textvariable=self.channel_var, width=5,
                           values=list(CHANNELS), state="readonly")
         cb.pack(side="left", padx=(2, 8))
-        cb.bind("<<ComboboxSelected>>", lambda e: self._apply_channel_defaults())
+        cb.bind("<<ComboboxSelected>>", lambda e: self._on_channel_change())
         ttk.Label(r3, text="Name stem").pack(side="left")
         ttk.Entry(r3, textvariable=self.stem_var, width=9).pack(side="left", padx=2)
         ttk.Label(r3, text=f"(<= {NAME_LIMIT - 4} chars; '_iNN' is appended)"
@@ -551,6 +596,15 @@ class App:
         return out
 
     # -------------------------------------------------------- session setup
+    def _on_channel_change(self):
+        """Switching channel means switching system: model parameters from
+        the previous channel do not follow -- they are the previous chain's
+        numbers, and inheriting them silently is exactly the prior-knowledge
+        leak the GEN channel exists to prevent."""
+        for v in self._param_vars.values():
+            v.set("")
+        self._apply_channel_defaults()
+
     def _apply_channel_defaults(self, channel=None):
         ch = channel or self.channel_var.get()
         d = CH_DEFAULTS[ch]
@@ -560,9 +614,9 @@ class App:
         # Point at this channel's wide-probe FRF unless the user browsed to
         # something that is not just the other channel's default.
         cur = os.path.basename(self.frf_var.get())
-        if not cur or cur in {c["frf"] for c in CH_DEFAULTS.values()}:
-            p = os.path.join(RUN_DIR, d["frf"])
-            self.frf_var.set(p if os.path.exists(p) else "")
+        if not cur or cur in {c["frf"] for c in CH_DEFAULTS.values() if c["frf"]}:
+            p = os.path.join(RUN_DIR, d["frf"]) if d["frf"] else ""
+            self.frf_var.set(p if p and os.path.exists(p) else "")
 
     # -------------------------------------------------------- model ladder
     def _model_key(self):
@@ -621,8 +675,11 @@ class App:
         the amplitude actually in use -- fn falls with drive (the EOM
         capacitance is voltage dependent), so the amplitude matters."""
         try:
-            if self.session is not None:
-                ch = CHANNELS[self.session.channel]
+            # The CHOSEN channel, not the loaded session's: after switching
+            # the combobox to another system, filling from the old session's
+            # calibration would smuggle that chain's numbers across.
+            ch = CHANNELS[self.channel_var.get()]
+            if self.session is not None and self.session.channel == ch.name:
                 amp = float(np.ptp(self.session.loop.target))
             else:
                 tpath = self.target_var.get().strip()
@@ -631,16 +688,17 @@ class App:
                         "load a session or set a target file first -- the "
                         "tables are amplitude-dependent, so the target sets "
                         "which row applies")
-                _, v = run_ilc.load_target(tpath)
-                ch = CHANNELS[self.channel_var.get()]
+                _, v = run_ilc.load_target(tpath, ch.mon_scale)
                 amp = float(np.ptp(v))
-        except RuntimeError as e:
+            # a channel with no tables (GEN) raises here rather than
+            # borrowing another system's numbers
+            self.pgain_var.set(f"{ch.gain(amp):.4f}")
+            self.ptau_var.set(f"{ch.tau(amp)*1e6:.2f}")
+            self.pfn_var.set(f"{ch.fn(amp):.0f}")
+            self.pzeta_var.set(f"{ch.zeta(amp):.3f}")
+        except (RuntimeError, ValueError) as e:
             return messagebox.showerror("From calibration", str(e))
-        self.pgain_var.set(f"{ch.gain(amp):.4f}")
-        self.ptau_var.set(f"{ch.tau(amp)*1e6:.2f}")
-        self.pfn_var.set(f"{ch.fn(amp):.0f}")
-        self.pzeta_var.set(f"{ch.zeta(amp):.3f}")
-        self.log(f"calibration at {amp*HV_PER_MON:.0f} V pk-pk ({ch.name}): "
+        self.log(f"calibration at {amp*ch.mon_scale:.0f} V pk-pk ({ch.name}): "
                  f"gain {ch.gain(amp):.4f}, tau {ch.tau(amp)*1e6:.2f} us "
                  f"(one-pole), fn {ch.fn(amp):.0f} Hz, zeta {ch.zeta(amp):.3f} "
                  f"(tables measured 2026-08-20/21)")
@@ -665,28 +723,110 @@ class App:
     def _fit_work(self, model_key, pattern, mon):
         s = self.session
         if s.snapshots:
+            # Fit the measurement against the drive that PLAYED it. After a
+            # step the current drive has already moved on, and identifying a
+            # mismatched pair returns a plant of the update, not the chain.
             snap = s.snapshots[-1]
             y, src = snap["y"], f"the iteration-{snap['it']} measurement"
+            u_fit = snap.get("u")
+            if u_fit is None:
+                u_fit = s.u
+                if snap["it"] != s.iteration:
+                    print(f"  note: no drive stored with this measurement -- "
+                          f"fitting iteration-{snap['it']} data against the "
+                          f"iteration-{s.iteration} drive. Prefer a fresh "
+                          f"measurement.")
         elif pattern:
             y, files = read_captures(pattern, mon, s.t, s.t_off)
             src = f"{len(files)} capture(s) matching the glob"
+            u_fit = s.u
         else:
             raise RuntimeError(
                 "nothing to fit from: run an iteration, load a state with "
                 "meas_*.npy beside it, or set the capture glob")
-        p2, info = plantmod.identify(s.u, y, s.loop.dt, model=model_key)
+        p2, info = plantmod.identify(u_fit, y, s.loop.dt, model=model_key)
         print(f"fit ({KEY2LABEL[model_key]}) from {src}:")
         print(f"  {p2}")
         print(f"  residual {info['resid_peak_pct']:.2f}% peak / "
               f"{info['resid_rms_pct']:.2f}% rms of span -- what this model "
               f"form cannot explain about the measured response")
         it = s.snapshots[-1]["it"] if s.snapshots else s.iteration
-        self.msgs.put(("call", lambda: self._after_fit(p2, y, it)))
+        self.msgs.put(("call", lambda: self._after_fit(p2, u_fit, y, it)))
 
-    def _after_fit(self, p, y, it):
+    def _after_fit(self, p, u_fit, y, it):
         self._set_param_entries(p)
-        self._plot_waveforms(self.session.u, y, p.forward(self.session.u), it)
+        self._plot_waveforms(u_fit, y, p.forward(u_fit), it)
         self.nb.select(0)
+
+    def do_build_target(self):
+        """Build a target CSV from scratch, for a system with no target yet.
+        Values are in OUTPUT units for the selected channel: EOM volts on
+        EO1/EO2 (divided by mon_scale on load), measured volts on GEN."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Build a target")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        f = ttk.Frame(dlg, padding=8)
+        f.pack(fill="both", expand=True)
+        shape_var = tk.StringVar(value=TARGET_SHAPES[0])
+        ttk.Label(f, text="Shape").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(f, textvariable=shape_var, values=TARGET_SHAPES,
+                     state="readonly", width=22).grid(row=0, column=1,
+                                                      sticky="w")
+        fields = (("peak (output units)", "1.0"), ("lead ms", "0.5"),
+                  ("rise ms", "2.0"), ("hold ms", "3.0"), ("fall ms", "2.0"),
+                  ("tail ms", "0.5"), ("dt us", "2.0"))
+        fvars = {}
+        for i, (lab, dv) in enumerate(fields, start=1):
+            ttk.Label(f, text=lab).grid(row=i, column=0, sticky="w")
+            fvars[lab] = tk.StringVar(value=dv)
+            ttk.Entry(f, textvariable=fvars[lab], width=10).grid(
+                row=i, column=1, sticky="w")
+        ttk.Label(f, foreground="#666666", text=(
+            "Cosine edges: zero slope at both ends, and the record\n"
+            "starts and ends at zero -- the level the AWG idles on."),
+            ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        def ok():
+            try:
+                p = {lab: float(v.get()) for lab, v in fvars.items()}
+            except ValueError:
+                return messagebox.showerror("Build target",
+                                            "every field must be a number",
+                                            parent=dlg)
+            path = filedialog.asksaveasfilename(
+                parent=dlg, title="Save target CSV",
+                initialdir=os.path.join(HERE, "waveforms"),
+                initialfile="target_NEW.csv",
+                defaultextension=".csv", filetypes=(("CSV", "*.csv"),))
+            if not path:
+                return
+            try:
+                t, v = build_target_waveform(
+                    shape_var.get(), p["peak (output units)"], p["lead ms"],
+                    p["rise ms"], p["hold ms"], p["fall ms"], p["tail ms"],
+                    p["dt us"])
+            except RuntimeError as e:
+                return messagebox.showerror("Build target", str(e), parent=dlg)
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            outputs.write_awg_csv(
+                path, t, v,
+                comment=f"built target: {shape_var.get()}, "
+                        f"peak {p['peak (output units)']:g} output units, "
+                        f"dt {p['dt us']:g} us")
+            self.target_var.set(path)
+            self.log(f"built target {path}")
+            self.log(f"  {shape_var.get()}, peak {p['peak (output units)']:g} "
+                     f"over {t[-1]*1e3:.2f} ms, {len(v)} points at "
+                     f"{p['dt us']:g} us")
+            dlg.destroy()
+
+        bf = ttk.Frame(f)
+        bf.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(bf, text="Build + save...", command=ok).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(
+            side="left", padx=(4, 0))
 
     def do_load(self):
         path = self.state_var.get().strip()
@@ -721,7 +861,15 @@ class App:
             if len(y) != len(s.t):
                 continue
             it = int(re.search(r"_i(\d+)\.npy$", f).group(1))
-            s.snapshots.append(dict(it=it, y=y, m=s.loop.metrics(y)))
+            snap = dict(it=it, y=y, m=s.loop.metrics(y))
+            # pair it with the drive that played it, so Fit uses a true pair
+            dcsv = os.path.join(os.path.dirname(s.state_path),
+                                f"drive_{s.stem}_i{it:02d}.csv")
+            if os.path.exists(dcsv):
+                du = pd.read_csv(dcsv, comment="#").iloc[:, 1].to_numpy(float)
+                if len(du) == len(s.t):
+                    snap["u"] = du
+            s.snapshots.append(snap)
             self.log(f"  recalled measurement {os.path.basename(f)}")
         self._refresh_summary()
         self._show_session(select_tab=True)
@@ -750,9 +898,9 @@ class App:
                 f"manual state with it).\n\nOverwrite it?"):
             return
 
-        t, v = run_ilc.load_target(target)
-        dt = float(np.median(np.diff(t)))
         ch = CHANNELS[chname]
+        t, v = run_ilc.load_target(target, ch.mon_scale)
+        dt = float(np.median(np.diff(t)))
         # The first shot needs a parametric plant even when the loop will run
         # on the measured FRF -- the campaign recipe: resonant seed (its group
         # delay is right), FRF takes over from the first step.
@@ -766,7 +914,16 @@ class App:
             plant = self._plant_from(params, dt)
             seed_src = "from the panel entries"
         else:
-            plant = ch.plant(float(np.ptp(v)), dt, model=seed_key)
+            try:
+                plant = ch.plant(float(np.ptp(v)), dt, model=seed_key)
+            except ValueError as e:
+                return messagebox.showerror(
+                    "Init", f"{e}\n\nStarting from scratch, a typed gain with "
+                            f"the gain-only model is enough: guess it "
+                            f"conservatively (drive comes out larger if gain "
+                            f"is guessed high), run one iteration, then 'Fit "
+                            f"from measurement' replaces the guess with the "
+                            f"measured value.")
             seed_src = "from the calibration tables"
         loop = ilc.Loop(plant=plant, target=v, dt=dt, channel=ch,
                         gamma=f["gamma"], f_cut=f["f_cut"])
@@ -795,12 +952,12 @@ class App:
         if mode == "frf":
             self.log("  first shot is parametric; the measured FRF takes "
                      "over at the first step")
-        self.log(f"  target {np.ptp(v)*HV_PER_MON:.0f} V pk-pk over "
+        self.log(f"  target {np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
                  f"{t[-1]*1e3:.2f} ms, {len(v)} points at {dt*1e6:.3f} us")
         self.log(f"  uncorrected : peak error "
-                 f"{np.abs(plant.forward(v/plant.gain)-v).max()*HV_PER_MON:.0f} V")
+                 f"{np.abs(plant.forward(v/plant.gain)-v).max()*ch.mon_scale:.0f} V")
         self.log(f"  modelled    : peak error "
-                 f"{np.abs(plant.forward(u)-v).max()*HV_PER_MON:.1f} V "
+                 f"{np.abs(plant.forward(u)-v).max()*ch.mon_scale:.1f} V "
                  f"(first shot, if the model is right)")
         self.log(f"  limit check : {rep}")
         self.log(f"  wrote {out}")
@@ -816,7 +973,7 @@ class App:
         lp = s.loop
         idle = (s.u[0] * 1e3, s.u[-1] * 1e3)
         txt = (f"{s.channel}  '{s.stem}'  iteration {s.iteration}\n"
-               f"target {np.ptp(lp.target)*HV_PER_MON:.0f} V pk-pk, "
+               f"target {np.ptp(lp.target)*lp.channel.mon_scale:.0f} V pk-pk, "
                f"{len(s.t)} pts, dt {lp.dt*1e6:.2f} us\n"
                f"drive peak {np.abs(s.u).max():.3f} V, idle "
                f"{idle[0]:+.1f}/{idle[1]:+.1f} mV of "
@@ -925,8 +1082,8 @@ class App:
             tgt_base = s.loop.target[w].mean()
             if abs(tgt_base) > 0.01 * np.ptp(s.loop.target):
                 print(f"  WARNING: zero-baseline, but the target already "
-                      f"averages {tgt_base*HV_PER_MON:.0f} V there -- this "
-                      f"subtracts signal, not baseline")
+                      f"averages {tgt_base*self._out_scale():.0f} V there -- "
+                      f"this subtracts signal, not baseline")
             y = y - y[w].mean()
 
         it = s.iteration
@@ -948,14 +1105,14 @@ class App:
         print(f"limit check: {rep}")
         if not rep and not force:
             s.loop.history.pop()      # the refused update never happened
-            s.snapshots.append(dict(it=it, y=y, m=m))
+            s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev))
             self.msgs.put(("call", lambda: self._show_iteration(u_prev, y, m, it)))
             print("REFUSED to write a drive that violates a hard limit "
                   "(tick 'force' to override)")
             return
         s.u = u_next
         s.iteration = it + 1
-        s.snapshots.append(dict(it=it, y=y, m=m))
+        s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev))
         self._write_iteration(f"{s.stem}_i{s.iteration:02d}")
         save_session(s)
         print(f"state saved, now at iteration {s.iteration}")
@@ -1063,7 +1220,7 @@ class App:
                 m["model"] = cfg["desc"]
                 print(f"         error: peak {m['peak_err_hv']:7.1f} V   "
                       f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
-                s.snapshots.append(dict(it=k, y=y, m=m))
+                s.snapshots.append(dict(it=k, y=y, m=m, u=u))
                 u_now = u
                 self.msgs.put(("call",
                                lambda u=u_now, y=y, m=m, k=k:
@@ -1107,6 +1264,12 @@ class App:
     def _colour(self):
         return CH_DEFAULTS[self.session.channel]["colour"]
 
+    def _out_scale(self):
+        return self.session.loop.channel.mon_scale
+
+    def _out_name(self):
+        return self.session.loop.channel.out_name
+
     def _show_session(self, select_tab=False):
         """Everything drawable from a freshly loaded/inited session: target,
         drive, model prediction, plus any recalled measurements."""
@@ -1135,18 +1298,19 @@ class App:
 
     def _plot_waveforms(self, u, y, pred, it):
         s, c = self.session, self._colour()
+        sc = self._out_scale()
         tms = s.t * 1e3
         ax = self.ax_out
         ax.clear()
-        ax.plot(tms, s.loop.target * HV_PER_MON, color=TARGET_COLOUR, lw=1.0,
+        ax.plot(tms, s.loop.target * sc, color=TARGET_COLOUR, lw=1.0,
                 label="target")
         if pred is not None:
-            ax.plot(tms, pred * HV_PER_MON, color=PRED_COLOUR, lw=0.9, ls="--",
+            ax.plot(tms, pred * sc, color=PRED_COLOUR, lw=0.9, ls="--",
                     label="model-predicted output")
         if y is not None:
-            ax.plot(tms, y * HV_PER_MON, color=c, lw=0.9,
+            ax.plot(tms, y * sc, color=c, lw=0.9,
                     label=f"measured (iter {it})")
-        ax.set_ylabel("EOM voltage (V)")
+        ax.set_ylabel(f"{self._out_name()} voltage (V)")
         ax.legend(loc="best", fontsize=7)
         ax.set_title(f"{s.channel} '{s.stem}' -- output vs target")
         ax.grid(True, alpha=0.3)
@@ -1178,14 +1342,15 @@ class App:
             d = mm.get("model") if isinstance(mm, dict) else None
             return f"iter {n} ({d})" if d else f"iter {n}"
 
+        sc = self._out_scale()
         if prev is not None:
-            ax.plot(tms, (s.loop.target - prev["y"]) * HV_PER_MON, color=c,
+            ax.plot(tms, (s.loop.target - prev["y"]) * sc, color=c,
                     lw=0.8, alpha=GHOST_ALPHA, label=tag(prev["it"], prev["m"]))
-        e_hv = (s.loop.target - y) * HV_PER_MON
+        e_hv = (s.loop.target - y) * sc
         ax.plot(tms, e_hv, color=c, lw=0.9, label=tag(it, m))
         ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
         ax.set_xlabel("time (ms)")
-        ax.set_ylabel("error at the EOM (V)")
+        ax.set_ylabel(f"error at the {self._out_name()} (V)")
         ax.set_title(f"target - measured:  peak {m['peak_err_hv']:.1f} V, "
                      f"rms {m['rms_err_hv']:.2f} V  ({m['peak_pct']:.3f}% FS)")
         ax.legend(loc="best", fontsize=7)
@@ -1197,10 +1362,12 @@ class App:
         ax = self.ax_spec
         ax.clear()
 
+        sc = self._out_scale()
+
         def asd(e):
             n = len(e)
             f = np.fft.rfftfreq(n, s.loop.dt)
-            return f[1:], np.abs(np.fft.rfft(e * HV_PER_MON))[1:] * 2 / n
+            return f[1:], np.abs(np.fft.rfft(e * sc))[1:] * 2 / n
 
         prev = next((sn for sn in reversed(s.snapshots)
                      if sn["it"] < it and len(sn["y"]) == len(s.t)), None)
@@ -1218,7 +1385,7 @@ class App:
             ax.axvline(s.loop.f_cut, color="#c68000", lw=0.7, ls="--",
                        label=f"f_cut {s.loop.f_cut/1e3:g} kHz")
         ax.set_xlabel("frequency (Hz)")
-        ax.set_ylabel("error amplitude at the EOM (V)")
+        ax.set_ylabel(f"error amplitude at the {self._out_name()} (V)")
         ax.set_title("where the residual lives -- the update only acts left "
                      "of the band edge")
         ax.legend(loc="best", fontsize=7)
@@ -1260,7 +1427,7 @@ class App:
             ax.text(0.5, 0.5, "no iterations yet", ha="center", va="center",
                     transform=ax.transAxes, color="#888888")
         ax.set_xlabel("iteration")
-        ax.set_ylabel("error at the EOM (V)")
+        ax.set_ylabel(f"error at the {self._out_name()} (V)")
         ax.set_title(f"{s.channel} '{s.stem}' -- convergence")
         ax.grid(True, which="both", alpha=0.3)
         self.fig_conv._canvas.draw_idle()

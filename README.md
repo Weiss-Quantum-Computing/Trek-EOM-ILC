@@ -123,6 +123,37 @@ iteration, but it converges to the ~7 V parametric floor, not the ~2.4 V the
 measured inverse reaches. `ilc_bench.py` runs the whole
 upload → capture → update cycle hands-off and takes the same `--frf` flags.
 
+## Using it on another system, from scratch
+
+The loop itself knows nothing about Treks or EOMs; that knowledge lives in
+the channel definitions. The **`GEN`** channel is the blank one for any other
+chain: unity divider, `mon_scale = 1` (target CSVs are read in the same units
+the scope measures — no ×1000 monitor convention), **no calibration tables**
+(asking it for gain/τ/fₙ/ζ raises instead of interpolating Trek numbers), and
+no auto-loaded FRF. Nothing measured on this bench applies to a GEN session
+unless it is loaded on purpose.
+
+Bootstrapping with no target, no state, and no model:
+
+1. **Target** — the GUI's *Build…* button generates a cosine-edged
+   ramp/half-sine target CSV (or point at any `time_us,voltage_V` file).
+2. **Init** — channel GEN, model *gain only*, type a conservative gain guess
+   (output/drive ratio; ILC converges for `γ·g_true/g_model < 2`, so guessing
+   the gain HIGH is the safe direction — the correction comes out small).
+   Init writes the state file from scratch; nothing is inherited.
+3. **Measure and refine** — after the first iteration, *Fit from measurement*
+   replaces the guess with the identified value; step up the model ladder as
+   the residual demands, or measure an FRF with `tools/sysid_make.py` +
+   `tools/sysid_fit.py` (both system-agnostic: they fit whatever drive and
+   response the scope columns carry).
+
+Two things do **not** genericize automatically: `Limits` in
+`eomilc/config.py` keeps its Trek-era numbers (rails, slew, 6 kV ceiling) —
+review them before trusting the guard on a chain where they could bind
+differently — and bench mode's instrument layer is the BK4063B + MSO-X pair;
+another bench brings its own upload/capture path (the manual
+step-from-captures loop works with any scope CSV).
+
 ## Calibration lives in `eomilc/config.py`
 
 Measured 2026-08-20/21 — **update these when the hardware changes.**

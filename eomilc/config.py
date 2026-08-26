@@ -42,10 +42,22 @@ class Channel:
     noise_trek_in_rms: float = 0.0               # V rms at the Trek input, undriven
     has_fine_channel: bool = False               # coarse+fine summer present?
     fine_ratio: float = 100.0                    # coarse:fine attenuation
+    mon_scale: float = HV_PER_MON                # output units per measured volt
+    out_name: str = "EOM"                        # what the scaled output is called
+
+    def _table(self, pts, amplitude_mon: float) -> float:
+        """Calibration lookup, refused loudly when there is nothing to look
+        up.  A channel with empty tables (GEN) must never silently borrow
+        another system's numbers -- that is the whole point of having it."""
+        if self.amp_pts.size == 0:
+            raise ValueError(
+                f"channel {self.name} has no calibration tables -- type the "
+                f"model parameters, or fit them from a measurement")
+        return float(np.interp(amplitude_mon, self.amp_pts, pts))
 
     def gain(self, amplitude_mon: float) -> float:
         """AWG -> monitor gain at a given monitor amplitude (mild compression)."""
-        return float(np.interp(amplitude_mon, self.amp_pts, self.gain_pts))
+        return self._table(self.gain_pts, amplitude_mon)
 
     def tau(self, amplitude_mon: float) -> float:
         """One-pole group delay (s) at a given monitor amplitude.
@@ -54,16 +66,16 @@ class Channel:
         within 1.5% across the whole sweep -- which is the point: the one-pole
         model captures the lag and nothing about the ring.
         """
-        return float(np.interp(amplitude_mon, self.amp_pts, self.tau_pts))
+        return self._table(self.tau_pts, amplitude_mon)
 
     def fn(self, amplitude_mon: float) -> float:
         """Resonant frequency (Hz).  Falls with drive -- the EOM capacitance is
         voltage dependent, and it is the only real nonlinearity in the set."""
-        return float(np.interp(amplitude_mon, self.amp_pts, self.fn_pts))
+        return self._table(self.fn_pts, amplitude_mon)
 
     def zeta(self, amplitude_mon: float) -> float:
         """Damping ratio at a given monitor amplitude."""
-        return float(np.interp(amplitude_mon, self.amp_pts, self.zeta_pts))
+        return self._table(self.zeta_pts, amplitude_mon)
 
     def f3db(self, amplitude_mon: float) -> float:
         return 1.0 / (2 * np.pi * self.tau(amplitude_mon))
@@ -117,7 +129,23 @@ EO2 = Channel(
     has_fine_channel=True, fine_ratio=100.0,
 )
 
-CHANNELS = {"EO1": EO1, "EO2": EO2}
+# A blank channel for any OTHER system: unity divider, target CSVs read in
+# the same units the scope measures (mon_scale 1), and NO calibration tables
+# -- asking it for gain/tau/fn/zeta raises rather than interpolating Trek
+# numbers.  Start it with a typed gain (the gain-only model is enough), then
+# let the first measurement feed identify() or a sysid FRF.  The Limits guard
+# still applies with its Trek-era numbers; review those before trusting it
+# on a chain where they could bind differently.
+GEN = Channel(
+    name="GEN",
+    divider=1.0, divider_tol=0.0,
+    amp_mon_product=1.0,
+    amp_pts=np.array([]), gain_pts=np.array([]), tau_pts=np.array([]),
+    fn_pts=np.array([]), zeta_pts=np.array([]),
+    mon_scale=1.0, out_name="output",
+)
+
+CHANNELS = {"EO1": EO1, "EO2": EO2, "GEN": GEN}
 
 
 @dataclass
