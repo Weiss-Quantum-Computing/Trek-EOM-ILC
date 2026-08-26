@@ -211,7 +211,7 @@ class FRF:
     """
 
     def __init__(self, path, min_coherence=0.9, f_use=15e3, f_max=22e3,
-                 t_guard=None):
+                 t_guard=0.0):
         if not 0 < f_use < f_max:
             raise ValueError(
                 f"the taper needs 0 < f_use < f_max, got {f_use:g}/{f_max:g}."
@@ -227,22 +227,24 @@ class FRF:
         self.logmag = np.log(np.abs(H))
         self.phase = np.unwrap(np.angle(H))
         self.f_use, self.f_max = f_use, f_max
-        # None = auto: three ring times of the inverse (the taper's
-        # transition width sets how long 1/H rings), floored at 100 us,
-        # capped at 1 ms. The first cut hardcoded 0.5 ms -- 30x wider than
-        # the ~15 us artifact it was built to stop -- and blocked the loop
-        # from correcting the chain's real settling transient in the last
-        # ~60 us of the record: PRFRX1B converged to 1.1 V mid-record but
-        # 52 V at the last sample (the one-pole loop, which corrects to the
-        # edge, left 0.8 V there). Explicit t_guard still overrides; 0
-        # disables (tests/diagnosis only).
+        # Edge-guard fade: DISABLED by default (0) -- per Maarten,
+        # 26 Aug 2026, after the guard saga: the 0.5 ms first cut blocked
+        # the chain's real settling transient (PRFRX1B: 52 V at the last
+        # sample vs the one-pole's 0.8 V) and the campaigns still
+        # misbehaved, so the baseline is now the RAW taper*E/H inverse,
+        # observed before any edge remedy is layered back on. Set
+        # t_guard=None for the taper-sized auto guard (3 ring times,
+        # floor 100 us, cap 1 ms) or a value in seconds explicitly.
+        # The zero-padding above is NOT part of the guard -- it makes the
+        # convolution linear instead of circular and stays.
         self.t_guard = t_guard
         self.path = str(path)
 
     def edge_guard_s(self):
-        """The effective edge guard: explicit t_guard if set, else three
-        ring times of the inverse (1/(taper width)), floored at 100 us,
-        capped at 1 ms."""
+        """The effective edge guard: 0 by default (raw inverse -- the
+        baseline being observed); None = three ring times of the inverse
+        (1/(taper width)), floored at 100 us, capped at 1 ms; or explicit
+        seconds."""
         if self.t_guard is not None:
             return self.t_guard
         return min(1e-3, max(100e-6, 3.0 / (self.f_max - self.f_use)))
