@@ -209,6 +209,18 @@ def avg_spectrum(e, dt, k=1):
     return f[1:], (acc / m)[1:] * 2 / w.sum()
 
 
+# The MSO-X accepts only these readout counts (:WAVeform:POINts); asked for
+# anything else it rounds to a value it likes -- possibly DOWN, so pick the
+# next one up ourselves. Without an explicit request it hands over 5000
+# points regardless of the band (measured 26 Aug: 3 us readout of a 15 ms
+# window killed the first 200 kHz FRF run).
+SCOPE_PTS = (2000, 5000, 10000, 20000, 50000, 62500)
+
+
+def scope_points_for(need):
+    return next((p for p in SCOPE_PTS if p >= need), SCOPE_PTS[-1])
+
+
 AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 16384))
 # 16384 is the 4063B's datasheet arb memory; this bench has only stored
 # 5301-point records so far, so the true ceiling is unprobed -- if a dense
@@ -2392,6 +2404,17 @@ class App:
         bins. H is averaged over shots -- not the traces -- so the
         shot-to-shot scatter of H itself is the coherence estimate."""
         time.sleep(settle)
+        # ask the scope for a readout dense enough for the band -- its
+        # unprompted default is 5000 points whatever the window
+        pts = None
+        if f_top is not None:
+            try:
+                win = float(scope.get(":TIMebase:RANGe"))
+            except Exception:
+                win = 1.3 * (t_grid[-1] - t_grid[0])
+            pts = scope_points_for(4.0 * f_top * win)
+            print(f"scope readout: {pts} points over the {win*1e3:.3g} ms "
+                  f"window for the {f_top/1e3:.0f} kHz band")
         Hs = []
         self.msgs.put(("progress", 0, repeats))
         for i in range(repeats):
@@ -2401,8 +2424,8 @@ class App:
             if got is not True:
                 raise RuntimeError(f"no trigger within {wait_s:g} s on "
                                    f"repeat {i+1} -- is the burst running?")
-            tu, vu = scope.waveform(drive_ch)
-            ty, vy = scope.waveform(mon_ch)
+            tu, vu = scope.waveform(drive_ch, points=pts)
+            ty, vy = scope.waveform(mon_ch, points=pts)
             scope.run()
             if i == 0 and f_top is not None:
                 # measured, not assumed: the scope's record must actually
@@ -2468,6 +2491,11 @@ class App:
         time.sleep(settle)
         traces = []
         t_nat, y_nat = None, 0.0
+        # denser than the scope's 5000-point default: >= 2 samples per grid
+        # step keeps the anti-alias boxcar honest, and a kept native
+        # average deserves the full readout depth
+        pts = (SCOPE_PTS[-1] if native_path is not None
+               else scope_points_for(2.2 * len(t_grid)))
         self.msgs.put(("progress", 0, repeats))
         for i in range(repeats):
             if self.stop_evt.is_set():
@@ -2477,7 +2505,7 @@ class App:
             if got is not True:
                 raise RuntimeError(f"no trigger within {wait_s:g} s on repeat "
                                    f"{i+1} -- is the burst running?")
-            ts, vs = scope.waveform(ch)
+            ts, vs = scope.waveform(ch, points=pts)
             scope.run()
             traces.append(scopeio.resample(ts, vs, t_grid, t_offset=t_off))
             if native_path is not None:

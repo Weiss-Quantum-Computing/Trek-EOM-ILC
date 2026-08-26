@@ -595,7 +595,7 @@ fine2 = (np.interp(tf2, sN.t, sN.loop.target)
 
 class _FakeScope:
     def single(self, wait_s=None): return True
-    def waveform(self, ch): return tf2 + sN.t_off, fine2
+    def waveform(self, ch, **kw): return tf2 + sN.t_off, fine2
     def run(self): pass
 
 natfile = os.path.join(SCRATCH, "meas_MKJX1_i99_native.npz")
@@ -682,7 +682,7 @@ y_p = np.fft.irfft(np.fft.rfft(u_p) * Htrue, n=nG)
 
 class _FrfScope:
     def single(self, wait_s=None): return True
-    def waveform(self, ch):
+    def waveform(self, ch, **kw):
         return (sN.t + sN.t_off, u_p if ch == 1 else y_p)
     def run(self): pass
 
@@ -706,11 +706,12 @@ yD = np.fft.irfft(np.fft.rfft(u_d) / (1 + 2j * np.pi * frD * tau_p), n=npD)
 
 class _DenseScope:
     def single(self, wait_s=None): return True
-    def waveform(self, ch): return (tD + sN.t_off, u_d if ch == 1 else yD)
+    def waveform(self, ch, **kw):
+        return (tD + sN.t_off, u_d if ch == 1 else yD)
     def run(self): pass
 
 class _CoarseScope(_DenseScope):     # a 2 us record cannot carry 500 kHz
-    def waveform(self, ch):
+    def waveform(self, ch, **kw):
         return (sN.t + sN.t_off, np.interp(sN.t, tD, u_d if ch == 1 else yD))
 
 HD, cohD = app._frf_capture(_DenseScope(), 1, 3, bins_d, tD, sN.t_off,
