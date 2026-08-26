@@ -39,22 +39,25 @@ DT = 2e-6
 T = N * DT                    # 10.602 ms record, 94.32 Hz bin spacing
 
 
-def tone_bins(f_lo=400.0, f_hi=24e3, n_tones=48):
-    """Integer FFT bins, log-spaced, no duplicates."""
+def tone_bins(f_lo=400.0, f_hi=24e3, n_tones=48, n=N, dt=DT):
+    """Integer FFT bins, log-spaced, no duplicates. n/dt default to the
+    ILC grid; the GUI passes its session's own record."""
+    rec = n * dt
     want = np.geomspace(f_lo, f_hi, n_tones)
-    k = sorted(set(int(round(f * T)) for f in want))
-    return np.array([b for b in k if 1 <= b <= N // 2 - 1])
+    k = sorted(set(int(round(f * rec)) for f in want))
+    return np.array([b for b in k if 1 <= b <= n // 2 - 1])
 
 
-def multitone(peak, bins, taper_s=150e-6, seed=0):
-    t = np.arange(N) * DT
-    u = np.zeros(N)
+def multitone(peak, bins, taper_s=150e-6, seed=0, n=N, dt=DT):
+    rec = n * dt
+    t = np.arange(n) * dt
+    u = np.zeros(n)
     for i, k in enumerate(bins):
         phase = -np.pi * i * (i + 1) / len(bins)      # Schroeder
-        u += np.cos(2 * np.pi * k / T * t + phase)
+        u += np.cos(2 * np.pi * k / rec * t + phase)
     u *= peak / np.abs(u).max()
-    nt = int(taper_s / DT)
-    w = np.ones(N)
+    nt = int(taper_s / dt)
+    w = np.ones(n)
     ramp = 0.5 * (1 - np.cos(np.pi * np.arange(nt) / nt))
     w[:nt] = ramp
     w[-nt:] = ramp[::-1]

@@ -209,6 +209,43 @@ def avg_spectrum(e, dt, k=1):
     return f[1:], (acc / m)[1:] * 2 / w.sum()
 
 
+def build_frf_probe(n, dt, peak, f_lo, f_hi, n_tones):
+    """Schroeder multitone on the session's own record (tools/sysid_make
+    maths): tones on integer FFT bins so the analysis is leak-free, cosine
+    end tapers so the AWG idles at zero between bursts. Raises when the
+    requested band does not fit the grid -- the tones live on this record's
+    bins, so the hard ceiling is the grid Nyquist, not a knob."""
+    from tools import sysid_make
+    nyq = 0.5 / dt
+    rec = n * dt
+    if not (0 < f_lo < f_hi):
+        raise RuntimeError("need 0 < f lo < f hi")
+    if f_hi > 0.98 * nyq:
+        raise RuntimeError(
+            f"f hi {f_hi/1e3:g} kHz is past what the {dt*1e6:g} us record "
+            f"can carry: probe tones live on this grid's FFT bins, ceiling "
+            f"98% of Nyquist = {0.98*nyq/1e3:.0f} kHz. A higher band needs "
+            f"a finer-dt campaign grid, not a bigger number here.")
+    if f_lo < 2 / rec:
+        raise RuntimeError(f"f lo {f_lo:g} Hz is below the record's second "
+                           f"bin (~{2/rec:.0f} Hz)")
+    bins = sysid_make.tone_bins(f_lo, f_hi, int(n_tones), n=n, dt=dt)
+    if len(bins) < 8:
+        raise RuntimeError(f"only {len(bins)} distinct tone bins between "
+                           f"{f_lo:g} and {f_hi:g} Hz -- widen the band or "
+                           f"ask for fewer tones")
+    return sysid_make.multitone(peak, bins, n=n, dt=dt), bins
+
+
+def write_frf_csv(path, f_hz, H, coh):
+    """The four columns ilc.FRF and Show FRF consume; sysid_fit.py stays
+    the tool for the full diagnostic (model columns + png)."""
+    pd.DataFrame({"f_Hz": f_hz, "H_mag": np.abs(H),
+                  "H_phase_deg": np.degrees(np.angle(H)),
+                  "coherence": coh}).to_csv(path, index=False,
+                                            float_format="%.6g")
+
+
 def recall_snapshots(s: Session):
     """Pull a session's on-disk measurements (meas_<stem>_i*.npy beside the
     state, paired with the drive CSVs that played them) back into
@@ -550,6 +587,9 @@ class App:
         ttk.Entry(r4, textvariable=self.fmax_var, width=7).pack(side="left", padx=2)
         b = ttk.Button(r4, text="Show FRF", command=self.do_show_frf)
         b.pack(side="right")
+        self._actions.append(b)
+        b = ttk.Button(r4, text="Measure FRF...", command=self.do_measure_frf)
+        b.pack(side="right", padx=(0, 4))
         self._actions.append(b)
         vf.columnconfigure(1, weight=1)
         self._update_model_fields()
@@ -2056,6 +2096,199 @@ class App:
             scope.close()
             print("instruments closed")
         print("\n" + s.loop.report())
+
+    def do_measure_frf(self):
+        """Automated system ID: build a Schroeder multitone on the session's
+        grid, play it through the bench, and fit the FRF from the scope's
+        own drive+monitor channels -- the panel version of sysid_make +
+        sysid_fit, with the band adjustable. Uses the bench panel's
+        AWG/scope channels, repeats, and wait."""
+        if self.session is None:
+            return messagebox.showerror("Measure FRF",
+                                        "load or init a session first -- the "
+                                        "probe is built on its time grid")
+        s = self.session
+        suffix = {"EO1": "X1", "EO2": "X2"}.get(s.channel, "GN")
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Measure FRF")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        fr = ttk.Frame(dlg, padding=8)
+        fr.pack(fill="both", expand=True)
+        nyq = 0.5 / s.loop.dt
+        fields = (("probe peak V (at the AWG)", "2.0"),
+                  ("f lo Hz", "400"),
+                  ("f hi Hz", "100e3"),
+                  ("tones", "72"),
+                  ("name", f"AUTO{suffix}"))
+        fvars = {}
+        for i, (lab, dv) in enumerate(fields):
+            ttk.Label(fr, text=lab).grid(row=i, column=0, sticky="w")
+            fvars[lab] = tk.StringVar(value=dv)
+            ttk.Entry(fr, textvariable=fvars[lab], width=12).grid(
+                row=i, column=1, sticky="w")
+        ttk.Label(fr, foreground="#666666", text=(
+            f"Tones sit on integer bins of this session's "
+            f"{len(s.t)*s.loop.dt*1e3:.3f} ms record;\n"
+            f"f hi can go to {0.98*nyq/1e3:.0f} kHz (98% of the grid "
+            f"Nyquist). Uses the bench\npanel's channels/repeats/wait; "
+            f"output-on asks first, off at the end.\n"
+            f"Writes run\\frf_<name>.csv and points the FRF field at it.")
+            ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        def ok():
+            try:
+                peak = float(fvars["probe peak V (at the AWG)"].get())
+                f_lo = float(fvars["f lo Hz"].get())
+                f_hi = float(fvars["f hi Hz"].get())
+                tones = int(float(fvars["tones"].get()))
+                name = fvars["name"].get().strip()
+                if not name:
+                    raise RuntimeError("name the probe")
+                if peak <= 0 or peak > s.full_scale:
+                    raise RuntimeError(f"probe peak must be 0 < peak <= "
+                                       f"full scale ({s.full_scale:g} V)")
+                u, bins = build_frf_probe(len(s.t), s.loop.dt, peak,
+                                          f_lo, f_hi, tones)
+                f = self._floats(awg_ch=self.awgch_var,
+                                 scope_ch=self.scopech_var,
+                                 repeats=self.repeats_var, wait=self.wait_var)
+                fmax_now = float(self.fmax_var.get() or 0)
+            except (RuntimeError, ValueError) as e:
+                return messagebox.showerror("Measure FRF", str(e),
+                                            parent=dlg)
+            dlg.destroy()
+            self.run_worker(
+                lambda: self._measure_frf_work(u, bins, name,
+                                               int(f["awg_ch"]),
+                                               int(f["scope_ch"]),
+                                               int(f["repeats"]), f["wait"],
+                                               fmax_now),
+                "measuring FRF...")
+
+        bb = ttk.Frame(fr)
+        bb.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(bb, text="Measure", command=ok).pack(side="left",
+                                                        expand=True, fill="x")
+        ttk.Button(bb, text="Cancel", command=dlg.destroy).pack(
+            side="left", expand=True, fill="x")
+
+    def _measure_frf_work(self, u, bins, name, awg_ch, scope_ch, repeats,
+                          wait_s, fmax_now):
+        s = self.session
+        scopemod, awgmod = self._bench_modules()
+        limit = getattr(awgmod, "MAX_ARB_NAME", NAME_LIMIT)
+        if len(name) > limit:
+            raise RuntimeError(f"name {name!r} is past the {limit}-char cap")
+        awg = ilc_bench.make_awg(awgmod)
+        print("AWG:  ", awg.connect())
+        scope = ilc_bench.make_scope(scopemod)
+        print("Scope:", scope.connect())
+        uploaded = False
+        switched_on = False
+        try:
+            problems, notes = ilc_bench.check_awg_channel(
+                awg, awg_ch, full_scale=s.full_scale)
+            for nn in notes:
+                print("      ", nn)
+            acq = scope.get(":ACQuire:TYPE")
+            print(f"       scope acquisition {acq}, {repeats} repeats")
+            if not acq.upper().startswith("HRES"):
+                problems.append(f"scope is in {acq}; use HRES")
+            if problems:
+                print("Setup problems:")
+                for p in problems:
+                    print("  !", p)
+                print("REFUSING to play the probe -- fix the setup "
+                      "(Auto-set instruments does it). The FRF has no "
+                      "'skip': a wrong AMP rescales H silently.")
+                return
+            stored = awg.list_waveforms(user_only=True)
+            clash = next((n for n in stored
+                          if n.lower() == name.lower()), None)
+            if clash and not self.ask_user(
+                    "Overwrite stored waveform?",
+                    f"'{clash}' already exists in the generator's user "
+                    f"memory; uploading the probe replaces it (the generator "
+                    f"cannot read a waveform back out).\n\nOverwrite?"):
+                print(f"FRF cancelled: {clash} left as stored")
+                return
+            ok, switched_on = self._ensure_output_on(awg, awg_ch)
+            if not ok:
+                return
+            n_pts, frac = ilc_bench.upload_drive(awg, awg_ch, name, u,
+                                                 s.full_scale)
+            uploaded = True
+            rec = len(s.t) * s.loop.dt
+            print(f"probe uploaded: {name}, {len(bins)} tones "
+                  f"{bins[0]/rec:.0f} Hz - {bins[-1]/rec/1e3:.1f} kHz, peak "
+                  f"{np.abs(u).max():.3f} V ({100*frac:.1f}% of DAC range)")
+            H, coh = self._frf_capture(scope, awg_ch, scope_ch, bins,
+                                       s.t, s.t_off, repeats, wait_s)
+            f_hz = bins / rec
+            path = os.path.join(RUN_DIR, f"frf_{name}.csv")
+            write_frf_csv(path, f_hz, H, coh)
+            good = int((coh >= 0.9).sum())
+            print(f"wrote {path}")
+            print(f"  {len(bins)} tones, {good} with coherence >= 0.9; "
+                  f"|H| {np.abs(H).max():.4f} max, "
+                  f"{np.abs(H).min():.4f} min")
+            if fmax_now and fmax_now > f_hz[-1] + 1:
+                print(f"note: 'taper to zero at' is {fmax_now/1e3:g} kHz but "
+                      f"the measurement stops at {f_hz[-1]/1e3:.1f} kHz -- "
+                      f"pull the taper inside the measured band")
+            self.msgs.put(("call", lambda: self._adopt_frf(path)))
+        finally:
+            if uploaded or switched_on:
+                try:
+                    awg.set_output(awg_ch, False)
+                    print(f"CH{awg_ch} output OFF (end of run)")
+                except Exception as e:
+                    print(f"could not switch CH{awg_ch} output off: {e}")
+            awg.close()
+            scope.close()
+            print("instruments closed")
+
+    def _frf_capture(self, scope, drive_ch, mon_ch, bins, t_grid, t_off,
+                     repeats, wait_s, settle=0.5):
+        """Per shot: read BOTH the drive and the monitor from the same
+        acquisition (the record is frozen between :SINGle and run), put
+        them on the record grid, and take H = Y/U at the probe's tone
+        bins. H is averaged over shots -- not the traces -- so the
+        shot-to-shot scatter of H itself is the coherence estimate."""
+        time.sleep(settle)
+        Hs = []
+        self.msgs.put(("progress", 0, repeats))
+        for i in range(repeats):
+            if self.stop_evt.is_set():
+                raise RuntimeError("stopped mid-capture; nothing written")
+            got = scope.single(wait_s=wait_s)
+            if got is not True:
+                raise RuntimeError(f"no trigger within {wait_s:g} s on "
+                                   f"repeat {i+1} -- is the burst running?")
+            tu, vu = scope.waveform(drive_ch)
+            ty, vy = scope.waveform(mon_ch)
+            scope.run()
+            uu = scopeio.resample(tu, vu, t_grid, t_offset=t_off)
+            yy = scopeio.resample(ty, vy, t_grid, t_offset=t_off)
+            U = np.fft.rfft(uu - uu.mean())
+            Y = np.fft.rfft(yy - yy.mean())
+            Hs.append(Y[bins] / U[bins])
+            self.msgs.put(("progress", i + 1, repeats))
+        self.msgs.put(("progress", 0, 1))
+        Hs = np.asarray(Hs)
+        H = Hs.mean(axis=0)
+        coh = np.clip(1 - (np.abs(Hs - H).std(axis=0) / np.abs(H)) ** 2,
+                      0, 1)
+        return H, coh
+
+    def _adopt_frf(self, path):
+        """Main thread: point the FRF field at the fresh measurement and
+        show it. Switching the MODEL to 'measured FRF' stays the user's
+        call -- measuring is not consenting to drive with it."""
+        self.frf_var.set(path)
+        self.log(f"FRF field now points at {os.path.basename(path)}")
+        self.do_show_frf()
 
     def _ensure_output_on(self, awg, awg_ch):
         """Worker-side: switching ON is the direction that puts voltage into

@@ -1,9 +1,10 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-36 numbered checks: state round-trips, the span guard, the model ladder,
+38 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
-averaging, the native-rate spectrum and its bench-kept files, the iteration
+averaging, the native-rate spectrum and its bench-kept files, the FRF
+probe + measurement maths, the iteration
 table, dot density, linked time axes. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
@@ -617,6 +618,52 @@ assert ay2[sel2b].max() > 0.5 * 1e-3 * sN.loop.channel.mon_scale, \
     "350 kHz tone lost through the kept-native round trip"
 print("[36] bench keep-native: npz saved in waveform time, spectrum "
       "button reads it, 350 kHz tone survives the round trip")
+
+# FRF probe builder: adjustable band on the session's own grid, hard
+# ceiling at the grid Nyquist, leak-free integer bins, tapered ends
+nG, dtG = len(sN.t), sN.loop.dt
+recG = nG * dtG
+u_p, bins = ilc_gui.build_frf_probe(nG, dtG, 2.0, 400.0, 200e3, 96)
+assert bins[-1] / recG > 150e3, f"band stopped at {bins[-1]/recG:.0f} Hz"
+assert np.all(bins == bins.astype(int)) and len(set(bins)) == len(bins)
+assert abs(np.abs(u_p).max() - 2.0) < 1e-9, "probe peak off"
+assert abs(u_p[0]) < 1e-12 and abs(u_p[-1]) < 1e-12, "probe ends not tapered"
+for bad in ((260e3, "past Nyquist"), (0.98 * 0.5 / dtG * 1.01, "at ceiling")):
+    try:
+        ilc_gui.build_frf_probe(nG, dtG, 2.0, 400.0, bad[0], 48)
+        raise AssertionError(f"f hi {bad[1]} was not refused")
+    except RuntimeError:
+        pass
+print(f"[37] FRF probe: {len(bins)} tones 400 Hz - {bins[-1]/recG/1e3:.0f} "
+      f"kHz on the session grid, Nyquist ceiling enforced")
+
+# FRF measurement maths: a fake scope plays the probe through a known
+# one-pole plant; the fitted H must match the analytic transfer
+tau_p = 2.2e-6
+frG = np.fft.rfftfreq(nG, dtG)
+Htrue = 1.0 / (1.0 + 2j * np.pi * frG * tau_p)
+y_p = np.fft.irfft(np.fft.rfft(u_p) * Htrue, n=nG)
+
+class _FrfScope:
+    def single(self, wait_s=None): return True
+    def waveform(self, ch):
+        return (sN.t + sN.t_off, u_p if ch == 1 else y_p)
+    def run(self): pass
+
+app.stop_evt.clear()
+H_m, coh_m = app._frf_capture(_FrfScope(), 1, 3, bins, sN.t, sN.t_off,
+                              repeats=3, wait_s=1, settle=0)
+assert np.allclose(H_m, Htrue[bins], rtol=1e-6), \
+    f"fitted H off by {np.abs(H_m - Htrue[bins]).max():.2e}"
+assert np.all(coh_m > 0.999), "identical shots must cohere"
+fpath = os.path.join(ilc_gui.RUN_DIR, "frf_AUTOTST.csv")
+ilc_gui.write_frf_csv(fpath, bins / recG, H_m, coh_m)
+app.fuse_var.set("100e3"); app.fmax_var.set("150e3")
+app._adopt_frf(fpath); root.update()
+assert app.frf_var.get() == fpath, "FRF field not pointed at the result"
+frf_obj = ilc_gui.ilc.FRF(fpath, f_use=100e3, f_max=150e3)
+print(f"[38] FRF maths: one-pole plant recovered exactly at {len(bins)} "
+      f"tones, CSV loads as an ilc.FRF, field adopted + drawn")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")

@@ -35,7 +35,8 @@ plotting helpers — the repo has them, use them.
   past the grid Nyquist for bench iterations.
 - `drive_<stem>_iNN.csv` — the AWG drive that PLAYED measurement NN
   (`time_us,voltage_V`, `#` comments).
-- `frf_WIDE_X<n>.csv` — measured FRF: `f_Hz, H_mag` (mon V per AWG V),
+- `frf_*.csv` — measured FRFs (`frf_WIDE_X<n>` from the CLI tools, others
+  from the GUI's Measure FRF): `f_Hz, H_mag` (mon V per AWG V),
   `H_phase_deg, coherence`. Drop rows with coherence < 0.9.
 
 ## Loaders and helpers (import these, do not re-parse files)
