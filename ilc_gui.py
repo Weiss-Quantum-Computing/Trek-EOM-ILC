@@ -2735,9 +2735,12 @@ class App:
                 chist = chist + [base[-1]["m"]]
             if not chist:
                 continue
-            ax.semilogy(np.arange(len(chist)),
-                        [m["peak_err_hv"] for m in chist], "o-", color=col,
-                        lw=0.9, ms=3, label=f"{stem} peak error")
+            kk = np.arange(len(chist))
+            ax.semilogy(kk, [m["peak_err_hv"] for m in chist], "o-",
+                        color=col, lw=0.9, ms=3, label=f"{stem} peak error")
+            ax.semilogy(kk, [m["rms_err_hv"] for m in chist], "s--",
+                        color=col, lw=0.7, ms=2.5, alpha=0.6,
+                        label=f"{stem} rms error")
             n_it = max(n_it, len(chist))
         if n_it:
             ax.set_xticks(np.arange(n_it))

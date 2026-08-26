@@ -442,6 +442,7 @@ assert len(gline.get_xdata()) == len(gsess.t), \
     "compare overlay is not on GENX's own grid"
 conv_labs = [l.get_label() for l in app.ax_conv.get_lines()]
 assert any(l == "GENX peak error" for l in conv_labs), conv_labs
+assert any(l == "GENX rms error" for l in conv_labs), conv_labs
 panel = app.log_text.get("1.0", "end")
 assert "no state for 'NOPE'" in panel, "missing stem not reported"
 assert "'TSTX1' has no stored measurements" in panel, \
