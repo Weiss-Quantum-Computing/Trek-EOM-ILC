@@ -85,11 +85,16 @@ Nothing carries over from the Trek chains unless you load it on purpose.
 
 ## 4. A manual iteration (you play and capture by hand)
 
-1. **Upload the drive**: in the AWG GUI, load
-   `<stem>_iNN.csv` from its own Waveforms library (the GUI writes a copy
-   of every drive there) — it is single-column, already normalised, so
-   upload with **Normalise OFF**. Channel setup per WORKFLOW.md:
-   ARB, DDS clock, AMP 20 Vpp, OFST 0, load HZ, burst NCYC 1 EXT.
+1. **Upload the drive**: press **Upload `<stem>_iNN` to AWG** (bench
+   panel — the button names the session's current drive). It uploads at
+   the fixed ±full-scale mapping and selects the waveform; if a waveform
+   of that name is already stored it asks before overwriting (the
+   generator cannot read a waveform back out, so the local copies in the
+   AWG GUI's Waveforms library are the only record of the old samples).
+   Alternative: the AWG GUI, loading `<stem>_iNN.csv` from its Waveforms
+   library with **Normalise OFF**. Channel setup either way per Auto-set
+   or WORKFLOW.md: ARB, DDS clock, AMP 20 Vpp, OFST 0, load HZ, burst
+   NCYC 1 EXT.
 2. **Capture**: scope in **HRES** (never AVER), full waveform window.
    In Scope Grab run a **Sequence** of 64 shots with a prefix nothing else
    uses (e.g. `ilc_i07`). Zoomed inspection grabs must get prefixes the
@@ -282,5 +287,6 @@ Three kinds of persistence, marked in the tables:
 | **repeats** *(config)* | HRES single shots averaged in software per iteration. 64 is the campaign standard (~25 s at the 20 Hz trigger, dithers the scope's 2.5 mV word lattice to its 0.16 mV floor); 16 is a usable quick check; below 16 is refused. |
 | **wait s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
 | **skip setup checks** *(panel)* | Uploads without verifying AMP/OFST/clock/acquisition mode. A mismatch silently rescales the drive, which is the one error the loop cannot see. Don't. |
+| **Upload `<stem>_iNN` to AWG** | Uploads the session's current drive into the generator's user memory and selects it — the manual-workflow counterpart of what the bench loop does each iteration, at the same fixed ±full-scale mapping (never normalised). Asks before overwriting a stored waveform of the same name; no dialog when the name is free. Warns in the log when the output is live (the new waveform plays the moment it is selected). |
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
 | **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |

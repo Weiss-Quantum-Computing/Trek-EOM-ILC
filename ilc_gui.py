@@ -495,11 +495,14 @@ class App:
         self.skip_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bf, text="skip setup checks (don't)",
                         variable=self.skip_var).grid(row=1, column=0, sticky="w")
-        b = ttk.Button(bf, text="Auto-set instruments  (AWG timing + ampl, "
-                                "scope window + verticals)",
-                       command=self.do_autoset)
-        b.grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        rr = ttk.Frame(bf); rr.grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        b = ttk.Button(rr, text="Auto-set instruments", command=self.do_autoset)
+        b.pack(side="left", fill="x", expand=True)
         self._actions.append(b)
+        self.upload_btn = ttk.Button(rr, text="Upload drive to AWG",
+                                     command=self.do_upload)
+        self.upload_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self._actions.append(self.upload_btn)
         r2 = ttk.Frame(bf); r2.grid(row=3, column=0, sticky="ew", pady=(3, 0))
         self.bench_btn = ttk.Button(r2, text="Run bench loop", command=self.do_bench)
         self.bench_btn.pack(side="left", fill="x", expand=True)
@@ -1139,7 +1142,10 @@ class App:
     def _refresh_summary(self):
         s = self.session
         if s is None:
+            self.upload_btn.configure(text="Upload drive to AWG")
             return self.summary.configure(text="no session loaded")
+        self.upload_btn.configure(
+            text=f"Upload {s.stem}_i{s.iteration:02d} to AWG")
         lp = s.loop
         idle = (s.u[0] * 1e3, s.u[-1] * 1e3)
         txt = (f"{s.channel}  '{s.stem}'  iteration {s.iteration}\n"
@@ -1408,6 +1414,60 @@ class App:
                 print("scope reported:", errs)
         finally:
             scope.close()
+
+    # --------------------------------------------------------------- upload
+    def do_upload(self):
+        """Upload the session's current drive into the generator's user
+        memory and select it -- the manual-workflow counterpart of what the
+        bench loop does every iteration. Same fixed +/-full-scale mapping,
+        never normalised."""
+        if self.session is None:
+            return messagebox.showerror("Upload",
+                                        "load or init a session first")
+        s = self.session
+        try:
+            f = self._floats(awg_ch=self.awgch_var)
+        except RuntimeError as e:
+            return messagebox.showerror("Upload", str(e))
+        wname = f"{s.stem}_i{s.iteration:02d}"
+        self.run_worker(lambda: self._upload_work(int(f["awg_ch"]), wname,
+                                                  s.full_scale),
+                        f"uploading {wname}...")
+
+    def _upload_work(self, awg_ch, wname, fs):
+        s = self.session
+        scopemod, awgmod = self._bench_modules()
+        awg = ilc_bench.make_awg(awgmod)
+        print("AWG:  ", awg.connect())
+        try:
+            # warn about an overwrite only when there is something to
+            # overwrite -- and remember the generator cannot read a stored
+            # waveform back out, so the old samples really are gone
+            stored = awg.list_waveforms(user_only=True)
+            clash = next((n for n in stored
+                          if n.lower() == wname.lower()), None)
+            if clash:
+                if not self.ask_user(
+                        "Overwrite stored waveform?",
+                        f"'{clash}' already exists in the generator's user "
+                        f"memory, and uploading replaces it.\n\nThe generator "
+                        f"cannot read a waveform back out -- the local copies "
+                        f"in the AWG GUI's Waveforms library are the only "
+                        f"record of the old samples.\n\nOverwrite?"):
+                    print(f"upload cancelled: {clash} left as stored")
+                    return
+            if awg.is_on(awg_ch):
+                print(f"note: CH{awg_ch} output is ON -- the new waveform "
+                      f"starts playing the moment it is selected")
+            n, frac = ilc_bench.upload_drive(awg, awg_ch, wname, s.u, fs)
+            print(f"uploaded {wname} to CH{awg_ch}: {n} pts, "
+                  f"{100*frac:.1f}% of DAC range, peak "
+                  f"{np.abs(s.u).max():.4f} V (fixed mapping 1.0 = {fs:g} V, "
+                  f"never normalised)")
+            arwv = awg.query(f"C{awg_ch}:ARWV?").strip()
+            print(f"       selection readback: {arwv}")
+        finally:
+            awg.close()
 
     # ------------------------------------------------------------ bench run
     def do_bench(self):
