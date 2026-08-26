@@ -581,9 +581,10 @@ class App:
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
         self.fig_wave, (self.ax_out, self.ax_drv) = self._tab("Waveforms", 2, sharex=True)
+        self.fig_dcor, (self.ax_dcor,) = self._tab("Drive corrections", 1)
+        self.fig_ddel, (self.ax_ddel,) = self._tab("Drive updates", 1)
         self.fig_err, (self.ax_err,) = self._tab("Error", 1)
         self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1)
-        self.fig_dcor, (self.ax_dcor,) = self._tab("Drive corrections", 1)
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True)
 
@@ -1810,6 +1811,7 @@ class App:
         self._plot_error(snaps)
         self._plot_spectrum(snaps)
         self._plot_dcorr(snaps)
+        self._plot_ddelta(snaps)
         self._plot_convergence()
 
     def _show_session(self, select_tab=False):
@@ -1982,6 +1984,52 @@ class App:
         ax.grid(True, alpha=0.3)
         self.fig_dcor._canvas.draw_idle()
 
+    def _plot_ddelta(self, snaps):
+        """Iteration-to-iteration drive change: u_k minus u_(k-1) -- the
+        update the loop actually applied going into iteration k, in mV at
+        the AWG. Shrinking updates are convergence seen from the input;
+        an update that stops shrinking while the error flat-lines says the
+        loop is re-learning the same correction against noise or drift."""
+        s = self.session
+        tms = s.t * 1e3
+        ax = self.ax_ddel
+        ax.clear()
+        by_it = self._snaps_by_it()      # the prior drive can come from any
+        n = len(snaps)                   # stored iteration, selected or not
+        shown = 0
+        skipped = []
+        for idx, sn in enumerate(snaps):
+            u = sn.get("u")
+            prev = by_it.get(sn["it"] - 1)
+            up = prev.get("u") if prev else None
+            if (u is None or up is None
+                    or len(u) != len(s.t) or len(up) != len(s.t)):
+                skipped.append(sn["it"])
+                continue
+            ax.plot(tms, (u - up) * 1e3, color=self._iter_colour(idx, n),
+                    lw=1.1 if idx == n - 1 else 0.8,
+                    label=f"{self._snap_label(sn)} - iter {sn['it'] - 1}",
+                    **self._dot_kw(len(tms), ms=2.6))
+            shown += 1
+        if shown:
+            ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
+        else:
+            ax.text(0.5, 0.5, "needs stored drives for an iteration AND the "
+                              "one immediately before it",
+                    ha="center", va="center", transform=ax.transAxes,
+                    color="#888888")
+        if skipped:
+            ax.annotate(f"no prior-iteration drive for iter {skipped}",
+                        (0.02, 0.02), xycoords="axes fraction", fontsize=7,
+                        color="#888888")
+        ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
+        ax.set_xlabel("time (ms)")
+        ax.set_ylabel("drive change at the AWG (mV)")
+        ax.set_title("u_k minus u_(k-1) -- the update each shown iteration "
+                     "applied")
+        ax.grid(True, alpha=0.3)
+        self.fig_ddel._canvas.draw_idle()
+
     def _plot_convergence(self):
         s, c = self.session, self._colour()
         hist = list(s.loop.history)
@@ -2080,7 +2128,7 @@ class App:
         if (~ok).any() or overlay:
             axm.legend(loc="best", fontsize=7)
         self.fig_frf._canvas.draw_idle()
-        self.nb.select(5)
+        self.nb.select(6)
         self.log(f"FRF {os.path.basename(path)}: "
                  f"{ok.sum()}/{len(d)} tones coherent, "
                  f"{d['f_Hz'].min():.0f}-{d['f_Hz'].max():.0f} Hz, "

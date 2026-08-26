@@ -30,7 +30,7 @@ instruments only accept one.
 | **Step from captured files** | one ILC iteration from scope CSVs you captured yourself |
 | **Bench loop** | the hands-off cycle: upload → capture → update |
 | **Log** | everything the loop reports. A timestamped copy appends to `run\ilc_gui.log` |
-| right side | six plot tabs, refreshed at every step, with an iteration selector above them — see §7 |
+| right side | seven plot tabs, refreshed at every step, with an iteration selector above them — see §7 |
 
 Every individual field is documented in §10.
 
@@ -186,7 +186,8 @@ The **Model** combobox selects what the update divides the error by:
 ## 7. Reading the plots
 
 The **Iterations shown** box above the tabs picks which stored iterations
-the Error, Error spectrum and Drive corrections tabs overlay: blank shows
+the Drive corrections, Drive updates, Error and Error spectrum tabs
+overlay: blank shows
 the last two, `all` shows everything, `2-5` a range, `0,3,6` a list
 (Enter or **Redraw** applies it). Iterations are coloured dark-to-light by
 age, newest drawn heaviest. Every measurement the bench loop takes — and
@@ -206,9 +207,10 @@ every draw and overrides anything the sliders set.
 | tab | what to look for |
 |---|---|
 | **Waveforms** | target vs measured output (top); the drive with its first/last-sample idle markers against the ±100 mV cap (bottom). After Init: the model-predicted output instead of a measurement. |
+| **Drive corrections** | the drive side of the Error tab: each selected iteration's AWG waveform minus the target's flat conversion (or minus the stored iteration-0 drive when it exists) — what the loop has learned to *add* at the input, in mV at the AWG. Growth here without matching error shrinkage is the loop learning noise or a wrong inverse. |
+| **Drive updates** | `u_k − u_(k−1)`: the update each shown iteration actually applied, against the immediately prior iteration's drive (which may come from any stored iteration, selected or not). Shrinking updates are convergence seen from the input; updates that stop shrinking while the error flat-lines mean the loop is re-learning the same correction against noise or drift. |
 | **Error** | target − measured for the selected iterations. Peak/rms of the newest in the title. The stuck peak at t = 0 is the burst-entry transient — the loop cannot fix the idle level (WORKFLOW.md). |
 | **Error spectrum** | where the residual lives. The update only acts left of the drawn band edge (f_cut line, or the shaded FRF taper). Error growing *right* of the edge while the in-band falls is the model diverging — tighten the band or climb the ladder. |
-| **Drive corrections** | the drive side of the Error tab: each selected iteration's AWG waveform minus the target's flat conversion (or minus the stored iteration-0 drive when it exists) — what the loop has learned to *add* at the input, in mV at the AWG. Growth here without matching error shrinkage is the loop learning noise or a wrong inverse. |
 | **Convergence** | peak and rms error vs iteration, log scale, with model-change annotations. Flat-lining means the current inverse has given what it can. |
 | **FRF** | measured magnitude/phase/coherence, dropped tones flagged, taper band shaded, current parametric model overlaid. |
 
@@ -320,5 +322,5 @@ Three kinds of persistence, marked in the tables:
 
 | field | what it does |
 |---|---|
-| **Iterations shown** *(config)* | Which stored iterations the Error, Error spectrum and Drive corrections tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
+| **Iterations shown** *(config)* | Which stored iterations the Drive corrections, Drive updates, Error and Error spectrum tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
 | **dot every Nth sample** *(config)* | Marker density on every data trace: blank = auto (~180 dots per trace), a number = that literal subsampling step, `1` = every real sample gets a dot. Enter or **Redraw** applies to the iteration tabs; the Waveforms/preview traces pick it up on their next draw. |
