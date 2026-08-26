@@ -188,6 +188,14 @@ age, newest drawn heaviest. Every measurement the bench loop takes — and
 every one recalled from `meas_*.npy` beside the state at load — is
 available.
 
+Traces carry small dots marking **real samples** — every dot is actual
+data, thinned to roughly one per 30th sample so a 5301-point record stays
+readable (the line itself still passes through every sample; zoom in with
+the toolbar to inspect a region). About that toolbar: pan/zoom/home work
+as expected, but the *Configure subplots* sliders are inert — the figures
+use matplotlib's constrained layout, which recomputes the margins on
+every draw and overrides anything the sliders set.
+
 | tab | what to look for |
 |---|---|
 | **Waveforms** | target vs measured output (top); the drive with its first/last-sample idle markers against the ±100 mV cap (bottom). After Init: the model-predicted output instead of a measurement. |
