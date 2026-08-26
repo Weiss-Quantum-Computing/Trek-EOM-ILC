@@ -1155,9 +1155,11 @@ class App:
         if key == "frf":
             return messagebox.showinfo(
                 "Fit from measurement",
-                "The measured FRF is not fitted here -- build one with "
-                "tools/sysid_make.py (Schroeder probe) and tools/sysid_fit.py "
-                "(64-shot sequence -> run\\frf_<name>.csv), then browse to it.")
+                "The measured FRF is not fitted here -- the measurement IS "
+                "the identification. Use Measure FRF... to take one (or the "
+                "CLI: tools/sysid_make.py + sysid_fit.py), then set the "
+                "taper inside its coherent band and switch the Model to "
+                "'measured FRF'. Fit belongs to the parametric rungs.")
         if self.session is None:
             return messagebox.showerror("Fit", "load or init a session first")
         pattern = self.meas_var.get().strip()
