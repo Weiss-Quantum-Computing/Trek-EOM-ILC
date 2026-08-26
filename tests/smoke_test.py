@@ -749,6 +749,18 @@ try:
 except Exception:
     traceback.print_exc()
     print("[10] screenshots FAILED (non-fatal)")
+# figure PNGs straight from the canvases -- immune to another window
+# sitting on top of the test window (ImageGrab shoots the screen)
+try:
+    for name, fig in (("wave", app.fig_wave), ("dcorr", app.fig_dcor),
+                      ("dspec", app.fig_dspec), ("ddelta", app.fig_ddel),
+                      ("err", app.fig_err), ("spec", app.fig_spec),
+                      ("conv", app.fig_conv)):
+        fig.savefig(os.path.join(SCRATCH, f"fig_{name}.png"), dpi=100)
+    print("[10b] figure PNGs saved from the canvases")
+except Exception:
+    traceback.print_exc()
+    print("[10b] figure PNGs FAILED (non-fatal)")
 
 root.destroy()
 print("ALL CHECKS PASSED")

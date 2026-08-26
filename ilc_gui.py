@@ -2871,6 +2871,16 @@ class App:
         self._finish_time_axis(self.ax_out)
         self.fig_wave._canvas.draw_idle()
 
+    def _plot_note(self, ax, text, loc="nw"):
+        """The interpretive sentence that used to crowd the title: small
+        and grey, in a corner the data leaves empty -- the time traces
+        start at idle on the left edge (nw), and a falling spectrum leaves
+        the lower left clear (sw)."""
+        xy = (0.01, 0.99) if loc == "nw" else (0.01, 0.01)
+        ax.annotate(text, xy, xycoords="axes fraction", fontsize=6.5,
+                    color="#999999", ha="left",
+                    va="top" if loc == "nw" else "bottom")
+
     def _plot_error(self, snaps, cmp=()):
         s = self.session
         tms = s.t * 1e3
@@ -2970,9 +2980,10 @@ class App:
                        label=f"f_cut {s.loop.f_cut/1e3:g} kHz")
         ax.set_xlabel("frequency (Hz)")
         ax.set_ylabel(f"error amplitude at the {self._out_name()} (V)")
-        ax.set_title("where the residual lives -- the update only acts left "
-                     "of the band edge"
+        ax.set_title("error spectrum, target - measured"
                      + (f"  ({kavg}-segment average)" if kavg > 1 else ""))
+        self._plot_note(ax, "the update only acts left of the band edge",
+                        loc="sw")
         if total:
             ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
         ax.grid(True, which="both", alpha=0.3)
@@ -3052,11 +3063,10 @@ class App:
         ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
         ax.set_xlabel("time (ms)")
         ax.set_ylabel("drive correction at the AWG (mV)")
-        ax.set_title(f"drive minus {ref_lab} -- what the loop has learned "
-                     f"to add at the input"
-                     + ("; compare stems vs their own reference"
-                        if cshown else ""),
-                     fontsize=10 if cshown else None)
+        ax.set_title(f"drive minus {ref_lab}"
+                     + (" (compare stems: their own reference)"
+                        if cshown else ""))
+        self._plot_note(ax, "what the loop has learned to add at the input")
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(ax)
         self.fig_dcor._canvas.draw_idle()
@@ -3114,9 +3124,10 @@ class App:
                        label=f"f_cut {s.loop.f_cut/1e3:g} kHz")
         ax.set_xlabel("frequency (Hz)")
         ax.set_ylabel("correction amplitude at the AWG (mV)")
-        ax.set_title("where the learned correction lives -- the update "
-                     "cannot put power right of the band edge"
+        ax.set_title("drive-correction spectrum"
                      + (f"  ({kavg}-segment average)" if kavg > 1 else ""))
+        self._plot_note(ax, "the update cannot put power right of the band "
+                            "edge -- content there is inherited", loc="sw")
         if shown:
             ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
         else:
@@ -3263,8 +3274,9 @@ class App:
         ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
         ax.set_xlabel("time (ms)")
         ax.set_ylabel("drive change at the AWG (mV)")
-        ax.set_title("u_k minus u_(k-1) -- the update each shown iteration "
-                     "applied")
+        ax.set_title("u_k minus u_(k-1)")
+        self._plot_note(ax, "the update each shown iteration applied -- "
+                            "shrinking updates are convergence at the input")
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(ax)
         self.fig_ddel._canvas.draw_idle()
