@@ -32,6 +32,8 @@ instruments only accept one.
 | **Log** | everything the loop reports, timestamped |
 | right side | five plot tabs, refreshed at every step — see §7 |
 
+Every individual field is documented in §10.
+
 ## 2. Starting from scratch (any system, no prior knowledge)
 
 Nothing carries over from the Trek chains unless you load it on purpose.
@@ -193,3 +195,74 @@ filed.
 - **The first shot is deliberately uncorrected.** Expect the raw tracking
   error of the chain (~2.4 % on the Trek ramps) on iteration 0 — that is
   the point: it is the baseline every later iteration is judged against.
+
+## 10. Every field, what it does
+
+Three kinds of persistence, marked in the tables:
+
+- **state** — saved into `drive_<stem>.state.npz` on every step, restored
+  by Load state; changing it changes the campaign.
+- **panel** — a per-session choice; the state does not carry it, so check
+  it after loading.
+- **config** — remembered between launches in
+  `%APPDATA%\EOM-ILC-GUI\config.json` (paths and habits, nothing physical).
+
+### Session
+
+| field | what it does |
+|---|---|
+| **State** *(config)* | Path to a `drive_<stem>.state.npz`. **Load state** rebuilds the whole campaign from it: target, current drive, plant, γ, f_cut, t-offset, iteration counter, error history — and recalls the last two `meas_*.npy` beside it into the plots. |
+| **Target** *(config)* | CSV of the desired waveform: first column time (`time_us` or `time_s`), second column value in **output units** (EOM volts on EO1/EO2, measured volts on GEN — divided by the channel's `mon_scale` on load). Comment lines start with `#`. Auto-plots on selection. |
+| **Build…** | Generates a target from scratch. Dialog fields: *shape* (cosine-edged ramp up-hold-return, or half-sine pulse), *peak* in output units, *lead / rise / hold / fall / tail* in ms (lead and tail are flat zero — the level the AWG idles on), *dt* in µs (the loop grid; 2 µs is the campaign standard). |
+| **Plot** | Re-draws the target preview on demand: file contents on top, the predicted AWG output of the flat first shot below, against the ±full-scale rails. Sends nothing. |
+| **Channel** | Which chain this campaign runs on. Sets the output scale (`mon_scale`: ×1000 on EO1/EO2, ×1 on GEN), the divider used by the limit guard, the bench wiring defaults (AWG ch / scope ch / monitor col), and the auto-pointed FRF (none on GEN). **Switching clears the gains and model parameters** — numbers never follow you between systems. *(state)* |
+| **Name stem** | ≤ 7 characters. Uploads are named `<stem>_iNN`; the generator stores `<name>.bin` and wedges its front panel past 15 stored characters, so the cap is enforced, not advisory. *(state)* |
+| **first-shot gain** *(panel)* | The conversion gain for the flat first shot **only**: `u₀ = target / gain`. Deliberately separate from the model gain — tuning or refitting the correction model never rescales what iteration 0 plays. Blank = falls back to the model gain (logged). Cleared on channel switch. |
+| **full scale V** *(state)* | AWG volts at record value 1.0 — the fixed DAC mapping every drive file assumes. Default 10, which requires **AMP 20 Vpp, OFST 0** on the generator (bench mode verifies and refuses on mismatch). Also draws the preview rails and scales the `_awg.csv` copies. |
+| **Init** | Builds the state file from the target: flat first shot, limit check, drive files written, iteration 0. Asks before overwriting an existing state — a yes destroys that campaign's history. |
+
+### Inverse model
+
+| field | what it does |
+|---|---|
+| **Model** *(panel)* | What the update divides the error by: gain only (0th), one pole (1st), second order (resonant), or the measured FRF. Not stored in the state — the state stores the plant *parameters*; which form is active is your choice each session. Every history entry is tagged with the model that produced it. |
+| **gain** *(state)* | The model's DC gain, AWG volts → measured volts. Used by every parametric lead (`e/gain` is the whole 0th-order correction) and by the model-predicted-output trace. Fallback source for the first-shot gain. |
+| **tau us** *(state)* | One-pole time constant, µs. Only the one-pole model reads it. On the Trek chains it equals the resonance's group delay (~28 µs) — the lag without the ring. |
+| **fn Hz**, **zeta** *(state)* | Second-order resonance frequency and damping ratio. Only the resonant model reads them. Amplitude-dependent on the Trek chains (fₙ falls with drive), which is why **From calibration** needs the target loaded. |
+| **gamma** *(state)* | The learning gain: the fraction of the computed correction applied per iteration. 0.5–0.7 is the useful range; the loop contracts where γ·(model error) stays under 2, so smaller γ buys robustness at the cost of iterations. |
+| **f_cut Hz** *(state)* | The zero-phase Q-filter corner for **parametric** updates: learning is confined below it, and the outgoing drive is low-passed at it too. 5 kHz is right on this bench — the parametric models diverge above ~6 kHz. Ignored in FRF mode, deliberately: pre-filtering the error in front of the measured inverse once left 2 V rms of correctable residual untouched. |
+| **From calibration** | Fills gain/τ/fₙ/ζ from the measured amplitude-dependent tables (2026-08-20/21) at the loaded target's amplitude. Refuses on GEN — there are no tables to interpolate. |
+| **Fit from measurement** | Runs `plant.identify` with the selected model form on the last **played** (drive, response) pair — snapshots store the drive that produced each measurement, so the pair is true even after the drive advanced. Falls back to the Captures glob if no measurement is in session. Fills the boxes and overlays the fitted model's prediction. |
+| **FRF** *(config)* | Path to a `tools/sysid_fit.py` output (`f_Hz, H_mag, H_phase_deg, coherence`). Tones with coherence < 0.9 are dropped on load. Only read in measured-FRF mode. |
+| **full strength to Hz** *(config)* | `f_use`: the measured inverse acts at full strength up to here. |
+| **taper to zero at Hz** *(config)* | `f_max`: a raised cosine takes the correction from full strength at `f_use` to zero here; the error is also smoothed at `f_max` so out-of-band noise cannot alias into the correction. Nothing above `f_max` is ever corrected. The campaign ended at 50/75 kHz; stepping one FRF through widening tapers is the frequency-ranged demo. |
+| **Show FRF** | Plots the FRF file (magnitude / unwrapped phase / coherence, taper band shaded, dropped tones flagged) with the current parametric model overlaid for comparison. |
+
+### Capture post-processing (Step + Bench)
+
+| field | what it does |
+|---|---|
+| **t-offset us** *(state)* | The fixed trigger-to-waveform-start delay, subtracted when resampling every capture onto the loop grid. Measured **0** on this bench (2026-08-24). Measure once, leave alone: re-fitting it per iteration makes the loop chase its own alignment. Bench mode cross-checks it against the uploaded drive on the first iteration and refuses if stale. |
+| **zero baseline** *(panel)* | Subtracts the mean of the first 5 % of the record from the measurement. Only valid when the waveform is actually flat there — MKJ is already moving, so on MKJ this subtracts real signal and roughly doubles the reported error (the step warns when the target's own baseline is not flat). Off unless you know why. |
+
+### Step from captured files
+
+| field | what it does |
+|---|---|
+| **Captures** *(config)* | A glob of scope CSVs; the step averages **every** file it matches and lists them in the log — read that list. Browsing to one file of a sequence replaces the trailing run index with `*`. Captures that do not span the whole waveform are refused (a zoomed file extrapolated flat once manufactured 172 V of fake error). |
+| **monitor col** | Which CSV column is the monitor trace: CH3 for EO1, CH4 for EO2 (the fixed bench wiring; auto-set with the channel). Substring matching is tolerant, but a mislabeled scope channel still lies — check the label in Scope Grab. |
+| **refit plant** *(panel)* | Re-identifies the parametric model (in the selected form) from this iteration's own drive/response pair before updating, and stores the result in the state. Continuous version of Fit from measurement. |
+| **force** *(panel)* | Writes the updated drive even when the limit check FAILED. The check exists because the answer is usually no. |
+| **Step** | One iteration: average captures → error metrics → update → limit check → write drive + AWG copy → save state. |
+
+### Bench loop
+
+| field | what it does |
+|---|---|
+| **AWG ch** | Generator channel (1 or 2) the drive is uploaded to and selected on. 1 drives EO1, 2 drives EO2. |
+| **scope ch** | Scope channel carrying the **monitor** for this chain: 3 for EO1, 4 for EO2. |
+| **iterations** *(config)* | Number of updates to run. The loop measures `iterations + 1` times — the last measurement documents the final drive without updating past it. |
+| **repeats** *(config)* | HRES single shots averaged in software per iteration. 64 is the campaign standard (~25 s at the 20 Hz trigger, dithers the scope's 2.5 mV word lattice to its 0.16 mV floor); 16 is a usable quick check; below 16 is refused. |
+| **wait s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
+| **skip setup checks** *(panel)* | Uploads without verifying AMP/OFST/clock/acquisition mode. A mismatch silently rescales the drive, which is the one error the loop cannot see. Don't. |
+| **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. |
