@@ -637,6 +637,20 @@ class App:
                 self.msgs.put(("busy", False))
         threading.Thread(target=work, daemon=True).start()
 
+    def ask_user(self, title, msg):
+        """A yes/no question from a WORKER thread: marshalled to the main
+        thread (Tk dialogs, like Tk variables, are main-thread-only) while
+        the worker blocks on the answer."""
+        evt = threading.Event()
+        result = {}
+
+        def ask():
+            result["yes"] = messagebox.askyesno(title, msg)
+            evt.set()
+        self.msgs.put(("call", ask))
+        evt.wait()
+        return result["yes"]
+
     def _floats(self, **pairs):
         out = {}
         for k, v in pairs.items():
@@ -1446,6 +1460,7 @@ class App:
         scope = ilc_bench.make_scope(scopemod)
         print("Scope:", scope.connect())
         uploaded_any = False
+        switched_on = False
         try:
             problems, notes = ilc_bench.check_awg_channel(
                 awg, awg_ch, full_scale=s.full_scale)
@@ -1470,6 +1485,24 @@ class App:
                 if not skip:
                     print("REFUSING to upload. Fix the setup in the AWG GUI / "
                           "scope, or tick 'skip setup checks'.")
+                    return
+
+            # Switching ON is the direction that puts voltage into something,
+            # so it asks first -- and the end-of-run cleanup switches it back
+            # off regardless of who turned it on.
+            if not awg.is_on(awg_ch):
+                if not self.ask_user(
+                        "Output is OFF",
+                        f"CH{awg_ch} output is OFF, and the loop needs it "
+                        f"driving.\n\nTurn CH{awg_ch} ON and run?\n\n"
+                        f"(It is switched OFF again when the run ends.)"):
+                    print(f"run cancelled: CH{awg_ch} output left OFF")
+                    return
+                awg.set_output(awg_ch, True)
+                switched_on = True
+                print(f"CH{awg_ch} output ON (confirmed in dialog)")
+                if not awg.is_on(awg_ch):
+                    print(f"CH{awg_ch} did not switch on -- aborting")
                     return
 
             k0, u = s.iteration, s.u
@@ -1514,8 +1547,10 @@ class App:
                     save_session(s)
         finally:
             # a finished (or died) run leaves nothing driving the chain --
-            # but a run refused at the setup checks leaves the bench as found
-            if uploaded_any:
+            # but a run refused at the setup checks leaves the bench as
+            # found. "Played anything OR we switched it on" covers the gap
+            # where the on-switch succeeded and the first upload did not.
+            if uploaded_any or switched_on:
                 try:
                     awg.set_output(awg_ch, False)
                     print(f"CH{awg_ch} output OFF (end of run)")

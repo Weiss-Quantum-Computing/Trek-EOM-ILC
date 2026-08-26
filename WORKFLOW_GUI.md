@@ -127,13 +127,16 @@ the parametric model from each iteration's own data as it steps.
    sized from the drive and target spans. It **refuses if the channel's
    output is ON** (changing FRQ/AMP under a live output moves real
    voltage), and never touches an output switch or the trigger — confirm
-   the shot still fires, then turn the output on in the AWG GUI.
+   the shot still fires. The output can stay OFF: the bench loop offers to
+   switch it on itself (next step).
 4. Press **Run bench loop**. Before touching the generator it verifies the
    channel is set up the way the drive file assumes (AMP 20 Vpp, OFST ~0,
    DDS, HRES, enough repeats) and **refuses** on any mismatch — fix the
-   setup rather than ticking *skip setup checks*. On the first iteration
-   it also cross-checks the trigger alignment against the drive it just
-   uploaded and refuses if `t-offset` looks stale.
+   setup rather than ticking *skip setup checks*. If the channel's output
+   is OFF it asks — a yes switches it ON for the run (and OFF again at the
+   end); a no cancels with nothing changed. On the first iteration it also
+   cross-checks the trigger alignment against the drive it just uploaded
+   and refuses if `t-offset` looks stale.
 5. Each iteration: upload → 64 HRES singles averaged in software (progress
    bar; ~25 s at the 20 Hz trigger) → metrics → plots → update → state
    saved. Every measurement is kept as `run\meas_<stem>_iNN.npy`.
@@ -280,4 +283,4 @@ Three kinds of persistence, marked in the tables:
 | **wait s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
 | **skip setup checks** *(panel)* | Uploads without verifying AMP/OFST/clock/acquisition mode. A mismatch silently rescales the drive, which is the one error the loop cannot see. Don't. |
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
-| **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something switches the driven channel's output OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |
+| **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |
