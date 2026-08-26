@@ -2285,6 +2285,7 @@ class App:
         uploaded = False
         switched_on = False
         retune = False           # short mode changed FRQ + scope window
+        vert_saved = None        # ramp verticals, put back at the end
         try:
             problems, notes = ilc_bench.check_awg_channel(
                 awg, awg_ch, full_scale=s.full_scale)
@@ -2347,6 +2348,23 @@ class App:
                 retune = True
                 print(f"  AWG FRQ -> {1.0/rec:.6g} Hz, scope window -> "
                       f"{rng*1e3:.4g} ms (both restored at the end)")
+            # verticals for the probe: bipolar around ZERO, not the ramp's
+            # window -- the session verticals leave the probe in 1-2 of the
+            # 8 divisions and burn bits the 8-bit codes cannot spare
+            vert_saved = {}
+            for chn in (awg_ch, scope_ch):
+                vert_saved[chn] = (
+                    float(scope.get(f":CHANnel{chn}:SCALe")),
+                    float(scope.get(f":CHANnel{chn}:OFFSet")))
+            pk = float(np.abs(u).max())
+            mon_pk = 2.0 * pk * s.loop.plant.gain
+            for chn, span in ((awg_ch, 2 * pk), (scope_ch, 2 * mon_pk)):
+                scale = nice_setting(1.25 * span / 8)
+                scope.put(f":CHANnel{chn}:SCALe", f"{scale:.6g}")
+                scope.put(f":CHANnel{chn}:OFFSet", "0")
+            print(f"scope verticals for the probe: drive +/-{pk:.3g} V, "
+                  f"monitor +/-{mon_pk:.3g} V (2x flat-gain headroom for "
+                  f"resonant peaking), centred on 0 -- restored at the end")
             ok, switched_on = self._ensure_output_on(awg, awg_ch)
             if not ok:
                 return
@@ -2391,6 +2409,15 @@ class App:
                              if missed else ""))
                 except Exception as e:
                     print(f"could not restore FRQ/scope window: {e} -- "
+                          f"press Auto-set instruments before the next run")
+            if vert_saved:
+                try:
+                    for chn, (sc, off) in vert_saved.items():
+                        scope.put(f":CHANnel{chn}:SCALe", f"{sc:.6g}")
+                        scope.put(f":CHANnel{chn}:OFFSet", f"{off:.6g}")
+                    print("scope verticals restored to the session's")
+                except Exception as e:
+                    print(f"could not restore scope verticals: {e} -- "
                           f"press Auto-set instruments before the next run")
             awg.close()
             scope.close()
