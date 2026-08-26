@@ -78,7 +78,7 @@ pre-distorted seed.)
 | `run/` | the **active campaign workspace**: states, iteration drives, measurements, and the measured FRFs — see `run/README.md` for the file taxonomy and where finished campaigns get filed |
 | `WORKFLOW.md` | **the bench procedure** — read this before touching hardware |
 | `WORKFLOW_GUI.md` | the same procedure as panel clicks: step-by-step for `ilc_gui.py`, from-scratch recipe included |
-| `docs/` | the campaign write-up (`REPORT.md` + `figures/`), `MKJ_FULL_NOTES.md` (what the MKJ waveform is, headroom arithmetic, DDS behaviour), and the Scope Grab averaging patch |
+| `docs/` | the campaign write-up (`REPORT.md` + `figures/`), `MKJ_FULL_NOTES.md` (what the MKJ waveform is, headroom arithmetic, DDS behaviour), `ANALYSIS_PROMPT.md` (paste-able brief for an offline data-analysis session — data layout, loaders, measured traps), and the Scope Grab averaging patch |
 | `archive/` | superseded bench outputs kept for the record (not tracked), including `report-era/` — the frozen 24–25 Aug analysis: the SCRX scratch campaigns, the probe-era files, and the still-runnable figure scripts behind `docs/figures/`, with their own README |
 
 Needs `numpy`, `scipy`, `pandas`, and `pyvisa` for the bench drivers. On the lab

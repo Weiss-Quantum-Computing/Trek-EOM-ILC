@@ -178,6 +178,37 @@ def save_session(s: Session):
              t_offset=s.t_off, history=np.array(lp.history, dtype=object))
 
 
+def avg_spectrum(e, dt, k=1):
+    """Amplitude spectrum of e, optionally noise-averaged.
+
+    k = 1: the raw single-record FFT (bin width 1/(N dt)). Full frequency
+    resolution, but a periodogram's per-bin variance is ~100% of its value
+    and does NOT average down with record length -- more points only add
+    more equally-noisy bins.
+    k > 1: Hann-windowed 50%-overlap segment averaging (Welch), segment
+    length N//k. Noise variance drops ~sqrt(segments); resolution coarsens
+    to ~k/(N dt), so tones closer than that merge and content localised in
+    time (burst edges) smears across segments. Normalised so a pure tone
+    KEEPS its displayed amplitude in both modes -- the broadband noise
+    floor, by contrast, scales with bin width, so only compare curves
+    drawn at equal k."""
+    e = np.asarray(e, float)
+    n = len(e)
+    k = max(1, min(int(k), n // 16))
+    if k == 1:
+        f = np.fft.rfftfreq(n, dt)
+        return f[1:], np.abs(np.fft.rfft(e))[1:] * 2 / n
+    nseg = n // k
+    w = np.hanning(nseg)
+    hop = max(1, nseg // 2)
+    acc, m = 0.0, 0
+    for i0 in range(0, n - nseg + 1, hop):
+        acc = acc + np.abs(np.fft.rfft(w * e[i0:i0 + nseg]))
+        m += 1
+    f = np.fft.rfftfreq(nseg, dt)
+    return f[1:], (acc / m)[1:] * 2 / w.sum()
+
+
 def recall_snapshots(s: Session):
     """Pull a session's on-disk measurements (meas_<stem>_i*.npy beside the
     state, paired with the drive CSVs that played them) back into
@@ -356,6 +387,7 @@ class App:
                  stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
                  iter_sel=self.itersel_var.get(),
                  cmp_sel=self.cmpsel_var.get(),
+                 spec_avg=self.specavg_var.get(),
                  dot_step=self.dotstep_var.get(),
                  show_runs=self.showruns_var.get(),
                  dt_labels=self.dtlabels_var.get(),
@@ -680,6 +712,14 @@ class App:
         ttk.Label(sel2, text="other stems, e.g. 'TSTX1 OLDX1:all OLDX2:0,3' "
                              "(blank sel = last iter)",
                   foreground="#666666").pack(side="left")
+        ttk.Label(sel2, text="segs (blank = raw FFT)",
+                  foreground="#666666").pack(side="right")
+        self.specavg_var = tk.StringVar(value=self.cfg.get("spec_avg", ""))
+        e4 = ttk.Entry(sel2, textvariable=self.specavg_var, width=4)
+        e4.pack(side="right", padx=2)
+        e4.bind("<Return>", lambda ev: self._redraw_iterations())
+        ttk.Label(sel2, text="spectra avg").pack(side="right")
+        self._specavg_warned = None
         self._cmp_cache = {}         # state path -> (state mtime, Session)
         self._cmp_logged = set()     # compare warnings already shown ...
         self._cmp_lastspec = None    # ... for this spec (reset on change)
@@ -2389,16 +2429,30 @@ class App:
         self._finish_time_axis(ax)
         self.fig_err._canvas.draw_idle()
 
+    def _spec_avg(self):
+        """The 'spectra avg' box: blank/1 = the raw FFT, N = Welch with N
+        segments on both spectrum tabs. See avg_spectrum for the trade."""
+        raw = self.specavg_var.get().strip()
+        if not raw:
+            return 1
+        try:
+            return max(1, int(float(raw)))
+        except ValueError:
+            if self._specavg_warned != raw:
+                self._specavg_warned = raw
+                self.log(f"spectra avg {raw!r} is not a number -- "
+                         f"using the raw FFT")
+            return 1
+
     def _plot_spectrum(self, snaps, cmp=()):
         s = self.session
         sc = self._out_scale()
         ax = self.ax_spec
         ax.clear()
+        kavg = self._spec_avg()
 
         def asd(e, dt, scale):
-            npts = len(e)
-            f = np.fft.rfftfreq(npts, dt)
-            return f[1:], np.abs(np.fft.rfft(e * scale))[1:] * 2 / npts
+            return avg_spectrum(e * scale, dt, kavg)
 
         n = len(snaps)
         for idx, sn in enumerate(snaps):
@@ -2430,7 +2484,8 @@ class App:
         ax.set_xlabel("frequency (Hz)")
         ax.set_ylabel(f"error amplitude at the {self._out_name()} (V)")
         ax.set_title("where the residual lives -- the update only acts left "
-                     "of the band edge")
+                     "of the band edge"
+                     + (f"  ({kavg}-segment average)" if kavg > 1 else ""))
         if total:
             ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
         ax.grid(True, which="both", alpha=0.3)
@@ -2528,11 +2583,10 @@ class App:
         s = self.session
         ax = self.ax_dspec
         ax.clear()
+        kavg = self._spec_avg()
 
         def asd(e, dt):
-            npts = len(e)
-            f = np.fft.rfftfreq(npts, dt)
-            return f[1:], np.abs(np.fft.rfft(e))[1:] * 2 / npts
+            return avg_spectrum(e, dt, kavg)
 
         # same drive -> same correction: base measurements only, like the
         # Drive corrections tab
@@ -2574,7 +2628,8 @@ class App:
         ax.set_xlabel("frequency (Hz)")
         ax.set_ylabel("correction amplitude at the AWG (mV)")
         ax.set_title("where the learned correction lives -- the update "
-                     "cannot put power right of the band edge")
+                     "cannot put power right of the band edge"
+                     + (f"  ({kavg}-segment average)" if kavg > 1 else ""))
         if shown:
             ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
         else:

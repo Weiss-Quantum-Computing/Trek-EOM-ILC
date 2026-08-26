@@ -1,8 +1,9 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-33 numbered checks: state round-trips, the span guard, the model ladder,
+34 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
-overlays, compare-stem overlays, drive spectrum, the iteration
+overlays, compare-stem overlays, drive spectrum, spectrum
+averaging, the iteration
 table, dot density, linked time axes. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
@@ -516,6 +517,43 @@ assert len(tdf) == len(rows) == 12, (len(tdf), len(rows))
 assert "peak err (V)" in tdf.columns, list(tdf.columns)
 print(f"[33] table: {len(mk)} MKJX1 + {len(gx)} GENX rows (r3 included), "
       f"CSV mirror saved; compare gradient is colour, not alpha")
+
+# spectrum averaging: a pure tone keeps its amplitude in both modes (the
+# normalisation invariant), and the Welch mode actually smooths
+tt = np.arange(4096) * 2e-6
+tone = 0.5 * np.sin(2 * np.pi * 10e3 * tt)
+noisy = tone + np.random.default_rng(0).normal(0, 0.05, len(tt))
+f1, a1 = ilc_gui.avg_spectrum(tone, 2e-6, 1)
+f8, a8 = ilc_gui.avg_spectrum(tone, 2e-6, 8)
+assert abs(a1.max() - 0.5) < 0.02, f"raw tone amplitude {a1.max():.3f}"
+assert abs(a8.max() - 0.5) < 0.03, f"averaged tone amplitude {a8.max():.3f}"
+assert len(f8) < len(f1) // 4, "averaging did not coarsen the grid"
+_, n1 = ilc_gui.avg_spectrum(noisy, 2e-6, 1)
+_, n8 = ilc_gui.avg_spectrum(noisy, 2e-6, 8)
+floor1 = np.std(n1[len(n1) // 2:]) / np.mean(n1[len(n1) // 2:])
+floor8 = np.std(n8[len(n8) // 2:]) / np.mean(n8[len(n8) // 2:])
+assert floor8 < 0.6 * floor1, \
+    f"noise-floor scatter did not drop: {floor1:.2f} -> {floor8:.2f}"
+# GUI wiring: both spectrum tabs follow the box, junk warns once and
+# falls back to raw
+raw_len = len(app.ax_spec.get_lines()[0].get_xdata())
+app.specavg_var.set("8")
+app._redraw_iterations(); root.update()
+assert len(app.ax_spec.get_lines()[0].get_xdata()) < raw_len // 4
+assert "8-segment average" in app.ax_spec.get_title()
+assert "8-segment average" in app.ax_dspec.get_title()
+app.specavg_var.set("junk")
+app._redraw_iterations(); root.update()
+assert len(app.ax_spec.get_lines()[0].get_xdata()) == raw_len, \
+    "junk avg did not fall back to the raw FFT"
+panel3 = app.log_text.get("1.0", "end")
+assert panel3.count("spectra avg 'junk'") == 1, "avg warning repeats"
+app._redraw_iterations(); root.update()
+assert app.log_text.get("1.0", "end").count("spectra avg 'junk'") == 1
+app.specavg_var.set("")
+app._redraw_iterations(); root.update()
+print("[34] spectra averaging: tone amplitude invariant, noise scatter "
+      "drops, both tabs follow the box, junk warns once -> raw")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
