@@ -1293,14 +1293,15 @@ class App:
             return messagebox.showerror("Auto-set", str(e))
         period = float(s.t[-1]) + float(s.loop.dt)
         u, v = s.u, s.loop.target
+        wname = f"{s.stem}_i{s.iteration:02d}"
         self.run_worker(lambda: self._autoset_work(
             period, float(u.min()), float(u.max()),
             float(v.min()), float(v.max()), s.full_scale,
-            int(f["awg_ch"]), int(f["scope_ch"])),
+            int(f["awg_ch"]), int(f["scope_ch"]), wname),
             "auto-setting instruments...")
 
     def _autoset_work(self, period, u_lo, u_hi, v_lo, v_hi, fs,
-                      awg_ch, scope_ch):
+                      awg_ch, scope_ch, wname):
         scopemod, awgmod = self._bench_modules()
 
         # Connect BOTH instruments before writing to either: a scope that
@@ -1325,26 +1326,44 @@ class App:
                       f"and changing FRQ/AMP under a live output moves real "
                       f"voltage at the chain. Switch it off first.")
                 return
-            # apply_channel writes in the only order the 4063B honours
-            # (load before BSWV, SRATE before BSWV, mode block last, and
-            # burst STATE,ON sent separately before its parameters -- the
-            # manual requires it, and a combined write drops the type switch)
-            missed = awg.apply_channel(awg_ch, {
+            # Select the session's CURRENT drive if the generator already
+            # holds it -- selecting is all autoset may do; uploading is the
+            # bench loop's job (or the AWG GUI's, from its Waveforms library).
+            stored = awg.list_waveforms(user_only=True)
+            pick = next((n for n in stored if n == wname), None) or \
+                next((n for n in stored if n.lower() == wname.lower()), None)
+            blocks = {
                 "OUTP": {"LOAD": "HZ"},
                 "SRATE": {"MODE": "DDS"},
                 "BSWV": {"WVTP": "ARB", "FRQ": 1.0 / period,
                          "AMP": 2 * fs, "OFST": 0},
                 "MODE": ("Burst", {"GATE_NCYC": "NCYC", "TIME": 1,
                                    "TRSR": "EXT"}),
-            }, log=lambda m: print("      ", m))
+            }
+            if pick:
+                blocks["ARWV"] = {"NAME": pick}
+            # apply_channel writes in the only order the 4063B honours
+            # (load first, ARWV and SRATE before BSWV, mode block last, and
+            # burst STATE,ON sent separately before its parameters -- the
+            # manual requires it, and a combined write drops the type switch)
+            missed = awg.apply_channel(awg_ch, blocks,
+                                       log=lambda m: print("      ", m))
             if missed:
                 print("       did NOT take (apply_channel readback):", missed)
-            # trust nothing: read the burst block back and show it
+            # trust nothing: read the selection and burst back and show them
+            arwv = awg.query(f"C{awg_ch}:ARWV?").strip()
             btwv = awg.query(f"C{awg_ch}:BTWV?").strip()
             print(f"AWG CH{awg_ch}: ARB, DDS, period {period*1e3:.4f} ms "
                   f"(FRQ {1.0/period:.6g} Hz), AMP {2*fs:g} Vpp, OFST 0, "
                   f"load HZ -- output left "
                   f"{'ON' if awg.is_on(awg_ch) else 'OFF'}")
+            print(f"       waveform readback: {arwv}")
+            if not pick:
+                print(f"       NOTE: '{wname}' is not in the generator's user "
+                      f"memory (it holds: {', '.join(stored) or 'nothing'}). "
+                      f"The selection was left alone -- upload it from the "
+                      f"AWG GUI's Waveforms library ({wname}.csv, Normalise "
+                      f"OFF), or let the bench loop upload it.")
             print(f"       burst readback: {btwv}")
         finally:
             awg.close()
