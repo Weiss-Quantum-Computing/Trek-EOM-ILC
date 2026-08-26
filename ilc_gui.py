@@ -589,28 +589,30 @@ class App:
         self.progress.pack(side="right")
 
         # ---- plot notebook -------------------------------------------
+        # deliberately terse -- the grammar of every field is in
+        # WORKFLOW_GUI.md section 10, and width here is contested
         sel = ttk.Frame(right)
         sel.pack(fill="x", pady=(0, 2))
-        ttk.Label(sel, text="Iterations shown").pack(side="left")
+        ttk.Label(sel, text="Iterations").pack(side="left")
         self.itersel_var = tk.StringVar(value=self.cfg.get("iter_sel", ""))
-        e = ttk.Entry(sel, textvariable=self.itersel_var, width=14)
+        e = ttk.Entry(sel, textvariable=self.itersel_var, width=11)
         e.pack(side="left", padx=2)
         e.bind("<Return>", lambda ev: self._redraw_iterations())
-        ttk.Label(sel, text="(blank = last two;  'all',  '2-5',  or '0,3,6')",
+        ttk.Label(sel, text="(all, 2-5, 0,3,6)",
                   foreground="#666666").pack(side="left")
-        ttk.Label(sel, text="   dot every").pack(side="left")
+        ttk.Label(sel, text="  dot every").pack(side="left")
         self.dotstep_var = tk.StringVar(value=self.cfg.get("dot_step", ""))
-        e2 = ttk.Entry(sel, textvariable=self.dotstep_var, width=5)
+        e2 = ttk.Entry(sel, textvariable=self.dotstep_var, width=4)
         e2.pack(side="left", padx=2)
         e2.bind("<Return>", lambda ev: self._redraw_iterations())
-        ttk.Label(sel, text="th sample (blank = auto, 1 = all)",
+        ttk.Label(sel, text="th (1 = all)",
                   foreground="#666666").pack(side="left")
         self.showruns_var = tk.BooleanVar(value=self.cfg.get("show_runs", True))
         ttk.Checkbutton(sel, text="runs", variable=self.showruns_var,
                         command=self._redraw_iterations).pack(side="left",
                                                               padx=(8, 0))
         self.dtlabels_var = tk.BooleanVar(value=self.cfg.get("dt_labels", False))
-        ttk.Checkbutton(sel, text="Δt labels", variable=self.dtlabels_var,
+        ttk.Checkbutton(sel, text="Δt", variable=self.dtlabels_var,
                         command=self._redraw_iterations).pack(side="left")
         self.tlink_var = tk.BooleanVar(value=self.cfg.get("link_t", True))
         ttk.Checkbutton(sel, text="link t", variable=self.tlink_var).pack(
