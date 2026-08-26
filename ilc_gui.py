@@ -591,6 +591,10 @@ class App:
                                    command=self.do_step)
         self.step_btn.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(3, 0))
         self._actions.append(self.step_btn)
+        b = ttk.Button(mf, text="Spectrum from captures  (native scope rate)",
+                       command=self.do_native_spec)
+        b.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        self._actions.append(b)
         mf.columnconfigure(1, weight=1)
 
         # ---- bench loop ----------------------------------------------
@@ -1553,6 +1557,71 @@ class App:
                                         self._show_iteration(u_next, y, m, it))))
 
     # -------------------------------------------------------------- autoset
+    def do_native_spec(self):
+        """Error spectrum straight from the capture files at the SCOPE's own
+        sample rate: the target is interpolated onto the scope's time base
+        instead of the capture being boxcar-decimated onto the waveform
+        grid. The record length is unchanged, so the low-frequency bins do
+        not move -- what this buys is the band past the grid Nyquist and
+        the top octave without the anti-alias boxcar's droop. Draws as an
+        overlay on the Error spectrum tab; the next Redraw clears it."""
+        if self.session is None:
+            return messagebox.showerror("Native spectrum",
+                                        "load a state first")
+        pattern = self.meas_var.get().strip()
+        if not pattern:
+            return messagebox.showerror("Native spectrum",
+                                        "set the capture glob first")
+        mon = self.moncol_var.get()
+        kavg = self._spec_avg()
+        self.run_worker(lambda: self._native_spec_work(pattern, mon, kavg),
+                        "native-rate spectrum from captures...")
+
+    def _native_spec_work(self, pattern, mon, kavg):
+        s = self.session
+        files = sorted(glob.glob(pattern))
+        if not files:
+            raise RuntimeError(f"no scope files matched {pattern!r}")
+        t0, acc = None, 0.0
+        for f in files:
+            tr = scopeio.load(f)
+            lo, hi = tr.t[0] - s.t_off, tr.t[-1] - s.t_off
+            if lo > s.t[0] + 1e-4 or hi < s.t[-1] - 1e-4:
+                raise RuntimeError(
+                    f"{os.path.basename(f)} spans {lo*1e3:.2f}..{hi*1e3:.2f} "
+                    f"ms but the waveform runs {s.t[0]*1e3:.2f}.."
+                    f"{s.t[-1]*1e3:.2f} ms. A zoomed or mismatched capture "
+                    f"matched the glob -- tighten the pattern.")
+            if t0 is None:
+                t0, y = tr.t, tr[mon]
+            else:                        # sequences share a time base; a
+                y = np.interp(t0, tr.t, tr[mon])   # stray one is aligned
+            acc = acc + y
+        y = acc / len(files)
+        ts = t0 - s.t_off
+        m = (ts >= s.t[0]) & (ts <= s.t[-1])   # same span as the grid error
+        ts, y = ts[m], y[m]
+        dtn = float(np.median(np.diff(ts)))
+        e = (np.interp(ts, s.t, s.loop.target) - y) * s.loop.channel.mon_scale
+        f_n, a_n = avg_spectrum(e, dtn, kavg)
+        print(f"native-rate spectrum: {len(files)} capture(s), "
+              f"dt {dtn*1e9:.0f} ns (grid {s.loop.dt*1e6:g} us), Nyquist "
+              f"{0.5/dtn/1e3:.0f} kHz vs {0.5/s.loop.dt/1e3:.0f} kHz -- the "
+              f"record length is unchanged, so the low-frequency bins "
+              f"do not move")
+        nfiles = len(files)
+        self.msgs.put(("call",
+                       lambda: self._draw_native_spec(f_n, a_n, dtn, nfiles)))
+
+    def _draw_native_spec(self, f, a, dtn, nfiles):
+        ax = self.ax_spec
+        ax.loglog(f, a, color="#000000", lw=0.8, alpha=0.75,
+                  label=f"native rate ({nfiles} captures, dt {dtn*1e9:.0f} ns)")
+        ax.legend(loc="best", fontsize=7)
+        self.fig_spec._canvas.draw_idle()
+        # front the Error spectrum tab (by its frame, not a magic index)
+        self.nb.select(self.fig_spec._canvas.get_tk_widget().master)
+
     def do_autoset(self):
         """Configure the AWG and scope from what the session already knows:
         the record's period sets the arb frequency and the scope window, the

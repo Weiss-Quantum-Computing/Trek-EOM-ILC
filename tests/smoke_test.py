@@ -1,9 +1,9 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-34 numbered checks: state round-trips, the span guard, the model ladder,
+35 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
-averaging, the iteration
+averaging, the native-rate spectrum, the iteration
 table, dot density, linked time axes. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
@@ -554,6 +554,37 @@ app.specavg_var.set("")
 app._redraw_iterations(); root.update()
 print("[34] spectra averaging: tone amplitude invariant, noise scatter "
       "drops, both tabs follow the box, junk warns once -> raw")
+
+# native-rate spectrum: captures at the scope's own dt reveal content past
+# the grid Nyquist that the boxcar-decimated path cannot represent
+sN = app.session
+tf = np.arange(sN.t[0] - 0.5e-3, sN.t[-1] + 0.5e-3, sN.loop.dt / 4)
+tone_mon = 2e-3
+resp = np.interp(tf, sN.t, sN.loop.target)      # a perfect chain response
+fine = resp + tone_mon * np.sin(2 * np.pi * 400e3 * tf)   # 400 kHz > 250 kHz
+for j in (1, 2):
+    pd.DataFrame({"Time (s)": tf, "CH3": fine}).to_csv(
+        os.path.join(SCRATCH, f"fine_cap_{j:03d}.csv"), index=False)
+app.meas_var.set(os.path.join(SCRATCH, "fine_cap_*.csv"))
+app.do_native_spec(); pump_until_idle(); root.update()
+nat = next(l for l in app.ax_spec.get_lines()
+           if l.get_label().startswith("native rate"))
+fx, ay = nat.get_xdata(), nat.get_ydata()
+assert fx.max() > 1.5 * 250e3, f"band did not extend: {fx.max():.0f} Hz"
+sel = np.abs(fx - 400e3) < 2e3
+tone_hv = tone_mon * sN.loop.channel.mon_scale
+assert ay[sel].max() > 0.5 * tone_hv, \
+    f"400 kHz tone not recovered: {ay[sel].max():.3f} vs {tone_hv:.3f} HV V"
+assert any(l.get_label().startswith("iter ")
+           for l in app.ax_spec.get_lines()), "overlay clobbered the tab"
+# the guard still refuses a zoomed capture on this path
+app.meas_var.set(os.path.join(SCRATCH, "fake_zoom_*.csv"))
+app.do_native_spec(); pump_until_idle(); root.update()
+assert "zoomed or mismatched" in app.log_text.get("1.0", "end"), \
+    "native-spectrum span guard did not fire"
+print(f"[35] native-rate spectrum: Nyquist {fx.max()/1e3:.0f} kHz, the "
+      f"400 kHz tone recovered at {ay[sel].max():.2f} V (true {tone_hv:.1f}), "
+      f"span guard held")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")

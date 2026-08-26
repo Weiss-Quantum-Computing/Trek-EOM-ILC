@@ -72,7 +72,16 @@ from eomilc import plant as plantmod    # plantmod.identify(u, y, dt, model=...)
   `ilc_gui.read_captures` (span guard included), not a hand-rolled parser.
 - A raw periodogram's per-bin variance is ~100% and does not average
   down with record length — use `avg_spectrum(..., k>1)` before calling
-  something "noise".
+  something "noise". And spectral RESOLUTION is set by record duration
+  alone (~94 Hz for the 10.6 ms MKJ record): no resampling or
+  interpolation adds information below 1/T, and Welch RAISES the lowest
+  resolvable frequency by ~k.
+- The stored `meas_*.npy` are boxcar-decimated to the waveform grid
+  (Nyquist 250 kHz at dt 2 µs). Content above that — and the top octave
+  without the boxcar's sinc droop — needs the RAW Scope Grab CSVs,
+  processed by interpolating the target onto the scope's time base (the
+  GUI's "Spectrum from captures" button does exactly this; do the same
+  in scripts rather than decimating first).
 
 ## What already exists (do not re-plot it)
 
