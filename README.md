@@ -71,11 +71,11 @@ iteration 1.
 | `tools/` | target builders and system-ID: `make_target.py` (MKJ target at any peak and grid), `make_ramp_target.py`, `sysid_make.py` (Schroeder multitone probe), `sysid_fit.py` (probe captures → `run/frf_<name>.csv`) |
 | `simulation/` | off-bench validation: `simulate.py`, `make_validation_fig.py` and its figure |
 | `characterisation/` | the 2026-08-21 analysis that produced every constant in `config.py` |
-| `waveforms/` | the current targets and iteration-0 drives |
-| `run/` | states, iteration drives, and the measured FRFs |
+| `waveforms/` | the current targets and iteration-0 drives (the one home for targets) |
+| `run/` | the **active campaign workspace**: states, iteration drives, measurements, and the measured FRFs — see `run/README.md` for the file taxonomy and where finished campaigns get filed |
 | `WORKFLOW.md` | **the bench procedure** — read this before touching hardware |
 | `docs/` | the campaign write-up (`REPORT.md` + `figures/`), `MKJ_FULL_NOTES.md` (what the MKJ waveform is, headroom arithmetic, DDS behaviour), and the Scope Grab averaging patch |
-| `archive/` | superseded bench outputs kept for the record (not tracked) |
+| `archive/` | superseded bench outputs kept for the record (not tracked), including `report-era/` — the frozen 24–25 Aug analysis: the SCRX scratch campaigns, the probe-era files, and the still-runnable figure scripts behind `docs/figures/`, with their own README |
 
 Needs `numpy`, `scipy`, `pandas`, and `pyvisa` for the bench drivers. On the lab
 PC that means the Anaconda interpreter, `C:\ProgramData\anaconda3\python.exe` —
@@ -233,7 +233,7 @@ moving in the first 5% of the record. MKJ is, and enabling it there subtracts
 `config.py`, from 40 captures taken 2026-08-20/21. The raw captures themselves
 (~260 MB) are not in the repository; point `EOM_RAMPS_DIR` at them to re-run.
 `characterisation/results2.json` is the direct source of the `fn_pts` /
-`zeta_pts` tables. The measured FRFs in `run/frf_*.csv` come from the 24–25 Aug
-probe campaign (`sysid_make.py` / `sysid_fit.py`, raw shots in
-`run/wideprobe*.npz`); REPORT.md documents the probe construction and its
+`zeta_pts` tables. The measured FRFs in `run/frf_WIDE_*.csv` come from the 24–25 Aug
+probe campaign (`sysid_make.py` / `sysid_fit.py`, raw shots and the probe-era
+fits now filed in `archive/report-era/`); REPORT.md documents the probe construction and its
 verification.

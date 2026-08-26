@@ -1,6 +1,9 @@
-# run/ is the scratch directory for an actual bench session -- drives, captures
-# and loop state for one run. The committed waveforms live in waveforms/.
-run/
+# run/ is the ACTIVE campaign workspace -- states, drives, measurements and
+# FRFs for whatever is currently being iterated. The committed waveforms live
+# in waveforms/; finished campaigns get filed under archive/. Only the README
+# describing the workspace is tracked.
+run/*
+!run/README.md
 
 # ... and the same artefacts wherever else they land
 *.state.npz
