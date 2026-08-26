@@ -208,6 +208,12 @@ class FRF:
     """
 
     def __init__(self, path, min_coherence=0.9, f_use=15e3, f_max=22e3):
+        if not 0 < f_use < f_max:
+            raise ValueError(
+                f"the taper needs 0 < f_use < f_max, got {f_use:g}/{f_max:g}."
+                f" A zero-width taper is a brick wall -- it rings, and a bin"
+                f" landing exactly on the edge divides 0/0 into the drive."
+                f" To nearly disable it use f_use ~ 0.9 * f_max.")
         import pandas as pd
         d = pd.read_csv(path)
         m = d["coherence"].to_numpy() >= min_coherence

@@ -1572,6 +1572,12 @@ class App:
                     f"view) -- the measured-FRF model divides by exactly "
                     f"ONE. Keep the one to drive with.")
             cfg.update(self._floats(f_use=self.fuse_var, f_max=self.fmax_var))
+            if not 0 < cfg["f_use"] < cfg["f_max"]:
+                raise RuntimeError(
+                    f"the taper needs 0 < f_use < f_max "
+                    f"(got {cfg['f_use']:g}/{cfg['f_max']:g}). A zero-width "
+                    f"taper is a brick wall that rings -- to nearly disable "
+                    f"it, set f_use ~ 0.9 x f_max.")
         else:
             cfg["params"] = self._entry_params(cfg["mode"], strict=True)
         return cfg

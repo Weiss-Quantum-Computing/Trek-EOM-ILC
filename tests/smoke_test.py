@@ -1,6 +1,6 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-40 numbered checks: state round-trips, the span guard, the model ladder,
+41 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
@@ -771,6 +771,24 @@ assert str(app._fuse_entry.cget("state")) == "disabled"
 app.model_var.set(cur_model); app._update_model_fields()
 print("[40] band knobs follow the model: f_cut greyed in FRF mode, "
       "the f_use/f_max taper greyed on the parametric rungs")
+
+# a zero-width (or inverted) taper is refused at both layers
+try:
+    ilc_gui.ilc.FRF(fpath, f_use=150e3, f_max=150e3)
+    raise AssertionError("zero-width taper accepted by ilc.FRF")
+except ValueError as e:
+    assert "brick wall" in str(e), e
+app.model_var.set("measured FRF (nonparametric)")
+app.frf_var.set(fpath)
+app.fuse_var.set("150e3"); app.fmax_var.set("100e3")
+try:
+    app._gather_settings()
+    raise AssertionError("inverted taper accepted by the panel")
+except RuntimeError as e:
+    assert "f_use < f_max" in str(e), e
+app.fuse_var.set("100e3"); app.fmax_var.set("150e3")
+app.model_var.set(cur_model); app._update_model_fields()
+print("[41] zero-width/inverted tapers refused with the 0.9x guidance")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
