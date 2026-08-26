@@ -219,7 +219,7 @@ Three kinds of persistence, marked in the tables:
 | **Name stem** | ≤ 7 characters. Uploads are named `<stem>_iNN`; the generator stores `<name>.bin` and wedges its front panel past 15 stored characters, so the cap is enforced, not advisory. *(state)* |
 | **first-shot gain** *(panel)* | The conversion gain for the flat first shot **only**: `u₀ = target / gain`. Deliberately separate from the model gain — tuning or refitting the correction model never rescales what iteration 0 plays. Blank = falls back to the model gain (logged). Cleared on channel switch. |
 | **full scale V** *(state)* | AWG volts at record value 1.0 — the fixed DAC mapping every drive file assumes. Default 10, which requires **AMP 20 Vpp, OFST 0** on the generator (bench mode verifies and refuses on mismatch). Also draws the preview rails and scales the `_awg.csv` copies. |
-| **Init** | Builds the state file from the target: flat first shot, limit check, drive files written, iteration 0. Asks before overwriting an existing state — a yes destroys that campaign's history. |
+| **Init** | Builds the state file from the target: flat first shot, limit check, drive files written, iteration 0. **Touches no instrument** — no VISA session is opened, and the copy written into the AWG GUI's Waveforms library is a file on disk, not an upload; the AWG and scope can be off. The only instrument assumption baked into the files is the fixed mapping AMP = 2× full scale / OFST 0, which bench mode verifies before ever uploading. Asks before overwriting an existing state — a yes destroys that campaign's history. |
 
 ### Inverse model
 
