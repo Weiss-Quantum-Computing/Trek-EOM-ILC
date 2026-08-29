@@ -238,6 +238,27 @@ def scope_points_for(need):
     return next((p for p in SCOPE_PTS if p >= need), SCOPE_PTS[-1])
 
 
+def pd_channel(cfg=None):
+    """Scope channel carrying the photodiode, or None if there is no optical
+    readout wired.
+
+    A config key rather than a panel field on purpose: the optical campaign
+    comes and goes, and adding a widget would move the notebook's frames for
+    everyone else. Set it in config.json as "pd_channel", or override for one
+    session with EOMILC_PD_CH. When set, Measure FRF reads it alongside the
+    monitor and writes frf_<name>_PD.csv next to the usual one.
+    """
+    v = os.environ.get("EOMILC_PD_CH")
+    if v is None and cfg is not None:
+        v = cfg.get("pd_channel")
+    if v in (None, "", "none", "None"):
+        return None
+    ch = int(v)
+    if ch not in (1, 2, 3, 4):
+        raise ValueError(f"pd_channel must be 1-4, got {ch!r}")
+    return ch
+
+
 AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 16384))
 # 16384 is the 4063B's datasheet arb memory; this bench has only stored
 # 5301-point records so far, so the true ceiling is unprobed -- if a dense
@@ -2468,9 +2489,11 @@ class App:
             ok, switched_on = self._ensure_output_on(awg, awg_ch)
             if not ok:
                 return
-            H, coh = self._frf_capture(scope, awg_ch, scope_ch, bins,
-                                       t_grid, s.t_off, repeats, wait_s,
-                                       f_top=bins[-1] / rec)
+            pd_ch = pd_channel(self.cfg)
+            res = self._frf_capture(scope, awg_ch, scope_ch, bins,
+                                    t_grid, s.t_off, repeats, wait_s,
+                                    f_top=bins[-1] / rec, aux_ch=pd_ch)
+            H, coh = res["mon"]
             f_hz = bins / rec
             path = os.path.join(RUN_DIR, f"frf_{name}.csv")
             write_frf_csv(path, f_hz, H, coh)
@@ -2479,6 +2502,21 @@ class App:
             print(f"  {len(bins)} tones, {good} with coherence >= 0.9; "
                   f"|H| {np.abs(H).max():.4f} max, "
                   f"{np.abs(H).min():.4f} min")
+            if res["aux"] is not None:
+                Hp, cohp = res["aux"]
+                ppath = os.path.join(RUN_DIR, f"frf_{name}_PD.csv")
+                write_frf_csv(ppath, f_hz, Hp, cohp)
+                ratio = np.abs(Hp / H)
+                band = f_hz <= 40e3
+                flat = (float(np.ptp(ratio[band]) / np.mean(ratio[band]))
+                        if band.any() else float("nan"))
+                lag = np.rad2deg(np.angle(Hp / H))
+                print(f"wrote {ppath}   (photodiode on CH{pd_ch})")
+                print(f"  MONITOR FIDELITY  |H_pd/H_mon| varies "
+                      f"{100*flat:.2f}% to 40 kHz, phase "
+                      f"{np.min(lag[band]):+.1f} to {np.max(lag[band]):+.1f} deg")
+                print(f"  gate: flat within 2% and 3 deg. Structure here means "
+                      f"the monitor is NOT the electrode voltage.")
             if fmax_now and fmax_now > f_hz[-1] + 1:
                 print(f"note: 'taper to zero at' is {fmax_now/1e3:g} kHz but "
                       f"the measurement stops at {f_hz[-1]/1e3:.1f} kHz -- "
@@ -2524,12 +2562,27 @@ class App:
             print("instruments closed")
 
     def _frf_capture(self, scope, drive_ch, mon_ch, bins, t_grid, t_off,
-                     repeats, wait_s, settle=0.5, f_top=None):
-        """Per shot: read BOTH the drive and the monitor from the same
-        acquisition (the record is frozen between :SINGle and run), put
-        them on the record grid, and take H = Y/U at the probe's tone
-        bins. H is averaged over shots -- not the traces -- so the
-        shot-to-shot scatter of H itself is the coherence estimate."""
+                     repeats, wait_s, settle=0.5, f_top=None,
+                     aux_ch=None, window=None):
+        """Per shot: read the drive, the monitor and optionally a third
+        channel from the same acquisition (the record is frozen between
+        :SINGle and run), put them on the record grid, and take H = Y/U at
+        the probe's tone bins. H is averaged over shots -- not the traces --
+        so the shot-to-shot scatter of H itself is the coherence estimate.
+
+        aux_ch: the photodiode. Its H is computed against the same drive, so
+        H_aux / H_mon is the monitor-fidelity ratio the optical campaign is
+        built on -- and because it is a ratio, anything common to both (the
+        drive's own shape, the analyser being a few degrees off quadrature,
+        the taper's leakage) divides straight out.
+
+        window: (i0, i1) analysis window on the record grid, for a ramped probe
+        where only the hold carries the multitone. The tone bins MUST then be
+        integer over i1-i0 rather than over the whole record -- that is what
+        keeps the analysis leak-free, and tone_bins/ramped_multitone in
+        tools.sysid_make size them that way. Returns a dict:
+        {"mon": (H, coh), "aux": (H, coh) or None}.
+        """
         time.sleep(settle)
         # ask the scope for a readout dense enough for the band -- its
         # unprompted default is 5000 points whatever the window
@@ -2542,7 +2595,9 @@ class App:
             pts = scope_points_for(6.0 * f_top * win)
             print(f"scope readout: {pts} points over the {win*1e3:.3g} ms "
                   f"window for the {f_top/1e3:.0f} kHz band")
-        Hs = []
+        Hs, Ha = [], []
+        sl = (slice(None) if window is None
+              else slice(int(window[0]), int(window[1])))
         self.msgs.put(("progress", 0, repeats))
         for i in range(repeats):
             if self.stop_evt.is_set():
@@ -2553,6 +2608,8 @@ class App:
                                    f"repeat {i+1} -- is the burst running?")
             tu, vu = scope.waveform(drive_ch, points=pts)
             ty, vy = scope.waveform(mon_ch, points=pts)
+            ta, va = (scope.waveform(aux_ch, points=pts)
+                      if aux_ch is not None else (None, None))
             scope.run()
             if i == 0 and f_top is not None:
                 # measured, not assumed: the scope's record must actually
@@ -2565,18 +2622,30 @@ class App:
                         f"Nyquist at {0.5/dt_sc/1e3:.0f} kHz, below the "
                         f"top tone ({f_top/1e3:.0f} kHz). Tighten the "
                         f"window or lower f hi.")
-            uu = scopeio.resample(tu, vu, t_grid, t_offset=t_off)
-            yy = scopeio.resample(ty, vy, t_grid, t_offset=t_off)
+            uu = scopeio.resample(tu, vu, t_grid, t_offset=t_off)[sl]
+            yy = scopeio.resample(ty, vy, t_grid, t_offset=t_off)[sl]
             U = np.fft.rfft(uu - uu.mean())
             Y = np.fft.rfft(yy - yy.mean())
             Hs.append(Y[bins] / U[bins])
+            if aux_ch is not None:
+                aa = scopeio.resample(ta, va, t_grid, t_offset=t_off)[sl]
+                Ha.append(np.fft.rfft(aa - aa.mean())[bins] / U[bins])
             self.msgs.put(("progress", i + 1, repeats))
         self.msgs.put(("progress", 0, 1))
-        Hs = np.asarray(Hs)
-        H = Hs.mean(axis=0)
-        coh = np.clip(1 - (np.abs(Hs - H).std(axis=0) / np.abs(H)) ** 2,
-                      0, 1)
-        return H, coh
+
+        def reduce(stack):
+            stack = np.asarray(stack)
+            h = stack.mean(axis=0)
+            # NOT a cross-spectral coherence: this is the shot-to-shot scatter
+            # of H itself, which reads ~1 for any repeatable systematic. For
+            # "does the light follow the monitor" use
+            # eomilc.polarimetry.coherence_ensemble on inverted volts instead.
+            c = np.clip(1 - (np.abs(stack - h).std(axis=0) / np.abs(h)) ** 2,
+                        0, 1)
+            return h, c
+
+        return {"mon": reduce(Hs),
+                "aux": reduce(Ha) if aux_ch is not None else None}
 
     def _adopt_frf(self, path):
         """Main thread: point the FRF field at the fresh measurement and
@@ -2607,16 +2676,34 @@ class App:
         return True, True
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
-                       settle=0.5, native_path=None):
+                       settle=0.5, native_path=None, aux=(), aux_store=None):
         """ilc_bench.capture with a progress bar and a stop check between
         shots. The settle wait happens once, after the new upload.
 
         native_path: also save the repeat average at the SCOPE's own sample
         rate (npz, t = waveform time, y = monitor V) -- the boxcar
         decimation onto t_grid discards everything past the grid Nyquist,
-        and this file is the only way to get it back after the fact."""
+        and this file is the only way to get it back after the fact.
+
+        aux: extra scope channels to read alongside the monitor -- the
+        photodiode for the optical campaign. They are read from the SAME
+        frozen acquisition as the monitor, between :SINGle and run(), so the
+        traces are simultaneous and can be cross-correlated; separate
+        triggers would quietly destroy exactly that. Every shot is kept
+        rather than averaged, because the ensemble std is the shot-to-shot
+        error ILC cannot learn and averaging inside the capture throws it
+        away (see eomilc.polarimetry).
+
+        aux_store: a dict the caller passes in and gets filled with
+        {"CH<n>": (repeats, len(t_grid))} for the monitor AND every aux
+        channel. Filling a caller's dict rather than changing the return
+        type keeps the ILC loop's `y = self._bench_capture(...)` untouched.
+        """
         time.sleep(settle)
         traces = []
+        aux = tuple(aux)
+        stacks = {f"CH{c}": [] for c in (ch,) + aux} if (aux or
+                                                         aux_store is not None) else None
         t_nat, y_nat = None, 0.0
         # denser than the scope's 5000-point default: >= 2 samples per grid
         # step keeps the anti-alias boxcar honest, and a kept native
@@ -2633,8 +2720,15 @@ class App:
                 raise RuntimeError(f"no trigger within {wait_s:g} s on repeat "
                                    f"{i+1} -- is the burst running?")
             ts, vs = scope.waveform(ch, points=pts)
+            extra = [(c, *scope.waveform(c, points=pts)) for c in aux]
             scope.run()
-            traces.append(scopeio.resample(ts, vs, t_grid, t_offset=t_off))
+            y_mon = scopeio.resample(ts, vs, t_grid, t_offset=t_off)
+            traces.append(y_mon)
+            if stacks is not None:
+                stacks[f"CH{ch}"].append(y_mon)
+                for c, ta, va in extra:
+                    stacks[f"CH{c}"].append(
+                        scopeio.resample(ta, va, t_grid, t_offset=t_off))
             if native_path is not None:
                 if t_nat is None:            # repeats share the scope
                     t_nat = np.asarray(ts, float)   # config; align a stray
@@ -2648,6 +2742,12 @@ class App:
             print(f"  native-rate average kept: {os.path.basename(native_path)}"
                   f" ({len(t_nat)} pts, dt "
                   f"{np.median(np.diff(t_nat))*1e9:.0f} ns)")
+        if stacks is not None and aux_store is not None:
+            aux_store.update({k: np.asarray(v, float)
+                              for k, v in stacks.items()})
+            if aux:
+                print(f"  kept {repeats} shots on "
+                      f"{', '.join(sorted(stacks))} for the ensemble split")
         return ilc.averaged(traces)
 
     # ---------------------------------------------------------------- plots

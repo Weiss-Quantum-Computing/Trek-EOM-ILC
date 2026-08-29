@@ -257,16 +257,29 @@ def verify_alignment(scope, drive_ch, u, t_grid, t_off, wait_s):
           f"t-offset {t_off*1e6:+.1f} us -- OK")
 
 
-def capture(scope, channels, mon_col, t_grid, t_offset,
-            repeats=64, wait_s=30.0, points=None, settle=0.5):
-    """Take `repeats` single shots and average them on the waveform grid.
+def capture_all(scope, channels, t_grid, t_offset,
+                repeats=64, wait_s=30.0, points=None, settle=0.5):
+    """Take `repeats` single shots and return EVERY channel, un-averaged.
+
+    Returns {"CH<n>": (repeats, len(t_grid)) array}.  Handing back the stack
+    rather than the mean is what makes the optical campaign possible: the
+    ensemble MEAN is the repeatable error ILC can learn and the ensemble STD is
+    the shot-to-shot part it structurally cannot, and collapsing to the mean
+    inside the capture throws the second one away.  See eomilc.polarimetry for
+    the split.  At 64 shots x 4 channels x a 5501-point grid the stack is a
+    few MB, which is not worth optimising away.
+
+    Every channel is read from the SAME frozen acquisition, between :SINGle and
+    run(), so the traces are simultaneous and can be cross-correlated.  Reading
+    them from separate triggers would silently destroy exactly that.
 
     The settle wait happens ONCE, not per shot -- it exists to let the chain
     settle after a new upload, and each shot already waits for its own trigger.
-    64 HRES singles at the 20 Hz trigger cost ~25 s, transfer included.
+    64 HRES singles at the 20 Hz trigger cost ~25 s for two channels, and
+    roughly scales with the channel count from there.
     """
     time.sleep(settle)
-    traces = []
+    out = {f"CH{ch}": [] for ch in channels}
     for i in range(repeats):
         got = scope.single(wait_s=wait_s)
         if got is not True:
@@ -277,9 +290,22 @@ def capture(scope, channels, mon_col, t_grid, t_offset,
             t, v = scope.waveform(ch, points=points)
             cols[f"CH{ch}"] = (t, v)
         scope.run()
-        t_src, v_src = cols[mon_col]
-        traces.append(scopeio.resample(t_src, v_src, t_grid, t_offset=t_offset))
-    return ilc.averaged(traces)
+        for col, (t_src, v_src) in cols.items():
+            out[col].append(scopeio.resample(t_src, v_src, t_grid,
+                                             t_offset=t_offset))
+    return {col: np.asarray(rows, float) for col, rows in out.items()}
+
+
+def capture(scope, channels, mon_col, t_grid, t_offset,
+            repeats=64, wait_s=30.0, points=None, settle=0.5):
+    """The averaged monitor trace -- what the ILC loop iterates on.
+
+    A thin wrapper over `capture_all`; reach for that one when you want the
+    other channels or the shot-to-shot spread.
+    """
+    stacks = capture_all(scope, channels, t_grid, t_offset, repeats=repeats,
+                         wait_s=wait_s, points=points, settle=settle)
+    return ilc.averaged(list(stacks[mon_col]))
 
 
 # -------------------------------------------------------------------- main

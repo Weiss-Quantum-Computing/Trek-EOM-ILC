@@ -1,11 +1,12 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-43 numbered checks: state round-trips, the span guard, the model ladder,
+46 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
 probe + measurement maths + overlay viewer, the iteration
-table, dot density, linked time axes. No instruments are touched --
+table, dot density, linked time axes, and the multi-channel capture the
+optical campaign rides on. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; screenshots of every tab land in the
 scratch folder for eyeballing.
@@ -696,8 +697,10 @@ class _FrfScope:
     def run(self): pass
 
 app.stop_evt.clear()
-H_m, coh_m = app._frf_capture(_FrfScope(), 1, 3, bins, sN.t, sN.t_off,
-                              repeats=3, wait_s=1, settle=0)
+_res = app._frf_capture(_FrfScope(), 1, 3, bins, sN.t, sN.t_off,
+                        repeats=3, wait_s=1, settle=0)
+H_m, coh_m = _res["mon"]
+assert _res["aux"] is None, "no aux channel was asked for"
 assert np.allclose(H_m, Htrue[bins], rtol=1e-6), \
     f"fitted H off by {np.abs(H_m - Htrue[bins]).max():.2e}"
 assert np.all(coh_m > 0.999), "identical shots must cohere"
@@ -725,7 +728,7 @@ class _CoarseScope(_DenseScope):     # a 2 us record cannot carry 500 kHz
 
 HD, cohD = app._frf_capture(_DenseScope(), 1, 3, bins_d, tD, sN.t_off,
                             repeats=2, wait_s=1, settle=0,
-                            f_top=bins_d[-1] / recD)
+                            f_top=bins_d[-1] / recD)["mon"]
 HtrueD = 1.0 / (1.0 + 2j * np.pi * (bins_d / recD) * tau_p)
 assert np.allclose(HD, HtrueD, rtol=1e-6), \
     f"dense-grid H off by {np.abs(HD - HtrueD).max():.2e}"
@@ -871,6 +874,80 @@ print(f"[43] FRF edge guard: OFF by default; opt-in auto "
       f"100-150k taper; terminal ringing x{ring_off/ring_on:.0f} down, a "
       f"200 us-from-end transient passes at {p_on/p_off:.2f}, idle trim "
       f"intact (corr[0] {cC[0]*1e3:.2f} vs mid {cC[nT//2]*1e3:.2f} mV)")
+
+# ---- multi-channel capture for the optical campaign -------------------------
+# The photodiode rides along on the monitor's own acquisition. What these
+# checks protect is that every channel comes from the SAME frozen shot (so the
+# traces can be cross-correlated) and that the per-shot stack survives instead
+# of being averaged away inside the capture -- the ensemble std IS the
+# shot-to-shot error ILC cannot learn.
+import ilc_bench                                             # noqa: E402
+from eomilc import polarimetry as pol                        # noqa: E402
+
+nMC = len(sN.t)
+_shot = {"i": 0}
+
+class _MultiScope:
+    """CH1 drive, CH3 monitor, CH2 a photodiode carrying half the monitor
+    plus a shot-dependent offset, so a collapsed stack is detectable."""
+    def single(self, wait_s=None):
+        _shot["i"] += 1
+        return True
+    def waveform(self, ch, **kw):
+        base = {1: u_p, 3: y_p}.get(ch, 0.5 * y_p + 0.01 * _shot["i"])
+        return (sN.t + sN.t_off, base)
+    def run(self): pass
+    def get(self, q): raise RuntimeError("no scope settings in the fake")
+
+_shot["i"] = 0
+stacks = ilc_bench.capture_all(_MultiScope(), [1, 3, 2], sN.t, sN.t_off,
+                               repeats=5, wait_s=1, settle=0)
+assert set(stacks) == {"CH1", "CH2", "CH3"}, stacks.keys()
+assert all(v.shape == (5, nMC) for v in stacks.values()), \
+    {k: v.shape for k, v in stacks.items()}
+ens = pol.ensemble(stacks["CH2"])
+assert ens.n == 5 and ens.std.max() > 1e-3, \
+    "the per-shot spread was averaged away inside capture_all"
+_shot["i"] = 0
+y_only = ilc_bench.capture(_MultiScope(), [1, 3, 2], "CH3", sN.t, sN.t_off,
+                           repeats=5, wait_s=1, settle=0)
+assert np.allclose(y_only, y_p, atol=1e-9), \
+    "the ILC loop's averaged monitor trace changed"
+print(f"[44] capture_all: 3 channels x 5 shots kept "
+      f"({stacks['CH2'].shape}), ensemble std {ens.std.mean():.4f} V "
+      f"survives; capture() still returns the averaged monitor unchanged")
+
+_shot["i"] = 0
+aux_store = {}
+app.stop_evt.clear()
+y_mon = app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=4,
+                           wait_s=1, settle=0, aux=(2,), aux_store=aux_store)
+assert np.allclose(y_mon, y_p, atol=1e-9), "aux capture perturbed the monitor"
+assert set(aux_store) == {"CH2", "CH3"} and aux_store["CH2"].shape == (4, nMC)
+_shot["i"] = 0
+y_plain = app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=4,
+                             wait_s=1, settle=0)
+assert np.allclose(y_plain, y_mon, atol=1e-12), \
+    "the no-aux path must be bit-identical to before"
+print(f"[45] _bench_capture aux: CH2 stack {aux_store['CH2'].shape} filled, "
+      f"monitor return bit-identical with and without aux")
+
+app.stop_evt.clear()
+_res2 = app._frf_capture(_MultiScope(), 1, 3, bins, sN.t, sN.t_off,
+                         repeats=3, wait_s=1, settle=0, aux_ch=2)
+H_mon2, _ = _res2["mon"]
+H_pd, _ = _res2["aux"]
+ratio = np.abs(H_pd / H_mon2)
+assert np.allclose(ratio, 0.5, rtol=1e-6), \
+    f"H_pd/H_mon should be the fake's 0.5, got {ratio.min():.4f}..{ratio.max():.4f}"
+nw = len(sN.t) // 4
+_res3 = app._frf_capture(_MultiScope(), 1, 3,
+                         np.arange(2, 20), sN.t, sN.t_off, repeats=2,
+                         wait_s=1, settle=0, aux_ch=2, window=(0, nw))
+assert _res3["aux"] is not None and len(_res3["mon"][0]) == 18
+print(f"[46] _frf_capture aux: H_pd/H_mon flat at {ratio.mean():.4f} "
+      f"(the fake's 0.5); hold-window analysis accepted over "
+      f"{nw} of {len(sN.t)} samples")
 
 # screenshot each tab for visual inspection
 root.geometry("1380x880+40+40")
