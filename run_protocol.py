@@ -165,7 +165,7 @@ def _a2_ranges(lo=-60.0, hi=0.0, step=RANGE_STEP_DB):
     return [lo + i * step for i in range(n)]
 
 
-def _a2_navg(span, target_s, floor_navg):
+def _navg_for_span(span, target_s, floor_navg):
     """NAVG for a target averaging time at this span.
 
     T_rec spans three decades across the codes a range map is worth taking at -
@@ -188,7 +188,7 @@ def make_a2(spans=(11,), lo=-60.0, hi=0.0, step=RANGE_STEP_DB,
     """
     traces = []
     for sp in spans:
-        navg = _a2_navg(sp, target_s, floor_navg)
+        navg = _navg_for_span(sp, target_s, floor_navg)
         for r in _a2_ranges(lo, hi, step):
             tag = f"s{sp}_rng{r:+.0f}".replace("+", "p").replace("-", "m")
             traces.append(TraceSpec(span=sp, label=tag, filter_id="none",
@@ -201,6 +201,30 @@ def make_a2(spans=(11,), lo=-60.0, hi=0.0, step=RANGE_STEP_DB,
                 "what says whether a segment's pinned range was sensitive "
                 "enough - and confirms the 2 dB range grid.",
         navg=max((t.navg for t in traces), default=20), traces=traces)
+
+
+def make_a3(spans=(9, 11, 13), target_s=8.0, floor_navg=4):
+    """Span-independence, over a chain of spans.
+
+    Adjacent spans are what get compared, each in its own overlap, because a
+    wide span has almost no bins inside a narrow one's band: span 13 tops out
+    at 1562 Hz and span 19's bins are 250 Hz apart, so that pair shares about
+    five bins and every one of them sits on a mains harmonic. A chain with
+    intermediate spans gives each comparison a real band; skipping rungs does
+    not test the ends, it just fails to test anything.
+    """
+    return MeasurementSet(
+        name="A3", title="A3_spanindep", range_policy="worst-case",
+        purpose="One source across a chain of spans. A power spectral density "
+                "is span-independent by construction, so any span dependence "
+                "here is an artefact of the analyser or of the record length - "
+                "and would forge a false slope in a spliced trace.",
+        navg=100,
+        traces=[TraceSpec(span=sp, label=f"span{sp}",
+                          filter_id="none",
+                          navg=_navg_for_span(sp, target_s, floor_navg),
+                          note=f"{span_hz(sp):g} Hz span")
+                for sp in spans])
 
 
 BUILTIN_SETS = {
@@ -225,21 +249,7 @@ BUILTIN_SETS = {
                            "below that before fitting"),
         ]),
     "A2": make_a2(),
-    "A3": MeasurementSet(
-        name="A3", title="A3_spanindep", range_policy="worst-case",
-        purpose="One resistor across three spans. A power spectral density is "
-                "span-independent by construction, so any span dependence here "
-                "is an artefact of the analyser or of the record length - and "
-                "would forge a false slope in a spliced trace.",
-        navg=100,
-        traces=[
-            TraceSpec(span=9, label="span9_97Hz", filter_id="none",
-                      note="97.5 Hz span"),
-            TraceSpec(span=11, label="span11_390Hz", filter_id="none",
-                      note="390 Hz span"),
-            TraceSpec(span=13, label="span13_1k56", filter_id="none",
-                      note="1.56 kHz span"),
-        ]),
+    "A3": make_a3(),
     "C1": MeasurementSet(
         name="C1", title="C1_rangestep", range_policy="per-trace",
         purpose="Range-step pairs: each band taken at its working range and "
@@ -554,8 +564,16 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
             if spec.prompt:
                 confirm(f"\n>>> {spec.prompt}, then press Enter "
                         f"(Ctrl-C to stop): ")
-            an.put(f"SPAN {spec.span}")
-            an.put(f"STRF {spec.strf:.10g}")
+            # Through write_settings, not a raw put: a SPAN write silently
+            # reinstalls that span's default overlap, so this line used to
+            # undo the preset's OVLP 0 on every trace whose span default is
+            # not already zero. Measured 31 Aug: the A3 chain came back with
+            # 0.5, 3.2 and 37 independent records at spans 11, 13 and 15 while
+            # spans 17 and 19 - whose defaults ARE zero - looked clean. It also
+            # routes the write through command(), so an analyzer that wants the
+            # graph-indexed spelling of SPAN or STRF gets it.
+            an.write_settings({"SPAN": spec.span,
+                               "STRF": f"{spec.strf:.10g}"})
 
             want = pinned_range_for(mset, spec)
             if want is not None:
@@ -763,9 +781,13 @@ def main(argv=None):
     ap.add_argument("--a2-range", default=None,
                     help="lo,hi[,step] in dBV for the A2 range map "
                          "(default -60,0,2)")
-    ap.add_argument("--a2-target-s", type=float, default=8.0,
-                    help="averaging seconds per A2 trace, which sets NAVG per "
-                         "span (default 8)")
+    ap.add_argument("--a3-spans", default=None,
+                    help="comma-separated span codes for the A3 chain, e.g. "
+                         "11,13,15,17,19 (default 9,11,13). Adjacent spans are "
+                         "what get compared, so leave no wide gaps")
+    ap.add_argument("--target-s", type=float, default=8.0,
+                    help="averaging seconds per trace for the A2 and A3 sets, "
+                         "which sets NAVG per span (default 8)")
     ap.add_argument("--v-dc", type=float, default=None,
                     help="photodiode DC level in volts, written into the "
                          "manifest so rin.rin() has something to divide by. "
@@ -793,8 +815,13 @@ def main(argv=None):
         print("\n--set <name> --dry-run for the full plan.")
         return 0
 
+    if args.set_name == "A3" and (args.a3_spans or args.target_s != 8.0):
+        spans = ([int(x) for x in args.a3_spans.split(",")]
+                 if args.a3_spans else (9, 11, 13))
+        BUILTIN_SETS["A3"] = make_a3(spans=spans, target_s=args.target_s)
+
     if args.set_name == "A2" and (args.a2_spans or args.a2_range
-                                  or args.a2_target_s != 8.0):
+                                  or args.target_s != 8.0):
         spans = ([int(x) for x in args.a2_spans.split(",")]
                  if args.a2_spans else (11,))
         lo, hi, step = -60.0, 0.0, RANGE_STEP_DB
@@ -804,7 +831,7 @@ def main(argv=None):
             if len(parts) > 2:
                 step = parts[2]
         BUILTIN_SETS["A2"] = make_a2(spans=spans, lo=lo, hi=hi, step=step,
-                                     target_s=args.a2_target_s)
+                                     target_s=args.target_s)
 
     mset = BUILTIN_SETS.get(args.set_name)
     if mset is None:
