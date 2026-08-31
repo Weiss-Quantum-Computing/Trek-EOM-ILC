@@ -210,6 +210,46 @@ finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+# --------------------------------------------------- 7. the V_DC entry points
+print("\n--- V_DC plumbing ---")
+
+ok("run_set takes a scope channel and a coarse scale",
+   {"scope_ch", "scope_addr", "vdc_scale"}
+   <= set(rp.run_set.__code__.co_varnames))
+ok("read_vdc and open_scope exist for it",
+   callable(rp.read_vdc) and callable(rp.open_scope))
+
+
+class RefusingBench:
+    """ilc_bench stand-in whose scope will not make the measurement."""
+    @staticmethod
+    def measure_vdc(scope, channel, coarse_scale=1.0, log=print):
+        raise RuntimeError(f"CH{channel} gave no DC reading")
+
+
+v, detail = rp.read_vdc(RefusingBench, object(), 1, 1.0, log=lambda m: None)
+ok("a refused V_DC returns None rather than a number",
+   v is None and "error" in detail, f"{v!r}")
+
+
+class WorkingBench:
+    @staticmethod
+    def measure_vdc(scope, channel, coarse_scale=1.0, log=print):
+        return 1.85, {"used": "fine", "channel": channel}
+
+
+v, detail = rp.read_vdc(WorkingBench, object(), 3, 1.0, log=lambda m: None)
+ok("a good V_DC comes back with its provenance",
+   v == 1.85 and detail["used"] == "fine", f"{v} {detail}")
+
+# The drift arithmetic the runner reports: RIN goes as 1/V_DC^2.
+start, end = 1.850, 1.887
+drift = 100.0 * (end / start - 1.0)
+ok("a 2% level drift is 4% on every RIN in the set",
+   abs(2 * drift - 4.0) < 0.05, f"{drift:+.2f}% level, {2 * drift:+.2f}% RIN")
+
+
 # ------------------------------------------------ 6. the span table agreement
 print("\n--- span table ---")
 

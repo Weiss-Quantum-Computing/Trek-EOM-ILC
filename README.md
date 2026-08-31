@@ -357,7 +357,45 @@ and every `open_resource` then returns `VI_ERROR_ALLOC`. `find_spectrum_grab()`
 locates `sr760.py` the way `find_scope_grab()` locates `scope_grab.py`, with a
 `SPECTRUM_GRAB` env override.
 
-`tests/test_protocol.py` is 49 offline checks: the timing model against the two
+### V_DC from the MSO-X
+
+```
+python run_protocol.py --set C --scope-ch 3 --outdir run/protocol
+```
+
+RIN is `S_V / V_DC^2`, so the DC level squares straight into every answer: a
+V_DC 5% wrong makes every RIN in the campaign 10% wrong. `--scope-ch` measures
+it on the scope instead of taking it off the front panel. `--v-dc` still works
+and overrides the scope.
+
+`ilc_bench.measure_vdc` does the reading, and the awkward part is that **V_DC
+has to be measured DC-coupled**, which is the opposite of the noise capture's
+configuration - a channel left AC-coupled at 10 mV/div has the DC level a long
+way off screen, where the scope returns `9.9E+37` rather than a voltage. So it
+snapshots the channel, forces DC coupling and a scale wide enough to find the
+level, and restores coupling, scale, offset and display state afterwards,
+whatever happened in between.
+
+Two passes, because one is not enough on an 8-bit scope. The coarse pass at
+`--vdc-scale` per division (default 1 V) finds the level to about a division;
+the fine pass then offsets it to mid screen and drops to a twentieth of the
+scale, turning a level measured against 8 V of full scale into one measured
+against a few hundred millivolts. Measured on a simulated 8-bit scope: 0.3%
+from the coarse pass alone, 0.03% after the refinement. The fine reading is
+accepted only if it agrees with the coarse one to 5% - if it does not, the fine
+pass has almost certainly pushed the trace off screen, and the coarse value is
+returned with a note saying so. `9.9E+37` is never returned as a voltage, and a
+level that is off screen even at the coarse scale raises rather than guessing.
+
+The level is read before the traces and again after, and both go in the
+manifest with the drift between them. RIN goes as `1/V_DC^2`, so the runner
+reports the drift doubled - a level that moved 2% moved every RIN in the set by
+4% - and says plainly when that is more than 2%.
+
+The scope is opened through `ilc_bench.make_scope` on `_shared_rm`, the same
+ResourceManager as the analyser. This is the pairing that RM exists for.
+
+`tests/test_protocol.py` is 54 offline checks: the timing model against the two
 figures the protocol was costed with, the set definitions, and a manifest round
 trip through `rin.splice_segments`.
 

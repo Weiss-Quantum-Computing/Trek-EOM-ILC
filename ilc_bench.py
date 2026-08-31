@@ -424,6 +424,121 @@ def scope_apply(scope, setup):
         raise RuntimeError(f"the scope rejected the noise setup: {'; '.join(errs)}")
 
 
+# Keysight returns this from a measurement it could not make - most often
+# because the trace is off screen. It is a number, and a number divided into a
+# PSD gives a RIN of about zero, so it has to be caught rather than propagated.
+MEAS_INVALID = 9.9e37
+
+
+def _measure(scope, scpi):
+    """One measurement query. Scope.get/try_get cannot carry arguments - they
+    append '?' to the root - and every :MEASure: query needs a source, so this
+    goes through the session directly."""
+    return float(scope.inst.query(scpi))
+
+
+def measure_vdc(scope, channel, coarse_scale=1.0, settle=0.4, repeats=3,
+                min_scale=0.002, tol=0.05, log=print):
+    """The DC level on one scope channel, in volts, leaving the scope as found.
+
+    RIN is S_V / V_DC^2, so this number squares straight into the answer: a
+    V_DC 5% wrong makes every RIN in the campaign 10% wrong. It is worth doing
+    properly rather than reading off the front panel.
+
+    **It has to be measured DC-coupled**, which is the opposite of the noise
+    capture's configuration - and a channel left AC-coupled at 10 mV/div has
+    the DC level a long way off screen, where the scope returns 9.9E+37 rather
+    than a voltage. So this snapshots the channel, forces DC coupling and a
+    scale wide enough to find the level, and restores everything afterwards.
+
+    Two passes, because one is not enough on an 8-bit scope. The coarse pass at
+    `coarse_scale` per division finds the level to about a division; the fine
+    pass then puts the offset at minus that level, so the trace sits at mid
+    screen, and drops the scale to a twentieth of it. That turns a level
+    measured against 8 V of full scale into one measured against a few hundred
+    millivolts. The fine reading is only accepted if it agrees with the coarse
+    one to `tol`; if it does not, the fine pass has almost certainly pushed the
+    trace off screen, and the coarse value is returned with a note.
+
+    Returns (volts, detail) where detail is a dict for the metadata.
+    """
+    saved = scope_snapshot(scope, [channel])
+    shown = scope.try_get(f":CHANnel{channel}:DISPlay")
+    was_running = scope.is_running()
+    detail = {"channel": channel, "coarse_scale": coarse_scale}
+    try:
+        scope.put(f":CHANnel{channel}:DISPlay", 1)
+        scope_apply(scope, {channel: {"coupling": "DC",
+                                      "scale": coarse_scale, "offset": 0.0}})
+        scope.run()
+        time.sleep(settle)
+        coarse = _read_vavg(scope, channel, repeats)
+        detail["coarse_v"] = coarse
+        if coarse is None:
+            raise RuntimeError(
+                f"CH{channel} gave no DC reading at {coarse_scale:g} V/div - "
+                f"the trace is off screen, or the channel has no signal. Raise "
+                f"coarse_scale.")
+
+        # Fine pass: centre the level and zoom in on what is left.
+        fine_scale = max(abs(coarse) / 20.0, min_scale)
+        scope_apply(scope, {channel: {"coupling": "DC", "scale": fine_scale,
+                                      "offset": -coarse}})
+        time.sleep(settle)
+        fine = _read_vavg(scope, channel, repeats)
+        detail["fine_scale"] = fine_scale
+        detail["fine_v"] = fine
+
+        if fine is None:
+            detail["used"] = "coarse"
+            detail["note"] = "the fine pass read nothing; coarse value used"
+            log(f"       V_DC CH{channel} = {coarse:.6g} V (coarse only - the "
+                f"fine pass at {fine_scale:g} V/div read nothing)")
+            return coarse, detail
+        # The offset is subtracted on screen, so the fine pass measures the
+        # residual about it; the level is the two added back together.
+        fine_abs = coarse + fine
+        detail["fine_absolute_v"] = fine_abs
+        if abs(fine_abs - coarse) > tol * max(abs(coarse), 1e-9):
+            detail["used"] = "coarse"
+            detail["note"] = (f"fine pass disagreed by "
+                              f"{100 * (fine_abs / coarse - 1):+.1f}%, which "
+                              f"usually means it went off screen; coarse used")
+            log(f"       V_DC CH{channel} = {coarse:.6g} V  "
+                f"({detail['note']})")
+            return coarse, detail
+        detail["used"] = "fine"
+        log(f"       V_DC CH{channel} = {fine_abs:.6g} V "
+            f"(coarse {coarse:.4g} at {coarse_scale:g} V/div, refined at "
+            f"{fine_scale:.4g} V/div)")
+        return fine_abs, detail
+    finally:
+        scope_restore(scope, saved)
+        if shown is not None:
+            scope.put(f":CHANnel{channel}:DISPlay", shown)
+        if was_running:
+            scope.run()
+
+
+def _read_vavg(scope, channel, repeats):
+    """Median of `repeats` average-voltage readings, or None if the scope would
+    not make the measurement. The median rather than the mean so one refused
+    reading among several does not drag the answer."""
+    got = []
+    for _ in range(max(1, repeats)):
+        try:
+            v = _measure(scope,
+                         f":MEASure:VAVerage? DISPlay,CHANnel{channel}")
+        except Exception:
+            continue
+        if abs(v) < MEAS_INVALID / 10.0:
+            got.append(v)
+        time.sleep(0.05)
+    if not got:
+        return None
+    return float(sorted(got)[len(got) // 2])
+
+
 @contextlib.contextmanager
 def noise_capture(scope, setup, settle=0.5):
     """Put the scope into a noise configuration for the body, then put it back.

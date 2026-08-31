@@ -428,8 +428,45 @@ def load_segments(manifest_path, skip_suspect=True):
 
 # ------------------------------------------------------------------ the run
 
+def open_scope(ilc_bench, siblings, addr=None, log=print):
+    """The MSO-X, on the SAME ResourceManager as the analyser.
+
+    This is the pairing the shared RM exists for: a second ResourceManager
+    half-loads on this machine and then fails every open_resource with
+    VI_ERROR_ALLOC, and the failure looks like 'no instrument found' rather
+    than like a VISA problem.
+    """
+    path = ilc_bench.find_scope_grab(siblings)
+    if not os.path.exists(path):
+        raise SystemExit(f"scope_grab.py not found at {path}\nClone "
+                         f"Weiss-Quantum-Computing/keysight-scope-grab beside "
+                         f"this repo, or set SCOPE_GRAB to the file.")
+    mod = ilc_bench.load_module(path, "scope_grab")
+    scope = ilc_bench.make_scope(mod)
+    log("Connecting to the MSO-X for V_DC...")
+    scope.connect(addr)
+    log(f"  {scope.idn}")
+    return scope
+
+
+def read_vdc(ilc_bench, scope, channel, coarse_scale, log=print):
+    """V_DC with the detail, or (None, {}) if the scope refuses it.
+
+    A failure here must not stop a measurement set: the traces are still worth
+    having, and V_DC can be supplied afterwards with --v-dc. What it must not
+    do is guess.
+    """
+    try:
+        return ilc_bench.measure_vdc(scope, channel,
+                                     coarse_scale=coarse_scale, log=log)
+    except Exception as exc:
+        log(f"    V_DC could not be measured: {exc}")
+        return None, {"error": str(exc)}
+
+
 def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
-            settle_recs=None, v_dc=None, confirm=input, log=print):
+            settle_recs=None, v_dc=None, scope_ch=None, scope_addr=None,
+            vdc_scale=1.0, confirm=input, log=print):
     """Take the whole set. Needs the instruments."""
     import ilc_bench                                        # noqa: E402
 
@@ -458,6 +495,20 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
     if bad:
         raise SystemExit(f"refusing to run: {bad}. Fix the averaging before "
                          f"taking noise data.")
+
+    # V_DC, if a scope channel was named. Measured before the traces and again
+    # after: RIN is S_V / V_DC^2, so the level squares straight into every
+    # answer, and a level that moved during the set moves all of them.
+    scope = None
+    vdc_start = vdc_end = None
+    vdc_detail = {}
+    if v_dc is None and scope_ch is not None:
+        scope = open_scope(ilc_bench, siblings, addr=scope_addr, log=log)
+        vdc_start, vdc_detail = read_vdc(ilc_bench, scope, scope_ch,
+                                         vdc_scale, log=log)
+        v_dc = vdc_start
+    elif v_dc is not None and scope_ch is not None:
+        log(f"--v-dc {v_dc:g} given, so the scope is not consulted.")
 
     entries = []
     pinned = None
@@ -537,7 +588,34 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
     finally:
         an.close()
 
-    man_path = write_manifest(outdir, mset, entries, stamp, pinned, recs)
+    drift_pct = None
+    if scope is not None:
+        try:
+            vdc_end, end_detail = read_vdc(ilc_bench, scope, scope_ch,
+                                           vdc_scale, log=log)
+            vdc_detail = {"start": vdc_detail, "end": end_detail}
+            if vdc_start and vdc_end:
+                drift_pct = 100.0 * (vdc_end / vdc_start - 1.0)
+                # RIN goes as 1/V_DC^2, so the level's drift doubles into it.
+                log(f"  V_DC drifted {drift_pct:+.2f}% across the set "
+                    f"({vdc_start:.6g} -> {vdc_end:.6g} V), which is "
+                    f"{2 * drift_pct:+.2f}% on every RIN in it.")
+                if abs(drift_pct) > 2.0:
+                    log("  *** That is more than 2%: the light level was not "
+                        "stable enough to treat one V_DC as covering the whole "
+                        "set. ***")
+        finally:
+            scope.close()
+
+    for entry in entries:
+        entry["v_dc_start"] = vdc_start
+        entry["v_dc_end"] = vdc_end
+        entry["v_dc_drift_pct"] = drift_pct
+        if entry.get("v_dc") is None:
+            entry["v_dc"] = vdc_start
+
+    man_path = write_manifest(outdir, mset, entries, stamp, pinned, recs,
+                              vdc_detail=vdc_detail)
     log(f"\n{len(entries)} trace(s); manifest {man_path}")
     return man_path, entries
 
@@ -575,7 +653,7 @@ def save_trace(sr, an, outdir, mset, spec, stamp, freqs, amps, snap, notes,
     return base + ".csv"
 
 
-def write_manifest(outdir, mset, entries, stamp, pinned, recs):
+def write_manifest(outdir, mset, entries, stamp, pinned, recs, vdc_detail=None):
     path = os.path.join(outdir, f"{mset.title}_{stamp}_manifest.json")
     n = 1
     while os.path.exists(path):
@@ -590,6 +668,10 @@ def write_manifest(outdir, mset, entries, stamp, pinned, recs):
             "range_policy": mset.range_policy,
             "pinned_range_dbv": pinned,
             "settle_record_lengths": recs,
+            # How V_DC was arrived at, kept because RIN divides by its square
+            # and "where did this number come from" is the first question of
+            # any RIN that looks wrong.
+            "v_dc_measurement": vdc_detail or {},
             "segments": entries,
         }, fh, indent=2)
     return path
@@ -613,8 +695,21 @@ def main(argv=None):
     ap.add_argument("--settle-recs", type=float, default=None,
                     help="settle in record lengths (default per set)")
     ap.add_argument("--v-dc", type=float, default=None,
-                    help="photodiode DC level, written into the manifest so "
-                         "rin.rin() has something to divide by")
+                    help="photodiode DC level in volts, written into the "
+                         "manifest so rin.rin() has something to divide by. "
+                         "Overrides --scope-ch: given this, the scope is not "
+                         "consulted.")
+    ap.add_argument("--scope-ch", type=int, default=None,
+                    help="MSO-X channel carrying the photodiode. Given this, "
+                         "V_DC is measured on the scope before and after the "
+                         "set, DC-coupled, and the drift between the two is "
+                         "recorded - RIN goes as 1/V_DC^2, so a level that "
+                         "moved 2%% moves every RIN in the set by 4%%.")
+    ap.add_argument("--scope-addr", default=None,
+                    help="VISA address of the MSO-X (default: scan USB)")
+    ap.add_argument("--vdc-scale", type=float, default=1.0,
+                    help="V/div for the coarse V_DC pass; raise it if the "
+                         "level is off screen at 1 V/div (default 1.0)")
     args = ap.parse_args(argv)
 
     if args.list or not args.set_name:
@@ -638,7 +733,9 @@ def main(argv=None):
         return 0
 
     run_set(mset, args.outdir, addr=args.addr, navg_override=args.navg,
-            settle_recs=args.settle_recs, v_dc=args.v_dc)
+            settle_recs=args.settle_recs, v_dc=args.v_dc,
+            scope_ch=args.scope_ch, scope_addr=args.scope_addr,
+            vdc_scale=args.vdc_scale)
     return 0
 
 
