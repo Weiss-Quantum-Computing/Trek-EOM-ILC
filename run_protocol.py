@@ -44,11 +44,15 @@ from eomilc import rin                                          # noqa: E402
 
 # The SR760's span table, code -> Hz. Duplicated from sr760.SPANS deliberately:
 # the planner has to work with no instrument code importable at all, and this is
-# a printed constant of the instrument rather than a shared implementation.
+# a constant of the instrument rather than a shared implementation.
 # `check_span_table` reconciles the two whenever sr760 IS importable.
-SPAN_HZ = (0.191, 0.382, 0.763, 1.5, 3.1, 6.1, 12.2, 24.4, 48.75, 97.5,
-           195.0, 390.0, 780.0, 1560.0, 3125.0, 6250.0, 12500.0, 25000.0,
-           50000.0, 100000.0)
+#
+# Every span is the widest halved, exactly. These used to be the manual's
+# rounded display figures - 390 for 390.625, 1560 for 1562.5 - which put a
+# 0.16 % error into every record length and everything costed from one. The
+# default overlaps measured on 31 Aug 2026 are exactly 93.75 % at code 13 and
+# 98.4375 % at code 11, which only comes out of the exact spans.
+SPAN_HZ = tuple(100000.0 / 2.0 ** (19 - i) for i in range(20))
 N_BINS = 400
 
 # Input range step. The SR760 sets IRNG in dBV on a 2 dB grid, so "two notches

@@ -44,8 +44,16 @@ for mod in ("ilc_bench", "pyvisa", "sr760", "pandas"):
 # ------------------------------------------------------------ 2. the clock
 print("\n--- the timing model ---")
 
-ok("record_time is bins/span", np.isclose(rp.record_time(11), 400 / 390.0),
+ok("record_time is bins/span", np.isclose(rp.record_time(11), 400 / 390.625),
    f"{rp.record_time(11):.4f} s")
+# Every span is the widest halved, exactly. The table used to hold the manual's
+# rounded display figures, which put 0.16 % into every record length.
+ok("the spans are exact halvings, not the printed roundings",
+   all(np.isclose(rp.SPAN_HZ[i], 100000.0 / 2 ** (19 - i)) for i in range(20)),
+   f"code 11 is {rp.SPAN_HZ[11]}, code 13 is {rp.SPAN_HZ[13]}")
+ok("... so a record length is a round binary number of seconds",
+   rp.record_time(11) == 1.024 and rp.record_time(13) == 0.256,
+   f"{rp.record_time(11)} and {rp.record_time(13)}")
 # The two figures the protocol was costed against.
 ok("100 averages at the 390 Hz span is ~102 s",
    abs(100 * rp.record_time(11) - 102.6) < 0.5,
