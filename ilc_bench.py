@@ -53,7 +53,7 @@ DAC mapping is identical on every iteration and the amplitude correction lands
 where it was meant to.
 """
 from __future__ import annotations
-import argparse, importlib.util, os, sys, time
+import argparse, contextlib, importlib.util, os, sys, time
 import numpy as np
 import pandas as pd
 
@@ -306,6 +306,117 @@ def capture(scope, channels, mon_col, t_grid, t_offset,
     stacks = capture_all(scope, channels, t_grid, t_offset, repeats=repeats,
                          wait_s=wait_s, points=points, settle=settle)
     return ilc.averaged(list(stacks[mon_col]))
+
+
+
+
+# ------------------------------------------------------- scope channel state
+#
+# A RIN capture and a polarimetry capture want opposite scope setups. RIN needs
+# AC coupling at the most sensitive V/div the signal allows, because the whole
+# measurement is a few hundred microvolts of noise riding on a volt or two of
+# DC, and on a DC-coupled 8-bit scope that noise lands inside one code. The
+# polarimetry captures need exactly the opposite: DC coupling, because the DC
+# level is what gets inverted to an angle, and AC coupling throws it away.
+#
+# So the noise setup has to be applied and then taken back off, and it has to
+# come back off even when the capture raises. That is the snapshot()/restore()
+# split bk4063b.py uses on the generator, kept deliberately in the same shape.
+
+# The per-channel settings a noise capture touches, as {key: SCPI root}. Only
+# these three, so restore() cannot reach further than the setup did.
+CHANNEL_STATE = {
+    "coupling": ":CHANnel{ch}:COUPling",
+    "scale": ":CHANnel{ch}:SCALe",
+    "offset": ":CHANnel{ch}:OFFSet",
+}
+
+
+def scope_snapshot(scope, channels):
+    """Capture enough per-channel state to put the scope back as it was.
+
+    Scoped to `channels` for the same reason bk4063b.snapshot takes a channel
+    list: restore() only rewrites what the snapshot holds, so scoping is how a
+    channel that is mid-measurement is guaranteed to be left alone.
+
+    A setting the scope declines to report comes back absent rather than
+    guessed, and restore() then leaves it where it is.
+    """
+    state = {"captured": time.strftime("%Y-%m-%dT%H:%M:%S"),
+             "instrument": getattr(scope, "idn", ""),
+             "channels": {}}
+    for ch in channels:
+        got = {}
+        for key, root in CHANNEL_STATE.items():
+            value = scope.try_get(root.format(ch=ch))
+            if value is not None:
+                got[key] = value
+        state["channels"][str(ch)] = got
+    return state
+
+
+def scope_restore(scope, state):
+    """Replay a `scope_snapshot`.
+
+    Coupling goes back first: switching from AC to DC moves the trace by the DC
+    level, and doing that after the offset has been restored would leave the
+    channel briefly off screen. Nothing here is destructive, but the order is
+    the same reasoning bk4063b.restore uses for its outputs.
+    """
+    for ch, got in state.get("channels", {}).items():
+        for key in ("coupling", "scale", "offset"):
+            if key in got:
+                scope.put(CHANNEL_STATE[key].format(ch=int(ch)), got[key])
+    errs = scope.errors()
+    if errs:
+        print(f"       scope complained while restoring: {'; '.join(errs)}")
+    return state
+
+
+def scope_apply(scope, setup):
+    """Apply {channel: {coupling/scale/offset: value}} to the scope.
+
+    Coupling is written first so the offset that follows is interpreted against
+    the coupling that will actually be in force.
+    """
+    for ch, want in setup.items():
+        for key in ("coupling", "scale", "offset"):
+            if key in want:
+                scope.put(CHANNEL_STATE[key].format(ch=int(ch)), want[key])
+    errs = scope.errors()
+    if errs:
+        raise RuntimeError(f"the scope rejected the noise setup: {'; '.join(errs)}")
+
+
+@contextlib.contextmanager
+def noise_capture(scope, setup, settle=0.5):
+    """Put the scope into a noise configuration for the body, then put it back.
+
+    Use it around `capture_all`:
+
+        setup = {3: {"coupling": "AC", "scale": 0.01, "offset": 0.0}}
+        with noise_capture(scope, setup):
+            stacks = capture_all(scope, [3], t_grid, t_off, repeats=64)
+
+    The restore runs on the way out however the body ended, which is the point
+    of doing it this way rather than as two calls: a capture that raises
+    half-way through must not leave the scope AC-coupled at 10 mV/div for the
+    next polarimetry run, where it would silently measure the wrong thing
+    rather than fail.
+
+    `settle` lets the AC coupling network charge before the first shot. The
+    high-pass is around 3.5 Hz on this scope, so a step takes a few hundred
+    milliseconds to leave the screen; triggering into that tail measures the
+    settling, not the noise.
+    """
+    saved = scope_snapshot(scope, list(setup))
+    scope_apply(scope, setup)
+    if settle > 0:
+        time.sleep(settle)
+    try:
+        yield saved
+    finally:
+        scope_restore(scope, saved)
 
 
 # -------------------------------------------------------------------- main

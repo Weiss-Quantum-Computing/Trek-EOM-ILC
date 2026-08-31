@@ -1,9 +1,17 @@
-"""Reader for the Agilent MSO-X 2014A CSV + TXT pairs produced by the capture script."""
+"""Reader for the Agilent MSO-X 2014A CSV + TXT pairs produced by the capture
+script, plus the auto-PSD the wideband noise work needs.
+
+pandas is imported inside `load` rather than at the top, and that is
+load-bearing rather than tidiness. `eomilc/__init__.py` imports this module, so
+a top-level `import pandas` made `import eomilc` fail outright on the system
+interpreter, which has numpy but no pandas -- taking `polarimetry` and `rin`
+down with it even though neither has ever needed pandas. Reading a scope CSV
+still needs it; nothing else here does.
+"""
 from __future__ import annotations
 import os, re
 from dataclasses import dataclass
 import numpy as np
-import pandas as pd
 
 
 @dataclass
@@ -51,6 +59,7 @@ def _read_header(txt_path: str) -> dict:
 
 def load(csv_path: str) -> Trace:
     """Load a capture. The .txt sidecar is picked up automatically if present."""
+    import pandas as pd                  # see the module docstring
     df = pd.read_csv(csv_path)
     t = df.iloc[:, 0].to_numpy(dtype=float)
     data = {c: df[c].to_numpy(dtype=float) for c in df.columns[1:]}
@@ -112,3 +121,184 @@ def find_trigger_offset(t: np.ndarray, y: np.ndarray, frac: float = 0.5) -> floa
     span = np.percentile(y, 99.5) - base
     i = int(np.argmax(y - base >= frac * span))
     return float(t[i])
+
+
+# ------------------------------------------------------------------ spectra
+#
+# The SR760 stops at 100 kHz, so the intensity servo's bump at 150-300 kHz is
+# invisible to it and has to come from the scope. For that comparison to mean
+# anything the two instruments have to be in the same units, which is what the
+# normalisation below is for: `psd` returns V^2/Hz and `Spectrum.asd` its square
+# root in V/rtHz, the SR760's own units. Agreement in the 30-95 kHz overlap,
+# where both instruments can see, is itself one of the validation tests.
+
+# Coefficients for the windows numpy does not ship. The same set the SR760
+# offers, so a scope PSD and an analyser trace can be taken through the same
+# window instead of being compared across two different ones.
+_COSINE_WINDOWS = {
+    # Blackman-Harris, 4-term, -92 dB sidelobes. The SR760 calls it BMH.
+    "bmh": (0.35875, 0.48829, 0.14128, 0.01168),
+    # Flat top, 5-term. Amplitude-accurate on a tone to ~0.01 dB, which is what
+    # it is for; an ENBW of 3.77 bins makes it a poor noise window.
+    "flattop": (0.21557895, 0.41663158, 0.277263158, 0.083578947, 0.006947368),
+}
+
+# numpy 2 renamed trapz to trapezoid and deprecated the old spelling; the bench
+# runs both vintages, so bind whichever is there once.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
+
+def window(name, n):
+    """One of the SR760's windows, as an array of `n` points.
+
+    Periodic rather than symmetric (scipy's `sym=False`): a spectrum treats the
+    record as one period of a repeating signal, and the symmetric form repeats
+    the endpoint, which puts a small step in every period and lifts the
+    sidelobes the window was chosen for.
+    """
+    name = (name or "hann").lower()
+    n = int(n)
+    if n < 1:
+        raise ValueError("a window needs at least one point")
+    if name in ("uniform", "boxcar", "rect", "none"):
+        return np.ones(n)
+    k = np.arange(n)
+    if name in _COSINE_WINDOWS:
+        w = np.zeros(n)
+        for i, ai in enumerate(_COSINE_WINDOWS[name]):
+            w += (-1) ** i * ai * np.cos(2.0 * np.pi * i * k / n)
+        return w
+    if name in ("hann", "hanning"):
+        return 0.5 - 0.5 * np.cos(2.0 * np.pi * k / n)
+    if name == "hamming":
+        return 0.54 - 0.46 * np.cos(2.0 * np.pi * k / n)
+    if name == "blackman":
+        return (0.42 - 0.5 * np.cos(2.0 * np.pi * k / n)
+                + 0.08 * np.cos(4.0 * np.pi * k / n))
+    raise ValueError(f"unknown window {name!r}; have uniform, hann, hamming, "
+                     f"blackman, bmh, flattop")
+
+
+def enbw_bins(w):
+    """Equivalent noise bandwidth of a window, in bins.
+
+    n sum(w^2) / (sum w)^2: 1.0 uniform, 1.5 Hann, 3.77 flat top. This is the
+    factor by which a window widens every bin, and dividing by sum(w^2) in
+    `psd` is exactly what takes it back out - which is why a density computed
+    that way does not depend on the window, while a peak-amplitude reading very
+    much does.
+    """
+    w = np.asarray(w, float)
+    s = w.sum()
+    return float(len(w) * np.sum(w ** 2) / (s * s)) if s else float("nan")
+
+
+@dataclass
+class Spectrum:
+    """A one-sided auto-PSD and what it is worth.
+
+    `n_avg` counts the spectra that went into the average; `n_indep` counts the
+    ones that did not share samples. Quote the error bar off `n_indep` - with
+    overlap the two differ, and `n_avg` is the flattering one.
+    """
+    f: np.ndarray                 # Hz
+    psd: np.ndarray               # V^2/Hz, one-sided
+    dt: float
+    n_avg: int
+    n_indep: float
+    window: str
+    enbw_bins: float
+    nperseg: int
+
+    @property
+    def asd(self) -> np.ndarray:
+        """V/rtHz - the SR760's own PSD units, for comparing the two."""
+        return np.sqrt(self.psd)
+
+    @property
+    def df(self) -> float:
+        """Bin spacing, Hz."""
+        return float(self.f[1] - self.f[0]) if len(self.f) > 1 else float("nan")
+
+    @property
+    def rel_err(self) -> float:
+        """1-sigma fractional error on a bin, 1/sqrt(n_indep)."""
+        return 1.0 / np.sqrt(self.n_indep) if self.n_indep > 0 else float("nan")
+
+    def band_power(self, lo, hi) -> float:
+        """Integrated V^2 in a band, by the trapezium rule on the density."""
+        sel = (self.f >= lo) & (self.f <= hi)
+        if sel.sum() < 2:
+            return float("nan")
+        return float(_trapz(self.psd[sel], self.f[sel]))
+
+    def band_rms(self, lo, hi) -> float:
+        """rms volts in a band."""
+        return float(np.sqrt(self.band_power(lo, hi)))
+
+
+def psd(x, dt, window_name="hann", detrend=True, nperseg=None, noverlap=0):
+    """One-sided auto-PSD in V^2/Hz, RMS-averaged over a shot stack.
+
+    `x` is one record, or the (n_shots, n_samples) stack `ilc_bench.capture_all`
+    already hands back. A stack is averaged in POWER across shots, which is the
+    RMS averaging the SR760 does and the estimator whose variance falls as 1/N.
+    Averaging the complex spectra instead would be vector averaging, which
+    suppresses everything not phase-locked to the trigger - which is exactly the
+    noise this exists to measure.
+
+    Normalisation is
+
+        S(f) = 2 |FFT(w x)|^2 / (fs sum(w^2))
+
+    with DC and, on an even-length record, Nyquist not doubled. Dividing by
+    sum(w^2) rather than (sum w)^2 is the ENBW correction: it makes sum(S) df
+    equal mean(x^2), so the result is a density that does not depend on which
+    window it was taken through. `polarimetry.band_rms` computes the same total
+    a different way and agrees, which is worth keeping true.
+
+    `nperseg` splits each record before averaging, trading resolution for
+    variance - 5501 points at 2 MS/s is a single 363 Hz bin, and the servo bump
+    is worth more averaging than that. `noverlap` overlaps the segments, which
+    buys variance more cheaply but not for free: overlapped segments share
+    samples and are not independent, so `n_indep` counts the record length in
+    units of the segment rather than counting segments. That is the same trap
+    the SR760's OVLP sets, and the reason `rel_err` is quoted off `n_indep`.
+    """
+    x = np.atleast_2d(np.asarray(x, float))
+    if x.ndim != 2 or x.shape[1] < 2:
+        raise ValueError("x must be one record or (n_shots, n_samples)")
+    dt = float(dt)
+    if not dt > 0:
+        raise ValueError("dt must be positive")
+    n = x.shape[1]
+    seg = int(nperseg) if nperseg else n
+    if not 2 <= seg <= n:
+        raise ValueError(f"nperseg must be 2..{n}")
+    step = seg - int(noverlap)
+    if step < 1:
+        raise ValueError("noverlap must be smaller than nperseg")
+
+    w = window(window_name, seg)
+    norm = dt / np.sum(w ** 2)              # = 1 / (fs sum(w^2))
+    starts = list(range(0, n - seg + 1, step))
+    acc = np.zeros(seg // 2 + 1)
+    count = 0
+    for row in x:
+        for s in starts:
+            piece = row[s:s + seg]
+            if detrend:
+                piece = piece - piece.mean()
+            acc += np.abs(np.fft.rfft(piece * w)) ** 2
+            count += 1
+    p = acc / count * norm
+    p[1:] *= 2.0
+    if seg % 2 == 0 and len(p) > 1:
+        p[-1] /= 2.0                        # Nyquist is not a conjugate pair
+
+    # Independent count: the span each row actually covers, in segments.
+    span = (len(starts) - 1) * step + seg if starts else 0
+    n_indep = x.shape[0] * span / float(seg)
+    return Spectrum(f=np.fft.rfftfreq(seg, dt), psd=p, dt=dt, n_avg=count,
+                    n_indep=float(n_indep), window=(window_name or "hann").lower(),
+                    enbw_bins=enbw_bins(w), nperseg=seg)

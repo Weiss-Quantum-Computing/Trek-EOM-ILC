@@ -243,3 +243,71 @@ moving in the first 5% of the record. MKJ is, and enabling it there subtracts
 probe campaign (`sysid_make.py` / `sysid_fit.py`, raw shots and the probe-era
 fits now filed in `archive/report-era/`); REPORT.md documents the probe construction and its
 verification.
+
+## RIN and wideband noise
+
+`eomilc/rin.py` is the analysis for out-of-loop intensity noise: segment
+splicing, RIN, and the two calibrations that say whether the number means
+anything. Pure numpy, so it runs on the system interpreter.
+
+- `splice_segments` merges traces taken at different spans, different locked
+  ranges and different analog pre-filters, applying each segment's own
+  `|H(f)|^2` first. It **returns the overlap disagreement rather than blending
+  it away**: neighbouring segments are the only cross-check the chain has, so
+  where they disagree is the size of the error in the filter model, the range
+  calibration and the analyser's accuracy put together. The merged trace hands
+  each segment its own band up to the midpoint of the overlap, and the step at
+  the join is the honest size of that disagreement. This is a different
+  operation from spectrum_grab's start-frequency stitcher, which joins bands
+  taken at one span and one range where the bin frequencies are shared exactly.
+- `filter_response(dark_with, dark_without)` measures the pre-filter in situ
+  from a pair of dark spectra, which catches the cable loading a swept
+  measurement misses. Feed the result straight back to `splice_segments`.
+- `rin` / `rin_from_psd` / `shot_noise_rin` / `integrate_rin`. Note the units:
+  `rin` takes an AMPLITUDE density in V/rtHz (the SR760's own unit) and squares
+  it; `rin_from_psd` takes V^2/Hz. Mixing them up is a factor of two in dB.
+- `power_scaling_fit` separates electronics, shot noise and classical RIN by
+  their scaling across an ND sweep, and returns the transimpedance gain
+  `G = b/(2q)` measured end to end. **Check `shot_dominance` before treating
+  that gain as a calibration** - the three terms separate only where the shot
+  term is actually the biggest thing in the measurement, and with classical RIN
+  dominating it is not. Measured on synthetic data: with shot peaking at 0.41 of
+  the total, a 1-2% perturbation moved the extracted gain by +53%.
+- `johnson_check` fits `S = S_floor + 4kT R` across a resistor set and reports
+  the deviation from 1.657e-20 V^2/Hz/ohm. Band-average each resistor over its
+  own flat region first (`band_average`) - 100 kohm rolls off above ~2 kHz
+  against the input and cable capacitance, and averaging it over the same band
+  as the 50 ohm measures the rolloff instead of the noise.
+
+Both fits weight by 1/S by default (`relative_sigma`), because the uncertainty
+on an averaged spectral density is fractional: an unweighted fit across decades
+of V_DC or R is set almost entirely by the largest point.
+
+`eomilc/scope.py` gained a one-sided auto-PSD in V^2/Hz with ENBW-correct window
+normalisation, RMS-averaged over the shot stacks `ilc_bench.capture_all` already
+returns. `Spectrum.asd` is its square root in V/rtHz, so a scope PSD and an
+SR760 trace can be compared directly in the 30-95 kHz overlap - which is the
+point, since the SR760 stops at 100 kHz and the servo bump at 150-300 kHz is
+only visible to the scope. `n_indep` counts segments that did not share samples,
+so `rel_err` stays honest under `noverlap`.
+
+`ilc_bench.noise_capture` is a context manager that puts the scope into an
+AC-coupled high-sensitivity configuration for a noise capture and restores the
+previous per-channel coupling, V/div and offset on the way out, however the body
+ended - following the `snapshot()`/`restore()` split in `bk4063b.py`. RIN needs
+AC coupling at high sensitivity; the polarimetry captures need DC coupling
+because the DC level is what gets inverted to an angle, so leaving the noise
+setup applied would silently measure the wrong thing rather than fail.
+
+`tests/test_rin.py` is 87 synthetic end-to-end checks and runs on either
+interpreter.
+
+## Interpreters
+
+`import eomilc` no longer pulls in every submodule. `plant` needs scipy and
+`scope.load` needs pandas, while `config`, `polarimetry` and `rin` are pure
+numpy, so eager imports made the whole package unimportable on the system
+interpreter - which has numpy but neither of the others. Submodules now load on
+first use, so `from eomilc import polarimetry` works on either interpreter and
+`from eomilc import plant` still raises the scipy ImportError, which is the
+honest answer.
