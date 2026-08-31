@@ -55,11 +55,36 @@ where it was meant to.
 from __future__ import annotations
 import argparse, contextlib, importlib.util, os, sys, time
 import numpy as np
-import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
+class _AnalysisOnly:
+    """Stand-in for an eomilc submodule this interpreter cannot import.
+
+    eomilc.scope needs pandas and eomilc.plant needs scipy, and the system
+    Python has neither - but _shared_rm, make_scope, make_analyzer and
+    make_awg need neither either, and run_protocol imports this module purely
+    for those. An eager import made an SR760-only bench run fail on the one
+    interpreter that can actually talk to the instruments. Touching one of
+    these for real still fails, and says why."""
+
+    def __init__(self, name, exc):
+        self._name, self._exc = name, exc
+
+    def __getattr__(self, attr):
+        raise ImportError(
+            f"eomilc.{self._name} is not importable here ({self._exc}). The "
+            f"instrument-driving half of ilc_bench does not need it; the "
+            f"analysis half does. Run that half under Anaconda.")
+
+
+try:
+    from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
+except ImportError as _exc:                     # noqa: F401
+    scopeio = _AnalysisOnly("scope", _exc)
+    plantmod = _AnalysisOnly("plant", _exc)
+    ilc = _AnalysisOnly("ilc", _exc)
+    outputs = _AnalysisOnly("outputs", _exc)
 from eomilc.config import CHANNELS, HV_PER_MON
 
 
@@ -689,6 +714,12 @@ def main():
             sys.exit("--channel, --target and --t-offset are required "
                      "unless --resume supplies them")
         ch = CHANNELS[a.channel]
+        # Imported here, not at module scope: the system Python has numpy and
+        # pyvisa but no pandas, and run_protocol imports this module purely
+        # for _shared_rm and make_scope. An eager import made a bench run that
+        # never reads a target CSV fail on an interpreter that can drive the
+        # instruments perfectly well.
+        import pandas as pd
         df = pd.read_csv(a.target, comment="#")
         t = df.iloc[:, 0].to_numpy(float)
         t = t * 1e-6 if "us" in df.columns[0].lower() else t

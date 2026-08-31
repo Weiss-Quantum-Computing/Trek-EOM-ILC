@@ -165,6 +165,44 @@ def _a2_ranges(lo=-60.0, hi=0.0, step=RANGE_STEP_DB):
     return [lo + i * step for i in range(n)]
 
 
+def _a2_navg(span, target_s, floor_navg):
+    """NAVG for a target averaging time at this span.
+
+    T_rec spans three decades across the codes a range map is worth taking at -
+    4.096 s at span 9 against 8 ms at span 18 - so one NAVG for all of them
+    either takes all night at the bottom or measures nothing at the top. A
+    floor map is read band-averaged over ~390 bins, where per-bin precision
+    costs far less than coverage: even 4 averages give about 0.2 dB on the band
+    median, which is well inside what a range map has to resolve.
+    """
+    return max(int(floor_navg), int(round(target_s / record_time(span))))
+
+
+def make_a2(spans=(11,), lo=-60.0, hi=0.0, step=RANGE_STEP_DB,
+            target_s=8.0, floor_navg=4):
+    """The range map, over any set of spans and any stretch of the range grid.
+
+    Span-outer, range-inner: SPAN is the write that costs a settle and the one
+    that reinstalls the default overlap, so it moves once per span rather than
+    once per trace.
+    """
+    traces = []
+    for sp in spans:
+        navg = _a2_navg(sp, target_s, floor_navg)
+        for r in _a2_ranges(lo, hi, step):
+            tag = f"s{sp}_rng{r:+.0f}".replace("+", "p").replace("-", "m")
+            traces.append(TraceSpec(span=sp, label=tag, filter_id="none",
+                                    range_dbv=r, navg=navg,
+                                    note=f"span {sp}, input range {r:g} dBV"))
+    return MeasurementSet(
+        name="A2", title="A2_rangemap", range_policy="per-trace",
+        purpose="Floor against every input range on a 50 ohm termination. "
+                "Maps where the analyser's own floor sits per range, which is "
+                "what says whether a segment's pinned range was sensitive "
+                "enough - and confirms the 2 dB range grid.",
+        navg=max((t.navg for t in traces), default=20), traces=traces)
+
+
 BUILTIN_SETS = {
     "A1": MeasurementSet(
         name="A1", title="A1_johnson", range_policy="worst-case",
@@ -186,18 +224,7 @@ BUILTIN_SETS = {
                            "input and cable capacitance, so band-average it "
                            "below that before fitting"),
         ]),
-    "A2": MeasurementSet(
-        name="A2", title="A2_rangemap", range_policy="per-trace",
-        purpose="Floor against every input range on a 50 ohm termination. "
-                "Maps where the analyser's own floor sits per range, which is "
-                "what says whether a segment's pinned range was sensitive "
-                "enough - and confirms the 2 dB range grid.",
-        navg=20,
-        traces=[TraceSpec(span=11, label=f"rng{r:+.0f}".replace("+", "p")
-                                         .replace("-", "m"),
-                          filter_id="none", range_dbv=r,
-                          note=f"input range {r:g} dBV")
-                for r in _a2_ranges()]),
+    "A2": make_a2(),
     "A3": MeasurementSet(
         name="A3", title="A3_spanindep", range_policy="worst-case",
         purpose="One resistor across three spans. A power spectral density is "
@@ -729,6 +756,16 @@ def main(argv=None):
                     help="override every trace's average count")
     ap.add_argument("--settle-recs", type=float, default=None,
                     help="settle in record lengths (default per set)")
+    ap.add_argument("--a2-spans", default=None,
+                    help="comma-separated span codes for the A2 range map, "
+                         "e.g. 9,13,16,18 (default 11). NAVG is chosen per "
+                         "span for a constant averaging time")
+    ap.add_argument("--a2-range", default=None,
+                    help="lo,hi[,step] in dBV for the A2 range map "
+                         "(default -60,0,2)")
+    ap.add_argument("--a2-target-s", type=float, default=8.0,
+                    help="averaging seconds per A2 trace, which sets NAVG per "
+                         "span (default 8)")
     ap.add_argument("--v-dc", type=float, default=None,
                     help="photodiode DC level in volts, written into the "
                          "manifest so rin.rin() has something to divide by. "
@@ -755,6 +792,19 @@ def main(argv=None):
                   f"{fmt_hms(p.total_s):>8}   {s.purpose.splitlines()[0][:60]}")
         print("\n--set <name> --dry-run for the full plan.")
         return 0
+
+    if args.set_name == "A2" and (args.a2_spans or args.a2_range
+                                  or args.a2_target_s != 8.0):
+        spans = ([int(x) for x in args.a2_spans.split(",")]
+                 if args.a2_spans else (11,))
+        lo, hi, step = -60.0, 0.0, RANGE_STEP_DB
+        if args.a2_range:
+            parts = [float(x) for x in args.a2_range.split(",")]
+            lo, hi = parts[0], parts[1]
+            if len(parts) > 2:
+                step = parts[2]
+        BUILTIN_SETS["A2"] = make_a2(spans=spans, lo=lo, hi=hi, step=step,
+                                     target_s=args.a2_target_s)
 
     mset = BUILTIN_SETS.get(args.set_name)
     if mset is None:

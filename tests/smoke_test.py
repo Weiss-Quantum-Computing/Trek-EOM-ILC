@@ -8,8 +8,13 @@ probe + measurement maths + overlay viewer, the iteration
 table, dot density, linked time axes, and the multi-channel capture the
 optical campaign rides on. No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
-here. A Tk window flashes briefly; screenshots of every tab land in the
+here. A Tk window flashes briefly; a PNG of every figure lands in the
 scratch folder for eyeballing.
+
+About two minutes, and nearly all of it is _redraw_iterations: it repaints
+every tab, the suite calls it about fifty times, and that is 1-2 s each.
+Anything here that looks slow for what it asserts is paying that, not doing
+arithmetic.
 
 Run with the Anaconda interpreter:
 
@@ -118,9 +123,6 @@ app.meas_var.set(os.path.join(SCRATCH, "fake_ilc_i99*.csv"))
 app.moncol_var.set("CH3")
 app.do_step()
 pump_until_idle()
-print("---- GUI log ----")
-print(app.log_text.get("1.0", "end"))
-print("-----------------")
 s2 = app.session
 print(f"[6] step: iteration {it0} -> {s2.iteration}, "
       f"snapshots {len(s2.snapshots)}, "
@@ -154,7 +156,6 @@ assert os.path.exists(os.path.join(ilc_gui.RUN_DIR, "drive_TSTX1.state.npz"))
 # go back to the stepped MKJX1 session so the error/spectrum/convergence
 # tabs have content, then take a second step so the ghost overlay shows;
 # real meas files beside the state exercise the recall-on-load path too
-import shutil
 for f in sorted(glob.glob(os.path.join(FIXTURES, "meas_MKJX1_i*.npy")))[-2:]:
     shutil.copy(f, SCRATCH)
 app.state_var.set(STATE)
@@ -966,28 +967,14 @@ print(f"[46] _frf_capture aux: H_pd/H_mon flat at {ratio.mean():.4f} "
       f"(the fake's 0.5); hold-window analysis accepted over "
       f"{nw} of {len(sN.t)} samples")
 
-# screenshot each tab for visual inspection
-root.geometry("1380x880+40+40")
+# Figure PNGs for eyeballing, straight from the canvases. There used to be an
+# ImageGrab pass over the nine tabs as well, and it went because it could not
+# be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the
+# test window ended up in the file. It asserted nothing, caught its own
+# exceptions and printed "FAILED (non-fatal)", and cost 5 s of the run in
+# sleeps waiting for tabs to paint. Saving the figures is the part that was
+# ever any use, and it is 2 s and cannot be photobombed.
 root.update()
-try:
-    from PIL import ImageGrab
-    import time
-    root.lift(); root.update(); time.sleep(0.4)
-    for i, name in enumerate(["waveforms", "dcorr", "dspec", "ddelta",
-                              "error", "spectrum", "convergence",
-                              "table", "frf"]):
-        app.nb.select(i)
-        root.update(); time.sleep(0.25); root.update()
-        x, ypos = root.winfo_rootx(), root.winfo_rooty()
-        w, h = root.winfo_width(), root.winfo_height()
-        ImageGrab.grab(bbox=(x, ypos, x + w, ypos + h)).save(
-            os.path.join(SCRATCH, f"shot_{i}_{name}.png"))
-    print("[10] screenshots saved")
-except Exception:
-    traceback.print_exc()
-    print("[10] screenshots FAILED (non-fatal)")
-# figure PNGs straight from the canvases -- immune to another window
-# sitting on top of the test window (ImageGrab shoots the screen)
 try:
     for name, fig in (("wave", app.fig_wave), ("dcorr", app.fig_dcor),
                       ("dspec", app.fig_dspec), ("ddelta", app.fig_ddel),
