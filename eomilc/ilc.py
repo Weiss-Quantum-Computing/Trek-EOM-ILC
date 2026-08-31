@@ -190,6 +190,37 @@ class Loop:
         return "\n".join(w)
 
 
+def _read_frf(path, min_coherence=0.9):
+    """The coherent tones of an FRF CSV: (f_Hz, complex H), both cut to
+    `min_coherence`.  One reader, so `frf_band` and `FRF` cannot disagree
+    about which tones a file actually carries."""
+    import pandas as pd
+    d = pd.read_csv(path)
+    m = d["coherence"].to_numpy() >= min_coherence
+    f = d["f_Hz"].to_numpy()[m]
+    if f.size == 0:
+        raise ValueError(
+            f"no tone in {path} reaches coherence {min_coherence:g} -- there "
+            f"is nothing measured here to divide the error by.")
+    H = (d["H_mag"].to_numpy() *
+         np.exp(1j * np.radians(d["H_phase_deg"].to_numpy())))[m]
+    return f, H
+
+
+def frf_band(path, min_coherence=0.9):
+    """(f_lo, f_hi) Hz of the tones an FRF file keeps.
+
+    A taper has to stay inside this.  Above f_hi `FRF.interp` holds |H| flat
+    at the last measured tone, so a correction up there is divided by an
+    extrapolation rather than by a measurement -- and since the real chain
+    has rolled off, 1/|H| stays large and the update builds drive nothing
+    ever measured.  Split out so a front end can check a taper against a
+    file without building the FRF first.
+    """
+    f, _ = _read_frf(path, min_coherence)
+    return float(f.min()), float(f.max())
+
+
 class FRF:
     """A measured transfer function, used as a nonparametric inverse.
 
@@ -208,6 +239,10 @@ class FRF:
     raised-cosined to zero over the first and last `t_guard` seconds so the
     loop does not chase the record-boundary settling transients (see the
     note in `lead`).
+
+    The taper band is checked against the tones the file actually carries:
+    `f_use` past the top coherent tone is refused, and a `f_max` past it is
+    reported as `f_extrap` for the caller to warn about.  See `frf_band`.
     """
 
     def __init__(self, path, min_coherence=0.9, f_use=15e3, f_max=22e3,
@@ -218,12 +253,29 @@ class FRF:
                 f" A zero-width taper is a brick wall -- it rings, and a bin"
                 f" landing exactly on the edge divides 0/0 into the drive."
                 f" To nearly disable it use f_use ~ 0.9 * f_max.")
-        import pandas as pd
-        d = pd.read_csv(path)
-        m = d["coherence"].to_numpy() >= min_coherence
-        self.f = d["f_Hz"].to_numpy()[m]
-        H = (d["H_mag"].to_numpy() *
-             np.exp(1j * np.radians(d["H_phase_deg"].to_numpy())))[m]
+        self.f, H = _read_frf(path, min_coherence)
+        # The taper must live inside the tones. f_use at or above the top one
+        # means the FULL-strength part of the correction band is divided by
+        # `interp`'s flat extrapolation instead of by a measurement: 1/|H|
+        # holds at its last measured value where the chain has really rolled
+        # off, and the loop dutifully builds drive up there. Measured on
+        # frf_WIDE_X1 (top tone 80.0 kHz), 20 mV rms of monitor grass through
+        # gamma 0.6: a 50-75 kHz taper asks for 0.57 V peak at the AWG, an
+        # 80-160 kHz one for 2.01 V. check_limits cannot see it either -- it
+        # takes slew and current from the TARGET, so out-of-band drive is
+        # invisible to every guard but the AWG rail.
+        self.f_top = float(self.f.max())
+        if f_use >= self.f_top:
+            raise ValueError(
+                f"f_use = {f_use/1e3:g} kHz is at or above the top coherent "
+                f"tone of {path} ({self.f_top/1e3:.1f} kHz), so the whole "
+                f"full-strength band would be divided by an extrapolated |H| "
+                f"rather than a measured one. Pull the taper inside the "
+                f"measured band, or measure a wider FRF.")
+        # How much of the fading part sits past the tones. Non-zero is a
+        # judgement call, not an error -- the taper is already attenuating
+        # there -- so callers warn rather than refuse.
+        self.f_extrap = max(0.0, f_max - self.f_top)
         self.logmag = np.log(np.abs(H))
         self.phase = np.unwrap(np.angle(H))
         self.f_use, self.f_max = f_use, f_max

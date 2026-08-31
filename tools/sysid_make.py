@@ -57,6 +57,17 @@ def multitone(peak, bins, taper_s=150e-6, seed=0, n=N, dt=DT):
         u += np.cos(2 * np.pi * k / rec * t + phase)
     u *= peak / np.abs(u).max()
     nt = int(taper_s / dt)
+    # The end taper is what leaves the record at zero, and the AWG holds
+    # sample 0 between bursts -- so it cannot be silently skipped. nt = 0
+    # used to reach `w[-0:] = <empty>`, which is `w[0:]` and raises an
+    # unreadable broadcast error rather than saying what is wrong.
+    if not 1 <= nt <= n // 2:
+        raise ValueError(
+            f"a {taper_s*1e6:g} us taper is {nt} samples on this "
+            f"{dt*1e6:g} us grid; it has to be 1..{n // 2}. The taper is what "
+            f"makes the record start and end at zero, which the AWG's "
+            f"inter-burst hold of sample 0 requires -- shorten dt, lengthen "
+            f"the record, or pass a taper_s that fits.")
     w = np.ones(n)
     ramp = 0.5 * (1 - np.cos(np.pi * np.arange(nt) / nt))
     w[:nt] = ramp

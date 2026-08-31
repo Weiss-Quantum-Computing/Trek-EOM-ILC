@@ -156,6 +156,7 @@ class Session:
         self.frf_path = ""           # recorded in the state so the runs
         self.frf_use = 0.0           # are self-documenting and a resumed
         self.frf_max = 0.0           # session restores the same model
+        self.frf_error = ""          # why the recorded FRF would not load
 
     @property
     def channel(self):
@@ -177,8 +178,12 @@ def load_session(path) -> Session:
     if s.model_key == "frf" and s.frf_path and os.path.exists(s.frf_path):
         try:                       # the loop resumes with its recorded inverse
             loop.frf = ilc.FRF(s.frf_path, f_use=s.frf_use, f_max=s.frf_max)
-        except (ValueError, OSError, KeyError):
-            pass                   # the panel will complain at the next step
+        except (ValueError, OSError, KeyError) as e:
+            # Keep the reason: a state recorded before the taper-band guard
+            # can carry a taper outside its own FRF, and "the FRF quietly
+            # did not load" is exactly the kind of silence this panel is
+            # supposed to break. do_load prints it.
+            s.frf_error = str(e)
     return s
 
 
@@ -205,10 +210,15 @@ def avg_spectrum(e, dt, k=1):
     k > 1: Hann-windowed 50%-overlap segment averaging (Welch), segment
     length N//k. Noise variance drops ~sqrt(segments); resolution coarsens
     to ~k/(N dt), so tones closer than that merge and content localised in
-    time (burst edges) smears across segments. Normalised so a pure tone
-    KEEPS its displayed amplitude in both modes -- the broadband noise
-    floor, by contrast, scales with bin width, so only compare curves
-    drawn at equal k."""
+    time (burst edges) smears across segments.
+
+    Normalised by the window's coherent gain, so a tone sitting on an
+    integer bin OF THE SEGMENT keeps its amplitude. A tone that does not is
+    scalloped by the Hann window -- worst case, half a bin off, it reads
+    0.85x (measured: a 3.000 V tone reads 2.551 V at k=4 on the 5301-point
+    grid, and 2.887 V at k=8). The broadband noise floor moves too: it
+    scales with bin width, and the coherent-gain normalisation lifts it by
+    a further sqrt(ENBW). Only compare curves drawn at equal k."""
     e = np.asarray(e, float)
     n = len(e)
     k = max(1, min(int(k), n // 16))
@@ -380,6 +390,12 @@ def recall_snapshots(s: Session):
                     t_wall=os.path.getmtime(f))
         # pair it with the drive that played it, so Fit uses a true pair
         dcsv = os.path.join(run_dir, f"drive_{s.stem}_i{it:02d}.csv")
+        if it == 0 and not os.path.exists(dcsv):
+            # campaigns Init'ed before 30 Aug 2026 wrote iteration 0 as
+            # drive_<stem>_iter0.csv (run_ilc.py init still does)
+            legacy = os.path.join(run_dir, f"drive_{s.stem}_iter0.csv")
+            if os.path.exists(legacy):
+                dcsv = legacy
         if os.path.exists(dcsv):
             du = pd.read_csv(dcsv, comment="#").iloc[:, 1].to_numpy(float)
             if len(du) == len(s.t):
@@ -500,6 +516,7 @@ class App:
         root.title("EOM-ILC -- iterative learning control")
         self.msgs = queue.Queue()
         self.stop_evt = threading.Event()
+        self._closing = False         # set by on_close; ask_user watches it
         self.busy = False
         self.session: Session | None = None
         self._modules = None          # (scope_grab, awg_gui) once bench-loaded
@@ -558,6 +575,9 @@ class App:
                 "Busy", "A run is still going. Close anyway?\n"
                         "(Instruments are closed by the worker's own cleanup.)"):
             return
+        # _closing before destroy(): a worker parked in ask_user is waiting
+        # on a dialog the pump will never deliver once the root is gone.
+        self._closing = True
         self.stop_evt.set()
         self._save_config()
         self.root.destroy()
@@ -1043,31 +1063,50 @@ class App:
         self.status.configure(text=status)
 
         def work():
+            out = _QueueWriter(self.msgs)
             try:
-                with contextlib.redirect_stdout(_QueueWriter(self.msgs)):
-                    fn()
+                with contextlib.redirect_stdout(out):
+                    try:
+                        fn()
+                    finally:
+                        # INSIDE the redirect: flushing after the context
+                        # manager exits flushes the restored real stdout, so
+                        # a helper's last line without a trailing newline was
+                        # sitting in the writer's buffer and thrown away --
+                        # including on the exception path.
+                        out.flush()
             except SystemExit as e:      # ilc_bench helpers refuse via sys.exit
                 self.msgs.put(("log", f"ABORTED: {e}"))
             except Exception:
                 self.msgs.put(("log", traceback.format_exc()))
             finally:
-                sys.stdout.flush()
                 self.msgs.put(("busy", False))
         threading.Thread(target=work, daemon=True).start()
 
     def ask_user(self, title, msg):
         """A yes/no question from a WORKER thread: marshalled to the main
         thread (Tk dialogs, like Tk variables, are main-thread-only) while
-        the worker blocks on the answer."""
+        the worker blocks on the answer.
+
+        Answers NO rather than blocking forever if the dialog itself raises
+        or the panel is closing. An unbounded wait here parks the worker
+        holding both VISA sessions, and its cleanup -- output off, close --
+        then never runs.
+        """
         evt = threading.Event()
         result = {}
 
         def ask():
-            result["yes"] = messagebox.askyesno(title, msg)
-            evt.set()
+            try:
+                result["yes"] = messagebox.askyesno(title, msg)
+            finally:
+                evt.set()       # a raising dialog must not park the worker
         self.msgs.put(("call", ask))
-        evt.wait()
-        return result["yes"]
+        while not evt.wait(0.2):
+            if self._closing:   # pump has stopped; no answer is coming
+                print(f"panel closing -- taking 'no' for: {title}")
+                return False
+        return bool(result.get("yes"))
 
     def _floats(self, **pairs):
         out = {}
@@ -1087,7 +1126,22 @@ class App:
         for v in self._param_vars.values():
             v.set("")
         self.shotgain_var.set("")
+        # The FRF file goes too. On the measured-FRF rung the FRF IS the
+        # model, so a browsed one surviving a channel switch was the same
+        # leak the parameter boxes above are cleared to prevent -- and the
+        # worst case is GEN, whose whole point is that nothing measured on
+        # the Trek chains applies until it is loaded on purpose. Blanking it
+        # first lets _apply_channel_defaults re-point at the NEW channel's
+        # default (nothing, for GEN).
+        old_frf = self.frf_var.get().strip()
+        self.frf_var.set("")
         self._apply_channel_defaults()
+        if old_frf and os.path.basename(old_frf) != os.path.basename(
+                self.frf_var.get()):
+            self.log(f"channel changed -- dropped the FRF "
+                     f"{os.path.basename(old_frf)}; it was measured on the "
+                     f"other chain. Browse to this channel's own, or measure "
+                     f"one.")
         if os.path.exists(self.target_var.get().strip()):
             self.do_preview_target(quiet=True)
 
@@ -1276,10 +1330,16 @@ class App:
                 return g
         return None
 
-    def do_preview_target(self, quiet=False):
+    def do_preview_target(self, quiet=False, replay=False):
         """Plot the target file, and the AWG output the flat first shot
         would produce at AMP = 2x full scale / OFST 0 -- nothing is sent.
-        This is the look-before-you-init view."""
+        This is the look-before-you-init view.
+
+        `replay` marks the call that _redraw_iterations makes to re-render
+        the Waveforms tab. That one must not front the notebook or write to
+        the log: it fires on every Redraw and after every Hold run, and it
+        was yanking the tab away from whatever was being watched and
+        repeating the same preview line each time."""
         path = self.target_var.get().strip()
         if not os.path.exists(path):
             if not quiet:
@@ -1322,30 +1382,36 @@ class App:
             note = f"peak {pk:.3f} V = {100*pk/fs:.1f}% of DAC range"
             if pk > fs:
                 note += "  --  CLIPS: raise the gain or lower the target"
-                self.log(f"preview: the first shot would CLIP "
-                         f"({pk:.3f} V > {fs:g} V full scale)")
+                if not replay:
+                    self.log(f"preview: the first shot would CLIP "
+                             f"({pk:.3f} V > {fs:g} V full scale)")
             ax2.set_title(note)
             ax2.legend(loc="best", fontsize=7)
-            self.log(f"preview {os.path.basename(path)}: "
-                     f"{np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
-                     f"{t[-1]*1e3:.2f} ms, {len(v)} pts; AWG peak {pk:.3f} V "
-                     f"({100*pk/fs:.1f}% of range) at gain {g:g}")
+            if not replay:
+                self.log(f"preview {os.path.basename(path)}: "
+                         f"{np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
+                         f"{t[-1]*1e3:.2f} ms, {len(v)} pts; AWG peak "
+                         f"{pk:.3f} V ({100*pk/fs:.1f}% of range) at gain "
+                         f"{g:g}")
         else:
             ax2.text(0.5, 0.5, "type a first-shot gain (or a model gain)\n"
                                "to preview the AWG output",
                      ha="center", va="center", transform=ax2.transAxes,
                      color="#888888")
-            self.log(f"preview {os.path.basename(path)}: "
-                     f"{np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
-                     f"{t[-1]*1e3:.2f} ms, {len(v)} pts (no gain set, AWG "
-                     f"preview skipped)")
+            if not replay:
+                self.log(f"preview {os.path.basename(path)}: "
+                         f"{np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
+                         f"{t[-1]*1e3:.2f} ms, {len(v)} pts (no gain set, "
+                         f"AWG preview skipped)")
         ax2.set_xlabel("time (ms)")
         ax2.set_ylabel("AWG drive (V)")
         ax2.grid(True, alpha=0.3)
         self._finish_time_axis(self.ax_out)
         self.fig_wave._canvas.draw_idle()
-        self.nb.select(0)
-        self._wave_redraw = lambda: self.do_preview_target(quiet=True)
+        if not replay:
+            self.nb.select(0)
+        self._wave_redraw = (lambda:
+                             self.do_preview_target(quiet=True, replay=True))
 
     def do_build_target(self):
         """Build a target CSV from scratch, for a system with no target yet.
@@ -1453,6 +1519,10 @@ class App:
                 if not os.path.exists(s.frf_path):
                     self.log(f"NOTE: the state's recorded FRF file is "
                              f"missing: {s.frf_path}")
+                elif s.frf_error:
+                    self.log(f"NOTE: the state's recorded FRF did NOT load, "
+                             f"so the loop is resuming without it:\n"
+                             f"      {s.frf_error}")
         self.log(f"loaded {path}")
         self.log(f"  {s.channel} iteration {s.iteration}, stem {s.stem}, "
                  f"gamma {s.loop.gamma:g}, f_cut {s.loop.f_cut/1e3:g} kHz, "
@@ -1526,6 +1596,10 @@ class App:
                 return messagebox.showerror(
                     "Init", f"the taper needs 0 < f_use < f_max "
                             f"(got {fb['f_use']:g}/{fb['f_max']:g})")
+            try:
+                self._check_taper_band(fps[0], fb["f_use"], fb["f_max"])
+            except RuntimeError as e:
+                return messagebox.showerror("Init", str(e))
             frf_rec = (fps[0], fb["f_use"], fb["f_max"])
         seed_key = "resonant" if mode == "frf" else mode
         # one-number bootstrap: a typed first-shot gain can seed a blank
@@ -1560,7 +1634,14 @@ class App:
         rep = loop.check(u)
 
         os.makedirs(RUN_DIR, exist_ok=True)
-        out = os.path.join(RUN_DIR, f"drive_{stem}_iter0.csv")
+        # _i00, NOT _iter0: this is the same file _write_iteration produces
+        # for every later iteration and the one recall_snapshots reads back.
+        # Under the old name it was written and never read, so a campaign
+        # that was Init'ed here and then stepped from files came back after a
+        # reload with no iteration-0 drive -- and Drive corrections silently
+        # swapped its reference from "the iteration-0 drive" to "the flat
+        # conversion", which differ by whatever the gain box has done since.
+        out = os.path.join(RUN_DIR, f"drive_{stem}_i00.csv")
         outputs.write_awg_csv(out, t, u,
                               comment=f"{chname} ILC iteration 0 "
                                       f"(flat conversion, target / gain)\n{plant}")
@@ -1635,6 +1716,30 @@ class App:
         self.summary.configure(text=txt)
 
     # --------------------------------------------------- shared step pieces
+    def _check_taper_band(self, path, f_use, f_max):
+        """Refuse a taper whose FULL-STRENGTH edge sits outside the tones the
+        file actually carries, and hand back the top tone so the caller can
+        warn about an f_max that overshoots it.
+
+        The same rule `ilc.FRF` enforces, checked here so it arrives as a
+        dialog before anything is dispatched rather than as a worker
+        traceback after the instruments are open."""
+        try:
+            _, f_top = ilc.frf_band(path)
+        except (OSError, ValueError, KeyError) as e:
+            raise RuntimeError(f"{os.path.basename(path)}: {e}")
+        if f_use >= f_top:
+            raise RuntimeError(
+                f"'full strength to' is {f_use/1e3:g} kHz, but "
+                f"{os.path.basename(path)} only measures up to "
+                f"{f_top/1e3:.1f} kHz. Past its top coherent tone the inverse "
+                f"holds |H| flat, so the whole full-strength band would be "
+                f"divided by an extrapolation: 1/|H| stays large where the "
+                f"chain has really rolled off, and the update builds drive at "
+                f"frequencies nothing was ever measured at. Pull the taper "
+                f"inside the measured band, or measure a wider FRF.")
+        return f_top
+
     def _gather_settings(self):
         """Entry fields -> plain values, ON THE MAIN THREAD. Tk variables must
         not be read from a worker (tkinter is not thread-safe), so everything a
@@ -1661,6 +1766,8 @@ class App:
                     f"(got {cfg['f_use']:g}/{cfg['f_max']:g}). A zero-width "
                     f"taper is a brick wall that rings -- to nearly disable "
                     f"it, set f_use ~ 0.9 x f_max.")
+            cfg["frf_top"] = self._check_taper_band(
+                cfg["frf_path"], cfg["f_use"], cfg["f_max"])
         else:
             cfg["params"] = self._entry_params(cfg["mode"], strict=True)
         return cfg
@@ -1688,6 +1795,13 @@ class App:
                   f"{os.path.basename(cfg['frf_path'])} "
                   f"({s.loop.frf.f[0]:.0f}-{s.loop.frf.f[-1]:.0f} Hz, "
                   f"taper {cfg['f_use']/1e3:g}-{cfg['f_max']/1e3:g} kHz)")
+            if s.loop.frf.f_extrap > 0:
+                print(f"       WARNING: the taper reaches "
+                      f"{cfg['f_max']/1e3:g} kHz but the top coherent tone is "
+                      f"{s.loop.frf.f_top/1e3:.1f} kHz -- the last "
+                      f"{s.loop.frf.f_extrap/1e3:.1f} kHz of the correction "
+                      f"band divides by an extrapolated |H|. It is fading "
+                      f"there, but it is not measured.")
             cfg["desc"] = (f"FRF {cfg['f_use']/1e3:g}-{cfg['f_max']/1e3:g}k")
             s.model_key, s.frf_path = "frf", cfg["frf_path"]
             s.frf_use, s.frf_max = cfg["f_use"], cfg["f_max"]
@@ -1888,24 +2002,16 @@ class App:
 
     def _autoset_work(self, period, u_lo, u_hi, v_lo, v_hi, fs,
                       awg_ch, scope_ch, wname):
-        scopemod, awgmod = self._bench_modules()
-
         # Connect BOTH instruments before writing to either: a scope that
         # does not answer (first live test: Scope Grab held its VISA session)
         # must not leave a half-configured bench.
-        awg = ilc_bench.make_awg(awgmod)
-        print("AWG:  ", awg.connect())
-        scope = ilc_bench.make_scope(scopemod)
-        try:
-            print("Scope:", scope.connect())
-        except Exception as e:
-            awg.close()
-            raise RuntimeError(
-                f"{e}\nNothing was changed. If Scope Grab (or any other "
-                f"program) is open it holds the scope's VISA session -- "
-                f"close it and try again; otherwise check the scope's power "
-                f"and rear-panel USB.")
+        awg, scope = self._connect_pair()
 
+        # ONE try/finally over both blocks. It used to be two, and the
+        # `return` in the AWG block below then unwound through the AWG's
+        # finally only -- leaving the scope's session open for the rest of
+        # the panel's life, on the single most likely way to leave this
+        # function (the output was already on).
         try:
             if awg.is_on(awg_ch):
                 print(f"REFUSING to auto-set CH{awg_ch}: its output is ON, "
@@ -1951,10 +2057,7 @@ class App:
                       f"AWG GUI's Waveforms library ({wname}.csv, Normalise "
                       f"OFF), or let the bench loop upload it.")
             print(f"       burst readback: {btwv}")
-        finally:
-            awg.close()
 
-        try:
             # full window with settle room, waveform start at the left edge:
             # position (trigger -> screen centre) = half the period
             rng = nice_setting(1.3 * period)
@@ -1979,7 +2082,11 @@ class App:
             if errs:
                 print("scope reported:", errs)
         finally:
+            # both closes leave the shared ResourceManager standing
+            # (ilc_bench.make_awg / make_scope), so the order does not matter
+            awg.close()
             scope.close()
+            print("instruments closed")
 
     # --------------------------------------------------------------- upload
     def do_upload(self):
@@ -2062,11 +2169,7 @@ class App:
     def _hold_work(self, runs, gap_s, awg_ch, scope_ch, repeats,
                wait_s, keep_native=False):
         s = self.session
-        scopemod, awgmod = self._bench_modules()
-        awg = ilc_bench.make_awg(awgmod)
-        print("AWG:  ", awg.connect())
-        scope = ilc_bench.make_scope(scopemod)
-        print("Scope:", scope.connect())
+        awg, scope = self._connect_pair()
         played = False
         switched_on = False
         try:
@@ -2178,21 +2281,45 @@ class App:
         ilc_bench._AWGMOD = self._modules[1]
         return self._modules
 
+    def _connect_pair(self):
+        """Open both instruments, or neither.
+
+        A scope that does not answer -- Scope Grab still holding its VISA
+        session is the usual reason -- must not leave the generator's session
+        orphaned in this process. `make_awg` would then hand the next attempt
+        a SECOND session to the same USB resource, and that failure reads as
+        'the AWG is not there' rather than 'close Scope Grab', which is the
+        wrong thing to go and check. Every bench worker connects through
+        here so the two sessions are always opened as a pair.
+        """
+        scopemod, awgmod = self._bench_modules()
+        awg = ilc_bench.make_awg(awgmod)
+        print("AWG:  ", awg.connect())
+        scope = ilc_bench.make_scope(scopemod)
+        try:
+            print("Scope:", scope.connect())
+        except Exception as e:
+            awg.close()
+            raise RuntimeError(
+                f"{e}\nNothing was changed, and the AWG session was closed "
+                f"again -- nothing is left open. If Scope Grab (or any other "
+                f"program) is running it holds the scope's VISA session; "
+                f"close it and try again. Otherwise check the scope's power "
+                f"and rear-panel USB.")
+        return awg, scope
+
     def _bench_work(self, cfg, awg_ch, scope_ch, iterations, repeats, wait_s,
                     skip, keep_native=False):
         s = self.session
         self._apply_settings(cfg)
-        scopemod, awgmod = self._bench_modules()
+        _, awgmod = self._bench_modules()
 
         limit = getattr(awgmod, "MAX_ARB_NAME", NAME_LIMIT)
         if len(s.stem) + 4 > limit:
             raise RuntimeError(f"stem {s.stem!r} + '_iNN' is past the "
                                f"{limit}-char name cap")
 
-        awg = ilc_bench.make_awg(awgmod)
-        print("AWG:  ", awg.connect())
-        scope = ilc_bench.make_scope(scopemod)
-        print("Scope:", scope.connect())
+        awg, scope = self._connect_pair()
         uploaded_any = False
         switched_on = False
         try:
@@ -2395,14 +2522,11 @@ class App:
         rec = n_p * dt_p                     # the PROBE's record
         t_sess = len(s.t) * s.loop.dt        # the session's record
         t_grid = np.arange(n_p) * dt_p
-        scopemod, awgmod = self._bench_modules()
+        _, awgmod = self._bench_modules()
         limit = getattr(awgmod, "MAX_ARB_NAME", NAME_LIMIT)
         if len(name) > limit:
             raise RuntimeError(f"name {name!r} is past the {limit}-char cap")
-        awg = ilc_bench.make_awg(awgmod)
-        print("AWG:  ", awg.connect())
-        scope = ilc_bench.make_scope(scopemod)
-        print("Scope:", scope.connect())
+        awg, scope = self._connect_pair()
         uploaded = False
         switched_on = False
         retune = False           # short mode changed FRQ + scope window
@@ -3539,12 +3663,17 @@ class App:
     def _plot_convergence(self, cmp=()):
         s, c = self.session, self._colour()
         hist = list(s.loop.history)
-        # the newest measurement is only in history once update() ran on it;
+        # The newest measurement is only in history once update() ran on it;
         # show it anyway so the final bench iteration appears (hold runs
-        # never enter the history -- nothing was updated)
-        if (s.snapshots and s.snapshots[-1].get("run") is None
-                and s.snapshots[-1]["it"] == len(hist)):
-            hist = hist + [s.snapshots[-1]["m"]]
+        # never enter the history -- nothing was updated). Pick the last
+        # BASE measurement rather than the last snapshot: a Hold appends run
+        # snapshots on top of it, and testing snapshots[-1] then dropped the
+        # very iteration the hold runs are being compared against -- the
+        # curve stopped one point short of its own hold markers. The compare
+        # branch below has always filtered; this is it doing the same.
+        base = [sn for sn in s.snapshots if sn.get("run") is None]
+        if base and base[-1]["it"] == len(hist):
+            hist = hist + [base[-1]["m"]]
         ax = self.ax_conv
         ax.clear()
         n_it = len(hist)

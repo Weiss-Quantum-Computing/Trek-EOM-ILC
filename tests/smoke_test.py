@@ -483,12 +483,25 @@ print("[31] compare grammar: blank = last iter, 'GENX:0' picks iteration 0")
 
 # drive-corrections spectrum: same shape as the error spectrum, base
 # measurements only, each stem against its own reference drive
+app.itersel_var.set("all")            # so the drive-less 5/6 are selected too
+app._redraw_iterations(); root.update()
 labs = [l.get_label() for l in app.ax_dspec.get_lines()]
 assert any(l.startswith("iter ") for l in labs), labs
+# MKJX1 has measurements for 5-8 but drives only from 7 on, so 5 and 6 are
+# the real drive-less case: selected, and still not drawn
+assert "iter 7" in labs and "iter 8" in labs, labs
+assert "iter 5" not in labs and "iter 6" not in labs, \
+    f"iterations with no stored drive were drawn: {labs}"
 assert "GENX iter 1" in labs, labs           # drive_GENX_i01.csv exists
-assert "GENX iter 0" not in labs, labs       # the init drive was never stored
+# ... and so does drive_GENX_i00.csv. Init used to write iteration 0 as
+# drive_<stem>_iter0.csv, a name recall_snapshots never looked for, so the
+# init drive was invisible after a reload and this line asserted its
+# absence. Init now writes the same _iNN name every later iteration uses.
+assert "GENX iter 0" in labs, labs
 assert not any(" r" in l for l in labs), \
     f"hold runs leaked into the drive spectrum: {labs}"
+app.itersel_var.set("")                      # back to the default
+app._redraw_iterations(); root.update()
 print("[32] drive spectrum drew the stored corrections, runs and "
       "drive-less iterations excluded")
 
@@ -524,8 +537,12 @@ assert "peak err (V)" in tdf.columns, list(tdf.columns)
 print(f"[33] table: {len(mk)} MKJX1 + {len(gx)} GENX rows (r3 included), "
       f"CSV mirror saved; compare gradient is colour, not alpha")
 
-# spectrum averaging: a pure tone keeps its amplitude in both modes (the
-# normalisation invariant), and the Welch mode actually smooths
+# spectrum averaging: the coherent-gain normalisation holds a tone's
+# amplitude across both modes, and the Welch mode actually smooths. The
+# tolerances are loose on purpose -- 10 kHz lands 0.24 of a bin off centre
+# in the k=8 segment, and Hann scalloping costs a few percent there (half a
+# bin off it would cost 15%). Only tones on integer bins OF THE SEGMENT
+# read exactly; see avg_spectrum's docstring.
 tt = np.arange(4096) * 2e-6
 tone = 0.5 * np.sin(2 * np.pi * 10e3 * tt)
 noisy = tone + np.random.default_rng(0).normal(0, 0.05, len(tt))

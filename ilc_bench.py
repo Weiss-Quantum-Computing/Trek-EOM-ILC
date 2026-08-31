@@ -232,8 +232,20 @@ def check_awg_channel(awg, ch, expect_rate=None, expect_clock="DDS",
     return problems, notes
 
 
+# The AWG instrument module, whichever vintage it turns out to be. Set by
+# main() or by the GUI's _bench_modules before anything here talks SCPI --
+# declared here so reaching it too early says so instead of raising a bare
+# NameError from inside a helper.
+_AWGMOD = None
+
+
 def awg_parse(reply):
     """Thin wrapper so this file doesn't care which module parse_reply lives in."""
+    if _AWGMOD is None:
+        raise RuntimeError(
+            "the AWG module is not loaded yet -- load_module(<bk4063b.py>) "
+            "and assign ilc_bench._AWGMOD before calling the AWG helpers "
+            "(main() and the GUI's _bench_modules both do this).")
     return _AWGMOD.parse_reply(reply)
 
 
