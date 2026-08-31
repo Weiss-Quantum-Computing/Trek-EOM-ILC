@@ -302,6 +302,65 @@ setup applied would silently measure the wrong thing rather than fail.
 `tests/test_rin.py` is 87 synthetic end-to-end checks and runs on either
 interpreter.
 
+## The protocol runner
+
+`run_protocol.py` drives a declarative measurement set on the SR760 for the RIN
+validation, next to `run_ilc.py`.
+
+```
+python run_protocol.py --list
+python run_protocol.py --set C --dry-run
+python run_protocol.py --set A1 --outdir run/protocol --v-dc 1.85
+```
+
+A set is a name, a range policy and an ordered list of traces, each carrying
+span, start frequency, filter id, average count and free-text notes. Per set the
+runner ranges once, pins with `pin_range()`, and verifies with `input_range()`
+before every save; a range that moved marks the trace `SUSPECT` rather than
+saving it clean. It settles after every change, records elapsed time,
+`record_stats` (T_rec, N_indep, rel_err), the overload state from the refreshed
+status cache and the full settings snapshot, and writes CSV and metadata through
+`sr760`'s own writers so the files are indistinguishable from panel captures.
+
+Built-in sets:
+
+| set | what it is | why |
+|-----|-----------|-----|
+| `A1` | four resistors, 50 ohm / 2k / 10k / 100k, one shared pinned range | the fitted 4kT slope calibrates the whole voltage-noise scale - `rin.johnson_check` |
+| `A2` | every input range on a 50 ohm termination | where the analyser's own floor sits per range, and confirms the 2 dB range grid |
+| `A3` | one resistor across three spans | a PSD is span-independent by construction, so any span dependence would forge a false slope in a spliced trace |
+| `C1` | range-step pairs, each band repeated two notches down | where the two disagree is what a segment disagreement is really measuring |
+| `C` | four spans, four filters, four pinned ranges, nested from 0 Hz | the RIN segment set - splice with `rin.splice_segments` |
+
+Each set writes one `manifest.json` whose per-segment entries carry path, span,
+pinned range, filter id, v_dc, N_indep and the overload flag. `load_segments()`
+reads it straight back as `rin.Segment`s, ready for `splice_segments`. **It
+squares the CSV column on the way**: the file holds an amplitude density in
+V/rtHz and `rin.Segment` wants a power density in V^2/Hz, and that conversion
+has to happen exactly once. Suspect traces are dropped by default - a trace
+whose range slipped or whose front end overloaded is not a worse measurement,
+it is a different one.
+
+`--dry-run` prints the full plan and a wall-clock estimate without touching
+hardware, and imports no instrument code at all, so the planner is exercised by
+`tests/test_protocol.py` on the bare system interpreter. The estimate is
+`NAVG * T_rec` exactly, which is only true because the protocol preset sets
+`OVLP 0` - with overlap it would understate the clock and overstate the
+statistics at the same time. Some of these sets are long: 100 averages at the
+24.4 Hz span is 27 minutes, which is worth seeing before committing a session.
+
+The SR760 is built through `ilc_bench.make_analyzer` on `_shared_rm`, even for
+sets that drive only the analyser. The C-phase needs the MSO-X as well - for
+V_DC and for the servo bump above the SR760's 100 kHz ceiling - and that is
+exactly where the mixed-VISA failure bites: a second ResourceManager half-loads
+and every `open_resource` then returns `VI_ERROR_ALLOC`. `find_spectrum_grab()`
+locates `sr760.py` the way `find_scope_grab()` locates `scope_grab.py`, with a
+`SPECTRUM_GRAB` env override.
+
+`tests/test_protocol.py` is 49 offline checks: the timing model against the two
+figures the protocol was costed with, the set definitions, and a manifest round
+trip through `rin.splice_segments`.
+
 ## Interpreters
 
 `import eomilc` no longer pulls in every submodule. `plant` needs scipy and

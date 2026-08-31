@@ -79,6 +79,24 @@ def find_scope_grab(siblings):
     return os.path.join(siblings, "keysight-scope-grab", "scope_grab.py")
 
 
+def find_spectrum_grab(siblings):
+    """Where sr760.py lives - the SR760 instrument layer and scripting library.
+
+    Same shape as find_scope_grab: the SPECTRUM_GRAB env var wins, then the
+    sibling checkout, and when it is missing return the canonical path anyway so
+    the error names the right thing to clone. sr760.py sits beside
+    spectrum_grab.py in that repo, the way bk4063b.py sits beside its panel.
+    """
+    env = os.environ.get("SPECTRUM_GRAB")
+    if env:
+        return env
+    for name in ("Spectrum-grab", "spectrum-grab"):
+        p = os.path.join(siblings, name, "sr760.py")
+        if os.path.exists(p):
+            return p
+    return os.path.join(siblings, "Spectrum-grab", "sr760.py")
+
+
 def load_module(path, name):
     """Import one of the bench programs by file path."""
     spec = importlib.util.spec_from_file_location(name, path)
@@ -154,6 +172,24 @@ def make_awg(mod):
             return cls(connect=False)
         except TypeError:
             return cls()
+
+
+def make_analyzer(mod, addr=None):
+    """Build the SR760 on the shared VISA, without connecting.
+
+    The shared RM matters here even for a set that drives only the analyser.
+    The C-phase sets need the MSO-X as well - for V_DC, and for the servo bump
+    above the SR760's 100 kHz ceiling - and that is exactly where the measured
+    mixed-VISA failure bites: a second ResourceManager half-loads and every
+    open_resource then returns VI_ERROR_ALLOC. Handing both instruments the same
+    RM from the start means the analyser-only sets are not a different code path
+    that happens to work.
+
+    Never auto-connects: the caller prints the IDN from an explicit connect(),
+    as the scope and AWG paths do.
+    """
+    return mod.SR760(addr=addr, resource_manager=_shared_rm(mod.pyvisa),
+                     connect=False)
 
 
 # --------------------------------------------------------------------- AWG
