@@ -657,6 +657,17 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
                 averaged=sr.code_of(snap, "AVGO", 0) == 1)))
 
             freqs, amps, used_binary = an.trace(snap=snap, log=lambda m: log(m))
+
+            # Only checkable with the trace in hand, so the verdict above has
+            # to be reopened: a trace pinned far coarser than its signal comes
+            # back constant on the display floor, and every settings-level
+            # check passes while it does.
+            flat = sr.floor_fault(amps)
+            if flat:
+                faults.append(flat)
+                notes["trace quality"] = "SUSPECT: " + "; ".join(faults)
+                log(f"    *** {notes['trace quality']} ***")
+
             notes["transfer"] = ("binary dump (SPEB?)" if used_binary
                                  else "bin by bin (BVAL?/SPEC?)")
             path = save_trace(sr, an, outdir, mset, spec, stamp, freqs, amps,
