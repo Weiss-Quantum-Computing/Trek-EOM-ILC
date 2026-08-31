@@ -368,10 +368,16 @@ def manifest_entry(path, spec: TraceSpec, snap, notes, mset: MeasurementSet,
     to be argued about - the pinned range and the filter id are the first two
     things anyone asks when two segments disagree across their overlap.
     """
+    # `averaged` matters here more than anywhere: n_indep and rel_err go into
+    # the manifest, and load_segments carries them into the RIN splice as the
+    # error bar two segments are compared across. The elapsed/T_rec count
+    # assumes the analyzer averaged what it acquired; with AVGO off it keeps
+    # only the newest record, so the run buys one record however long it ran.
     stats = sr760_mod.record_stats(
         sr760_mod.code_of(snap, "SPAN"), float(notes.get("measure time (s)", 0)),
         navg=sr760_mod.code_of(snap, "NAVG"),
-        ovlp=sr760_mod.code_of(snap, "OVLP"))
+        ovlp=sr760_mod.code_of(snap, "OVLP"),
+        averaged=sr760_mod.code_of(snap, "AVGO", 0) == 1)
     return {
         "path": os.path.basename(path),
         "label": spec.name(),
@@ -564,6 +570,23 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
                                     .removeprefix("SUSPECT: ")]
             if status.overloaded:
                 faults.append("overload flagged during the run")
+            elif not status.complete:
+                # Half a status byte is not a clean one: an ERRS that came back
+                # clear says nothing about the FFT overload in FFTS. Same
+                # standard hold_notes holds the range to - unverified and
+                # verified are different claims, and only one of them belongs
+                # on a segment a splice rests on.
+                silent = " and ".join(name for name, value
+                                      in (("ERRS", status.errs),
+                                          ("FFTS", status.ffts))
+                                      if value is None)
+                faults.append(f"overload unverified: {silent} did not answer")
+            # Which scale the trace is labelled on, and whether that was read or
+            # assumed. An assumed UNIT0 is a 160 dB assumption, and the units go
+            # into the manifest that the RIN maths reads V/rtHz off.
+            bad_read = sr.readout_fault(snap)
+            if bad_read:
+                faults.append(bad_read)
             avg_bad = sr.averaging_fault(snap)
             if avg_bad:
                 faults.append(avg_bad)
@@ -574,7 +597,8 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
             notes.update(sr.stats_notes(sr.record_stats(
                 sr.code_of(snap, "SPAN"), elapsed,
                 navg=sr.code_of(snap, "NAVG"),
-                ovlp=sr.code_of(snap, "OVLP"))))
+                ovlp=sr.code_of(snap, "OVLP"),
+                averaged=sr.code_of(snap, "AVGO", 0) == 1)))
 
             freqs, amps, used_binary = an.trace(snap=snap, log=lambda m: log(m))
             notes["transfer"] = ("binary dump (SPEB?)" if used_binary
