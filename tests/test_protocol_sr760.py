@@ -106,6 +106,13 @@ rp.check_span_table(sr)
 ok("run_protocol's span table still agrees with sr760.SPANS", True)
 ok("record_stats takes the averaging state",
    "averaged" in inspect.signature(sr.record_stats).parameters)
+# fmt_hms exists in both files for the same reason the SPAN table does - the
+# planner has to cost a session without importing sr760 - so it needs the same
+# reconciliation check the span table gets.
+for seconds in (0.4, 12.3, 59.9, 60, 102.6, 3599, 7000, 86399, float("nan")):
+    ok(f"fmt_hms({seconds}) agrees with sr760's copy",
+       rp.fmt_hms(seconds) == sr.fmt_hms(seconds),
+       f"{rp.fmt_hms(seconds)} vs {sr.fmt_hms(seconds)}")
 ok("readout_fault is available to the runner", hasattr(sr, "readout_fault"))
 ok("Status knows whether it read both bytes",
    hasattr(sr.Status, "complete"))
