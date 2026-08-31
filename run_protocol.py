@@ -380,7 +380,7 @@ def manifest_entry(path, spec: TraceSpec, snap, notes, mset: MeasurementSet,
     stats = sr760_mod.record_stats(
         sr760_mod.code_of(snap, "SPAN"), float(notes.get("measure time (s)", 0)),
         navg=sr760_mod.code_of(snap, "NAVG"),
-        ovlp=sr760_mod.code_of(snap, "OVLP"),
+        ovlp=sr760_mod.value_of(snap, "OVLP"),
         averaged=sr760_mod.code_of(snap, "AVGO", 0) == 1)
     return {
         "path": os.path.basename(path),
@@ -394,7 +394,7 @@ def manifest_entry(path, spec: TraceSpec, snap, notes, mset: MeasurementSet,
         "v_dc": v_dc,
         "units": sr760_mod.trace_units(snap),
         "navg": sr760_mod.code_of(snap, "NAVG"),
-        "overlap_pct": sr760_mod.code_of(snap, "OVLP"),
+        "overlap_pct": sr760_mod.value_of(snap, "OVLP"),
         "t_rec_s": stats["t_rec_s"],
         "n_indep": stats["n_indep"],
         "rel_err": stats["rel_err"],
@@ -594,6 +594,13 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
             avg_bad = sr.averaging_fault(snap)
             if avg_bad:
                 faults.append(avg_bad)
+            # What the overlap has done to NAVG, and whether the span put it
+            # there. n_indep below comes from the clock and is right either
+            # way; NAVG is the number the manifest carries and anyone reads.
+            ovlp_bad = sr.overlap_fault(snap, sr.code_of(snap, "SPAN",
+                                                         spec.span))
+            if ovlp_bad:
+                faults.append(ovlp_bad)
             notes["trace quality"] = ("SUSPECT: " + "; ".join(faults) if faults
                                       else hold.get("trace quality", "clean"))
             if faults:
@@ -601,7 +608,7 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
             notes.update(sr.stats_notes(sr.record_stats(
                 sr.code_of(snap, "SPAN"), elapsed,
                 navg=sr.code_of(snap, "NAVG"),
-                ovlp=sr.code_of(snap, "OVLP"),
+                ovlp=sr.value_of(snap, "OVLP"),
                 averaged=sr.code_of(snap, "AVGO", 0) == 1)))
 
             freqs, amps, used_binary = an.trace(snap=snap, log=lambda m: log(m))

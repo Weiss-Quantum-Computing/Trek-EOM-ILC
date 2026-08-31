@@ -186,4 +186,35 @@ ok("an AVGO that could not be read stops the run",
    "could not be read" in sr.averaging_fault(
        {k: v for k, v in GOOD.items() if k != "AVGO"}))
 
+print("\n--- the overlap goes in whole, and is checked ---")
+
+# Was: code_of everywhere, which truncates - it reads an enum's index. OVLP
+# 98.4375 went into the manifest as 98, and that manifest is what the RIN
+# splice reads.
+ok("value_of keeps a fractional overlap",
+   sr.value_of({"OVLP": "98.4375"}, "OVLP") == 98.4375)
+ok("code_of would have truncated it",
+   sr.code_of({"OVLP": "98.4375"}, "OVLP") == 98)
+
+deep = dict(GOOD, NAVG="400", OVLP="98.4375")
+entry = rp.manifest_entry("s.csv", SPEC, deep, NOTES, MSET, -30.0, 1.0, sr)
+ok("the manifest carries the overlap unrounded",
+   entry["overlap_pct"] == 98.4375, str(entry["overlap_pct"]))
+ok("... and manifest_entry reads it with value_of",
+   "value_of(snap, \"OVLP\")" in inspect.getsource(rp.manifest_entry))
+
+ok("the capture loop reads it that way too",
+   'ovlp=sr.value_of(snap, "OVLP")' in src)
+ok("... and carries the overlap fault", "sr.overlap_fault(snap" in src)
+
+# The fault the runner will now raise on a span that reinstalled its default.
+f = sr.overlap_fault(deep, 11)
+ok("a reinstalled overlap is named for what it costs",
+   "worth 7.23 independent" in f and "overstates the statistics 55x" in f,
+   f[:64])
+ok("... and blamed on the span that installed it",
+   "this span's default" in f)
+ok("the protocol preset's own OVLP 0 stays silent",
+   sr.overlap_fault(dict(GOOD, NAVG="400", OVLP="0"), 11) == "")
+
 print(f"\nAll {checks} checks passed.")
