@@ -428,6 +428,26 @@ def scope_snapshot(scope, channels):
     return state
 
 
+def _write_channel(scope, ch, want):
+    """Write one channel's coupling/scale/offset in an order the scope accepts.
+
+    The offset range is scale-dependent (see FINE_OFFSET_LIMIT), so writing
+    scale before offset breaks whenever you narrow the scale while a large
+    offset is still in force: restoring CH2 from 0.5 V/div at 5.35 V back to
+    0.2 V/div raised -222,"Data out of range", because 5.35 V is outside what
+    0.2 V/div can hold. Parking the offset at 0 first is always legal and
+    costs one extra write, so the sequence is offset->0, coupling, scale, then
+    the real offset.
+    """
+    ch = int(ch)
+    setting_scale = "scale" in want
+    if setting_scale and "offset" in want:
+        scope.put(CHANNEL_STATE["offset"].format(ch=ch), 0.0)
+    for key in ("coupling", "scale", "offset"):
+        if key in want:
+            scope.put(CHANNEL_STATE[key].format(ch=ch), want[key])
+
+
 def scope_restore(scope, state):
     """Replay a `scope_snapshot`.
 
@@ -437,9 +457,7 @@ def scope_restore(scope, state):
     the same reasoning bk4063b.restore uses for its outputs.
     """
     for ch, got in state.get("channels", {}).items():
-        for key in ("coupling", "scale", "offset"):
-            if key in got:
-                scope.put(CHANNEL_STATE[key].format(ch=int(ch)), got[key])
+        _write_channel(scope, ch, got)
     errs = scope.errors()
     if errs:
         print(f"       scope complained while restoring: {'; '.join(errs)}")
@@ -453,9 +471,7 @@ def scope_apply(scope, setup):
     the coupling that will actually be in force.
     """
     for ch, want in setup.items():
-        for key in ("coupling", "scale", "offset"):
-            if key in want:
-                scope.put(CHANNEL_STATE[key].format(ch=int(ch)), want[key])
+        _write_channel(scope, ch, want)
     errs = scope.errors()
     if errs:
         raise RuntimeError(f"the scope rejected the noise setup: {'; '.join(errs)}")
@@ -465,6 +481,15 @@ def scope_apply(scope, setup):
 # because the trace is off screen. It is a number, and a number divided into a
 # PSD gives a RIN of about zero, so it has to be caught rather than propagated.
 MEAS_INVALID = 9.9e37
+
+# The MSO-X's vertical offset range depends on the V/div, and the step is
+# sharp: measured 31 Aug 2026, an offset of 5.336 V was accepted at 0.5 V/div
+# and refused with -222,"Data out of range" at 0.2 V/div. The archived captures
+# in scope_data/ say the same from the other side -- nothing below 0.2 V/div
+# ever carries more than ~1.8 V of offset, while 0.5 V/div and coarser reach
+# 10-19 V. Anything that wants to zoom in on a pedestal has to respect it.
+FINE_OFFSET_LIMIT = 2.0      # V of offset available below COARSE_OFFSET_SCALE
+COARSE_OFFSET_SCALE = 0.5    # V/div at which the offset range opens up
 
 
 def _measure(scope, scpi):
@@ -518,9 +543,25 @@ def measure_vdc(scope, channel, coarse_scale=1.0, settle=0.4, repeats=3,
                 f"coarse_scale.")
 
         # Fine pass: centre the level and zoom in on what is left.
+        #
+        # Measured on this MSO-X 2014A, 31 Aug 2026, against a 5.34 V pedestal:
+        # `:CHANnel<n>:OFFSet` is the voltage represented at the CENTRE of the
+        # screen, NOT a value subtracted from the trace. Offset +5.336 at
+        # 0.5 V/div read VAVG 5.3499; offset -5.336 read nothing at all. So the
+        # offset is written as +coarse and the fine pass then measures the
+        # ABSOLUTE level, not a residual about it.
+        #
+        # And the offset range is scale-dependent: about +/-2 V below
+        # 0.5 V/div, about +/-20 V at or above it. Measured the same day --
+        # offset 5.336 was accepted at 0.5 V/div and refused with
+        # -222,"Data out of range" at 0.2 V/div. abs(coarse)/20 would put a
+        # 5.3 V level at 0.27 V/div, where its own offset is illegal, so the
+        # fine scale has to be floored whenever the level needs a big offset.
         fine_scale = max(abs(coarse) / 20.0, min_scale)
+        if abs(coarse) > FINE_OFFSET_LIMIT:
+            fine_scale = max(fine_scale, COARSE_OFFSET_SCALE)
         scope_apply(scope, {channel: {"coupling": "DC", "scale": fine_scale,
-                                      "offset": -coarse}})
+                                      "offset": coarse}})
         time.sleep(settle)
         fine = _read_vavg(scope, channel, repeats)
         detail["fine_scale"] = fine_scale
@@ -532,9 +573,9 @@ def measure_vdc(scope, channel, coarse_scale=1.0, settle=0.4, repeats=3,
             log(f"       V_DC CH{channel} = {coarse:.6g} V (coarse only - the "
                 f"fine pass at {fine_scale:g} V/div read nothing)")
             return coarse, detail
-        # The offset is subtracted on screen, so the fine pass measures the
-        # residual about it; the level is the two added back together.
-        fine_abs = coarse + fine
+        # The offset centres the trace rather than subtracting from it, so the
+        # fine pass already reads the absolute level -- nothing to add back.
+        fine_abs = fine
         detail["fine_absolute_v"] = fine_abs
         if abs(fine_abs - coarse) > tol * max(abs(coarse), 1e-9):
             detail["used"] = "coarse"
