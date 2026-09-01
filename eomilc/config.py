@@ -106,7 +106,13 @@ _AMP = np.array([0.557, 1.113, 2.236, 3.344, 4.470, 5.361])
 EO1 = Channel(
     name="EO1",
     divider=0.6254, divider_tol=0.0038,
-    amp_mon_product=0.8926,          # <-- 11% low.  Unresolved: gain or monitor.
+    # RESOLVED optically 31 Aug 2026 (campaign step 1.4): it is neither a
+    # crystal difference nor a monitor-scale error.  V_pi at the monitor agrees
+    # between the two EOMs to 0.18 % (5128.3 vs 5137.4 V), which kills the
+    # "it's the monitors" branch; the discrepancy lives in EO2's command->HV
+    # gain.  EO1 is right as it stands: measured 0.5594 against divider x
+    # amp_mon_product = 0.5582, i.e. 0.2 %.
+    amp_mon_product=0.8926,
     amp_pts=_AMP,
     gain_pts=np.array([0.5633, 0.5601, 0.5633, 0.5619, 0.5593, 0.5582]),
     tau_pts=np.array([25.76, 25.77, 26.71, 27.13, 27.60, 27.83]) * 1e-6,
@@ -119,7 +125,17 @@ EO1 = Channel(
 EO2 = Channel(
     name="EO2",
     divider=0.6103, divider_tol=0.0037,
-    amp_mon_product=1.0011,          # closes exactly
+    # WAS 1.0011 ("closes exactly").  Measured optically 1 Sep 2026: V_pi is
+    # 5137.4 V at the monitor and 8.6718 V commanded, so the command->monitor
+    # gain is 0.5924, and amp_mon_product = 0.5924 / divider = 0.9707.  The old
+    # value was 3.0 % high.
+    #
+    # NOTE A CONTRADICTION THIS DOES NOT FIX: gain_pts below says 0.6076 near
+    # 5 V, which is 2.5 % above the same measurement.  For EO1 the two agree to
+    # 0.13 %.  One optical point should not overwrite a six-point FRF table, so
+    # gain_pts is left alone -- but EO2's electrical calibration disagrees with
+    # its optical one and that is unexplained.  Do not average them.
+    amp_mon_product=0.9707,
     amp_pts=np.array([0.609, 1.217, 2.441, 3.665, 4.881, 5.367]),
     gain_pts=np.array([0.6123, 0.6098, 0.6126, 0.6125, 0.6079, 0.6075]),
     tau_pts=np.array([27.09, 27.88, 29.18, 29.54, 29.84, 29.59]) * 1e-6,

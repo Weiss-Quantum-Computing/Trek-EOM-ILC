@@ -160,9 +160,15 @@ def fit_fringe(v, i, n_eom=2, v_pi_guess=5200.0, theta_a=0.0,
     a, c, s = coef
     b = float(np.hypot(c, s))
     psi = float(np.arctan2(s, c))
-    if b > a:                       # a fringe cannot dip below zero intensity
-        raise ValueError(f"fit gives B={b:.4g} > A={a:.4g}: the sweep is not a "
-                         f"clean fringe (clipping, drift, or a wrong dark level)")
+    # A fringe cannot dip below zero intensity, so B > A means the dark level is
+    # wrong -- but the check needs slack, because a GOOD fringe sits right on the
+    # boundary. At visibility 0.9996 (measured on this bench) B/A = 0.99955, and
+    # least-squares noise then puts B a hair over A on a perfectly clean sweep.
+    # A genuinely wrong dark level overshoots by percent, not by 0.05 %.
+    if b > 1.02 * a:
+        raise ValueError(f"fit gives B={b:.4g} > A={a:.4g} by more than 2 %: the "
+                         f"sweep is not a clean fringe (clipping, drift, or a "
+                         f"wrong dark level -- pass i_dark)")
     return FringeCal(a=float(a), b=b, omega=float(w_best), psi=psi,
                      theta_a=float(theta_a), n_eom=int(n_eom),
                      i_dark=float(i_dark))
