@@ -1,6 +1,6 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-46 numbered checks: state round-trips, the span guard, the model ladder,
+47 numbered checks: state round-trips, the span guard, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
@@ -921,6 +921,7 @@ _shot["i"] = 0
 stacks = ilc_bench.capture_all(_MultiScope(), [1, 3, 2], sN.t, sN.t_off,
                                repeats=5, wait_s=1, settle=0)
 assert set(stacks) == {"CH1", "CH2", "CH3"}, stacks.keys()
+assert stacks.raw is None and stacks.t_grid is sN.t
 assert all(v.shape == (5, nMC) for v in stacks.values()), \
     {k: v.shape for k, v in stacks.items()}
 ens = pol.ensemble(stacks["CH2"])
@@ -941,14 +942,62 @@ app.stop_evt.clear()
 y_mon = app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=4,
                            wait_s=1, settle=0, aux=(2,), aux_store=aux_store)
 assert np.allclose(y_mon, y_p, atol=1e-9), "aux capture perturbed the monitor"
-assert set(aux_store) == {"CH2", "CH3"} and aux_store["CH2"].shape == (4, nMC)
+capA = aux_store["capture"]
+assert set(capA) == {"CH2", "CH3"} and capA["CH2"].shape == (4, nMC)
+assert capA.raw is None, "keep='grid' must not carry a raw view"
+_shot["i"] = 0
+aux2 = {}
+app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=3, wait_s=1,
+                   settle=0, aux=(2,), aux_store=aux2, keep="both")
+capB = aux2["capture"]
+assert capB.grid["CH2"].shape == (3, nMC) and capB.raw["CH2"].shape[0] == 3
+assert capB.t_raw is not None and capB.t_grid is not None
 _shot["i"] = 0
 y_plain = app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=4,
                              wait_s=1, settle=0)
 assert np.allclose(y_plain, y_mon, atol=1e-12), \
     "the no-aux path must be bit-identical to before"
-print(f"[45] _bench_capture aux: CH2 stack {aux_store['CH2'].shape} filled, "
-      f"monitor return bit-identical with and without aux")
+print(f"[45] _bench_capture aux: CH2 stack {capA['CH2'].shape} filled, "
+      f"keep='both' carries grid+raw, monitor return bit-identical")
+
+# ---- the raw view must preserve the ADC word lattice ------------------------
+# resample interpolates between scope samples and boxcars when decimating, and
+# either invents values that were never digitised. Measured on the bench, a
+# monitor whose real lattice is 2.5 mV came back from the resampled stack with
+# 4975 distinct values and an apparent 0.6 uV step, so a dither verdict taken
+# after the resample is meaningless. This is that failure in miniature.
+LSB = 2.5e-3
+tQ = np.arange(0, len(sN.t) * 4) * (float(np.median(np.diff(sN.t))) / 4)
+vQ = np.round(np.sin(2 * np.pi * 300.0 * tQ) / LSB) * LSB
+
+class _QuantScope:
+    def single(self, wait_s=None): return True
+    def waveform(self, ch, **kw): return (tQ, vQ)
+    def run(self): pass
+
+def step_of(a):
+    d = np.diff(np.unique(a))
+    return float(d[d > 0].min())
+
+capQ = ilc_bench.capture_all(_QuantScope(), [2], sN.t, 0.0, repeats=2,
+                             wait_s=1, settle=0, keep="both")
+raw_n = len(np.unique(capQ.raw["CH2"][0]))
+grid_n = len(np.unique(capQ.grid["CH2"][0]))
+assert abs(step_of(capQ.raw["CH2"][0]) - LSB) < 1e-12, "raw view lost the lattice"
+assert step_of(capQ.grid["CH2"][0]) < LSB / 10, "resample should invent values"
+assert grid_n > 5 * raw_n, (raw_n, grid_n)
+capR = ilc_bench.capture_all(_QuantScope(), [2], repeats=2, wait_s=1,
+                             settle=0, keep="raw")
+assert capR.grid is None and capR.t_grid is None and capR["CH2"].shape[0] == 2
+try:
+    ilc_bench.capture_all(_QuantScope(), [2], repeats=1, keep="grid")
+    raise AssertionError("keep='grid' without a t_grid should be refused")
+except ValueError as e:
+    assert "t_grid" in str(e), e
+print(f"[46] raw view keeps the {LSB*1e3:g} mV lattice ({raw_n} distinct "
+      f"values, step {step_of(capQ.raw['CH2'][0])*1e3:.3f} mV); resampling "
+      f"invents {grid_n} values at {step_of(capQ.grid['CH2'][0])*1e9:.3g} nV "
+      f"-- keep='raw' needs neither t_grid nor pandas")
 
 app.stop_evt.clear()
 _res2 = app._frf_capture(_MultiScope(), 1, 3, bins, sN.t, sN.t_off,
@@ -963,7 +1012,7 @@ _res3 = app._frf_capture(_MultiScope(), 1, 3,
                          np.arange(2, 20), sN.t, sN.t_off, repeats=2,
                          wait_s=1, settle=0, aux_ch=2, window=(0, nw))
 assert _res3["aux"] is not None and len(_res3["mon"][0]) == 18
-print(f"[46] _frf_capture aux: H_pd/H_mon flat at {ratio.mean():.4f} "
+print(f"[47] _frf_capture aux: H_pd/H_mon flat at {ratio.mean():.4f} "
       f"(the fake's 0.5); hold-window analysis accepted over "
       f"{nw} of {len(sN.t)} samples")
 

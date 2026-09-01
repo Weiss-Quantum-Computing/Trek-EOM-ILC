@@ -29,8 +29,9 @@ run/polarimetry/. That is deliberate: the SR760 campaign left A4, A6, A7, A9
 and B3 with results in prose and no traces on disk, and the numbers are only as
 good as the ability to recompute them.
 
-Run it on Anaconda: capture_all needs eomilc.scope.resample, which needs
-pandas, which the system Python does not have.
+Run it on Anaconda: the resampled view needs eomilc.scope.resample, which
+needs pandas, which the system Python does not have. (A lattice-only run could
+use capture_all(keep="raw"), which imports no scopeio at all.)
 
     "C:/ProgramData/anaconda3/python.exe" tools/pd_check.py --pd-ch 2 --expect-vdc 5.4
 
@@ -71,33 +72,6 @@ def lattice(v):
     d = np.diff(u)
     d = d[d > 0]
     return (float(np.median(d)) if d.size else float("nan")), int(u.size)
-
-
-def raw_shots(scope, chans, n, wait_s):
-    """N single shots read RAW, with no resampling.
-
-    capture_all resamples onto the target's 2 us grid, and linear
-    interpolation between scope samples invents intermediate values: measured
-    here, a monitor channel whose real word lattice is 2.5 mV came back with
-    4975 distinct values and an apparent 0.6 uV step. So the lattice -- and the
-    dither in units of it -- has to be measured before the resample, which is
-    what this is for. The resampled stack is still what the analysis uses.
-    """
-    out = {ch: [] for ch in chans}
-    for i in range(n):
-        if scope.single(wait_s=wait_s) is not True:
-            raise RuntimeError(f"no trigger within {wait_s:g} s on raw shot "
-                               f"{i+1} -- is the bench sequence running?")
-        for ch in chans:
-            _, v = scope.waveform(ch)
-            out[ch].append(np.asarray(v, float))
-        scope.run()
-    lens = {ch: {len(v) for v in rows} for ch, rows in out.items()}
-    for ch, ls in lens.items():
-        if len(ls) != 1:
-            raise RuntimeError(f"CH{ch} returned differing raw lengths {ls} "
-                               f"-- the scope changed setup mid-run")
-    return {ch: np.vstack(rows) for ch, rows in out.items()}
 
 
 def channel_state(scope, ch):
@@ -229,11 +203,16 @@ def main():
         for ch in chans:
             meta[f"ch{ch}_at_capture"] = channel_state(scope, ch)
 
-        print(f"\n{a.repeats} raw shots (for the lattice) ...")
-        raw = raw_shots(scope, chans, a.repeats, a.wait)
-        print(f"{a.repeats} resampled shots via capture_all ...")
-        stacks = ilc_bench.capture_all(scope, chans, t_grid, 0.0,
-                                       repeats=a.repeats, wait_s=a.wait)
+        # One acquisition, both views. capture_all(keep="both") keeps the raw
+        # samples alongside the resampled stack, so the lattice check and the
+        # analysis now describe THE SAME shots -- taking them as two runs
+        # halved neither the time nor the ambiguity.
+        print(f"\n{a.repeats} shots, raw + resampled from one acquisition ...")
+        cap = ilc_bench.capture_all(scope, chans, t_grid, 0.0,
+                                    repeats=a.repeats, wait_s=a.wait,
+                                    keep="both")
+        raw = {ch: cap.raw[f"CH{ch}"] for ch in chans}
+        stacks = cap.grid
     finally:
         ilc_bench.scope_restore(scope, saved)
         scope.close()

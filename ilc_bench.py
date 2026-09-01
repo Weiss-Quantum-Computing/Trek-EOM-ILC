@@ -54,6 +54,7 @@ where it was meant to.
 """
 from __future__ import annotations
 import argparse, contextlib, importlib.util, os, sys, time
+from dataclasses import dataclass
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -330,17 +331,74 @@ def verify_alignment(scope, drive_ch, u, t_grid, t_off, wait_s):
           f"t-offset {t_off*1e6:+.1f} us -- OK")
 
 
-def capture_all(scope, channels, t_grid, t_offset,
-                repeats=64, wait_s=30.0, points=None, settle=0.5):
+@dataclass
+class Capture:
+    """One acquisition run, in whichever views were asked for.
+
+    `grid` holds stacks resampled onto the ILC's own time base; `raw` holds the
+    scope's samples exactly as it returned them.  Either may be None.  Indexing
+    (`cap["CH3"]`) hands back the grid view when there is one and the raw view
+    otherwise, so the common case reads the same as a plain dict.
+    """
+    channels: tuple
+    n_shots: int
+    grid: dict = None
+    raw: dict = None
+    t_grid: np.ndarray = None
+    t_raw: np.ndarray = None
+
+    def _view(self):
+        return self.grid if self.grid is not None else self.raw
+
+    def __getitem__(self, col):
+        return self._view()[col]
+
+    def __contains__(self, col):
+        return col in self._view()
+
+    def __iter__(self):
+        return iter(self._view())
+
+    def keys(self):
+        return self._view().keys()
+
+    def values(self):
+        return self._view().values()
+
+    def items(self):
+        return self._view().items()
+
+
+def capture_all(scope, channels, t_grid=None, t_offset=0.0,
+                repeats=64, wait_s=30.0, points=None, settle=0.5,
+                keep="grid"):
     """Take `repeats` single shots and return EVERY channel, un-averaged.
 
-    Returns {"CH<n>": (repeats, len(t_grid)) array}.  Handing back the stack
-    rather than the mean is what makes the optical campaign possible: the
-    ensemble MEAN is the repeatable error ILC can learn and the ensemble STD is
-    the shot-to-shot part it structurally cannot, and collapsing to the mean
-    inside the capture throws the second one away.  See eomilc.polarimetry for
-    the split.  At 64 shots x 4 channels x a 5501-point grid the stack is a
-    few MB, which is not worth optimising away.
+    Handing back the stack rather than the mean is what makes the optical
+    campaign possible: the ensemble MEAN is the repeatable error ILC can learn
+    and the ensemble STD is the shot-to-shot part it structurally cannot, and
+    collapsing to the mean inside the capture throws the second one away.  See
+    eomilc.polarimetry for the split.  At 64 shots x 4 channels x a 5501-point
+    grid the stack is a few MB, which is not worth optimising away.
+
+    `keep` picks the view, and it matters more than it looks:
+
+    * "grid" (default) -- resampled onto `t_grid`, what the ILC loop iterates on.
+    * "raw"  -- the scope's own samples, untouched.  `t_grid` is not needed, and
+      nothing here imports scopeio, so this view works on the system
+      interpreter, which has no pandas.
+    * "both" -- one acquisition, both views, THE SAME SHOTS in each.
+
+    **Anything that reasons about ADC codes must use "raw".**  `resample` does
+    two things that destroy the word lattice: it interpolates linearly between
+    scope samples, inventing values that were never digitised, and when
+    decimating it also boxcar-averages.  Measured on this bench, a monitor
+    channel whose real lattice is 2.5 mV came back from the resampled stack
+    showing 4975 distinct values and an apparent 0.6 uV step -- so a dither or
+    quantisation verdict computed after the resample is meaningless.  "both"
+    exists so that check no longer costs a second trigger run: taking raw and
+    grid from separate acquisitions doubles the time AND leaves the two views
+    describing different shots, which cannot then be compared shot by shot.
 
     Every channel is read from the SAME frozen acquisition, between :SINGle and
     run(), so the traces are simultaneous and can be cross-correlated.  Reading
@@ -348,25 +406,57 @@ def capture_all(scope, channels, t_grid, t_offset,
 
     The settle wait happens ONCE, not per shot -- it exists to let the chain
     settle after a new upload, and each shot already waits for its own trigger.
-    64 HRES singles at the 20 Hz trigger cost ~25 s for two channels, and
+    64 HRES singles at the 3.7 Hz trigger cost ~17 s for two channels, and
     roughly scales with the channel count from there.
     """
+    if keep not in ("grid", "raw", "both"):
+        raise ValueError(f"keep must be 'grid', 'raw' or 'both', got {keep!r}")
+    want_grid = keep in ("grid", "both")
+    want_raw = keep in ("raw", "both")
+    if want_grid and t_grid is None:
+        raise ValueError(f"keep={keep!r} resamples, so it needs a t_grid; pass "
+                         f"keep='raw' to skip resampling entirely")
+
     time.sleep(settle)
-    out = {f"CH{ch}": [] for ch in channels}
+    cols = [f"CH{ch}" for ch in channels]
+    g = {c: [] for c in cols} if want_grid else None
+    r = {c: [] for c in cols} if want_raw else None
+    t_raw = None
+
     for i in range(repeats):
         got = scope.single(wait_s=wait_s)
         if got is not True:
             raise RuntimeError(f"no trigger within {wait_s:g} s on repeat {i+1} "
                                f"-- is the sequence running?")
-        cols = {}
+        shot = {}
         for ch in channels:
-            t, v = scope.waveform(ch, points=points)
-            cols[f"CH{ch}"] = (t, v)
+            shot[f"CH{ch}"] = scope.waveform(ch, points=points)
         scope.run()
-        for col, (t_src, v_src) in cols.items():
-            out[col].append(scopeio.resample(t_src, v_src, t_grid,
-                                             t_offset=t_offset))
-    return {col: np.asarray(rows, float) for col, rows in out.items()}
+        for col, (t_src, v_src) in shot.items():
+            if want_grid:
+                g[col].append(scopeio.resample(t_src, v_src, t_grid,
+                                               t_offset=t_offset))
+            if want_raw:
+                v = np.asarray(v_src, float)
+                if t_raw is None:
+                    t_raw = np.asarray(t_src, float) - t_offset
+                elif v.size != t_raw.size:
+                    # Never interpolate to fix this: doing so would invent the
+                    # very samples the raw view exists to preserve.
+                    raise RuntimeError(
+                        f"{col} returned {v.size} raw samples on repeat {i+1} "
+                        f"against {t_raw.size} on the first -- the scope "
+                        f"changed setup mid-run. Re-run with a fixed setup; "
+                        f"the raw view cannot be interpolated back into "
+                        f"alignment without destroying the word lattice.")
+                r[col].append(v)
+
+    return Capture(channels=tuple(cols), n_shots=int(repeats),
+                   grid={c: np.asarray(v, float) for c, v in g.items()}
+                   if want_grid else None,
+                   raw={c: np.asarray(v, float) for c, v in r.items()}
+                   if want_raw else None,
+                   t_grid=t_grid if want_grid else None, t_raw=t_raw)
 
 
 def capture(scope, channels, mon_col, t_grid, t_offset,
@@ -376,9 +466,9 @@ def capture(scope, channels, mon_col, t_grid, t_offset,
     A thin wrapper over `capture_all`; reach for that one when you want the
     other channels or the shot-to-shot spread.
     """
-    stacks = capture_all(scope, channels, t_grid, t_offset, repeats=repeats,
-                         wait_s=wait_s, points=points, settle=settle)
-    return ilc.averaged(list(stacks[mon_col]))
+    cap = capture_all(scope, channels, t_grid, t_offset, repeats=repeats,
+                      wait_s=wait_s, points=points, settle=settle)
+    return ilc.averaged(list(cap.grid[mon_col]))
 
 
 

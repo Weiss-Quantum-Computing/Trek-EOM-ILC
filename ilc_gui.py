@@ -2800,7 +2800,8 @@ class App:
         return True, True
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
-                       settle=0.5, native_path=None, aux=(), aux_store=None):
+                       settle=0.5, native_path=None, aux=(), aux_store=None,
+                       keep="grid"):
         """ilc_bench.capture with a progress bar and a stop check between
         shots. The settle wait happens once, after the new upload.
 
@@ -2818,16 +2819,27 @@ class App:
         error ILC cannot learn and averaging inside the capture throws it
         away (see eomilc.polarimetry).
 
-        aux_store: a dict the caller passes in and gets filled with
-        {"CH<n>": (repeats, len(t_grid))} for the monitor AND every aux
-        channel. Filling a caller's dict rather than changing the return
-        type keeps the ILC loop's `y = self._bench_capture(...)` untouched.
+        aux_store: a dict the caller passes in; gets aux_store["capture"] =
+        an ilc_bench.Capture covering the monitor AND every aux channel.
+        Filling a caller's dict rather than changing the return type keeps
+        the ILC loop's `y = self._bench_capture(...)` untouched.
+
+        keep: "grid" (resampled, the default), "raw" (the scope's own
+        samples, untouched) or "both". The monitor is ALWAYS resampled
+        regardless, because the loop iterates on the grid -- keep only
+        governs what lands in aux_store. Reach for "raw" or "both" for
+        anything that reasons about ADC codes: resample interpolates
+        between samples and boxcars when decimating, and either one
+        destroys the word lattice a dither check depends on.
         """
         time.sleep(settle)
         traces = []
         aux = tuple(aux)
-        stacks = {f"CH{c}": [] for c in (ch,) + aux} if (aux or
-                                                         aux_store is not None) else None
+        want = aux or aux_store is not None
+        cols = [f"CH{c}" for c in (ch,) + aux]
+        g = {c: [] for c in cols} if (want and keep in ("grid", "both")) else None
+        r = {c: [] for c in cols} if (want and keep in ("raw", "both")) else None
+        t_raw = None
         t_nat, y_nat = None, 0.0
         # denser than the scope's 5000-point default: >= 2 samples per grid
         # step keeps the anti-alias boxcar honest, and a kept native
@@ -2848,11 +2860,24 @@ class App:
             scope.run()
             y_mon = scopeio.resample(ts, vs, t_grid, t_offset=t_off)
             traces.append(y_mon)
-            if stacks is not None:
-                stacks[f"CH{ch}"].append(y_mon)
-                for c, ta, va in extra:
-                    stacks[f"CH{c}"].append(
-                        scopeio.resample(ta, va, t_grid, t_offset=t_off))
+            if want:
+                shot = [(f"CH{ch}", ts, vs)] + [(f"CH{c}", ta, va)
+                                                for c, ta, va in extra]
+                for col, tc, vc in shot:
+                    if g is not None:
+                        g[col].append(y_mon if col == f"CH{ch}" else
+                                      scopeio.resample(tc, vc, t_grid,
+                                                       t_offset=t_off))
+                    if r is not None:
+                        v = np.asarray(vc, float)
+                        if t_raw is None:
+                            t_raw = np.asarray(tc, float) - t_off
+                        elif v.size != t_raw.size:
+                            raise RuntimeError(
+                                f"{col} returned {v.size} raw samples on "
+                                f"repeat {i+1} against {t_raw.size} on the "
+                                f"first -- the scope changed setup mid-run.")
+                        r[col].append(v)
             if native_path is not None:
                 if t_nat is None:            # repeats share the scope
                     t_nat = np.asarray(ts, float)   # config; align a stray
@@ -2866,12 +2891,17 @@ class App:
             print(f"  native-rate average kept: {os.path.basename(native_path)}"
                   f" ({len(t_nat)} pts, dt "
                   f"{np.median(np.diff(t_nat))*1e9:.0f} ns)")
-        if stacks is not None and aux_store is not None:
-            aux_store.update({k: np.asarray(v, float)
-                              for k, v in stacks.items()})
+        if want and aux_store is not None:
+            aux_store["capture"] = ilc_bench.Capture(
+                channels=tuple(cols), n_shots=int(repeats),
+                grid={c: np.asarray(v, float) for c, v in g.items()}
+                if g is not None else None,
+                raw={c: np.asarray(v, float) for c, v in r.items()}
+                if r is not None else None,
+                t_grid=t_grid if g is not None else None, t_raw=t_raw)
             if aux:
-                print(f"  kept {repeats} shots on "
-                      f"{', '.join(sorted(stacks))} for the ensemble split")
+                print(f"  kept {repeats} shots on {', '.join(cols)} "
+                      f"({keep}) for the ensemble split")
         return ilc.averaged(traces)
 
     # ---------------------------------------------------------------- plots
