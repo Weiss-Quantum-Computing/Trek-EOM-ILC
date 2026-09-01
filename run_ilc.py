@@ -52,12 +52,51 @@ def load_target(path: str, scale: float = HV_PER_MON):
     EOM volts, measured on the 1 V/kV monitor), 1.0 for GEN (target already
     in the units the scope measures)."""
     df = pd.read_csv(path, comment="#")
+    _refuse_headerless(df, path)
     cols = {c.lower(): c for c in df.columns}
     tcol = cols.get("time_us") or cols.get("time_s") or df.columns[0]
     vcol = cols.get("voltage_v") or df.columns[1]
     t = df[tcol].to_numpy(float)
     t = t * 1e-6 if "us" in tcol.lower() else t
     return t, df[vcol].to_numpy(float) / scale
+
+
+def _refuse_headerless(df, path):
+    """A file whose first line is numbers has no header: pandas takes that
+    line AS the header and the first column is then read as seconds. The
+    Waveform Editor's default save is exactly that (`index,value`, no
+    header) -- a 5501-point drive came back as 5500 points at dt = 1 s
+    (measured 1 Sep 2026). Refuse it by name rather than misread it."""
+    try:
+        [float(c) for c in df.columns]
+    except ValueError:
+        return                       # a real header row
+    raise ValueError(
+        f"{path} has no header row (its first line is numbers), so there is "
+        f"no time axis to read. If it came from the Waveform Editor, tick "
+        f"'ILC header (time_us,voltage_V)' there, set the sample rate "
+        f"(500kHz for the 2 us grid) and save again; otherwise add that "
+        f"header and a time column by hand.")
+
+
+def load_seed_drive(path: str, t: np.ndarray) -> np.ndarray:
+    """An existing drive CSV (`time_us,voltage_V`, AWG volts) to play as
+    iteration 0 instead of the flat conversion. Same grid as the target,
+    enforced: an edited drive and its edited target must have been edited
+    the same way, and a one-sample slip between them is a systematic the
+    loop would then learn."""
+    ts, u = load_target(path, 1.0)
+    if len(u) != len(t):
+        raise ValueError(
+            f"seed drive {path} has {len(u)} points; the target has {len(t)}."
+            f" Edit both files the same way (same hold, same span).")
+    dt_s = float(np.median(np.diff(ts)))
+    dt_t = float(np.median(np.diff(t)))
+    if abs(dt_s - dt_t) > 1e-3 * dt_t:
+        raise ValueError(
+            f"seed drive {path} is on a {dt_s*1e6:.4g} us grid; the target "
+            f"is on {dt_t*1e6:.4g} us. Resample one of them first.")
+    return np.asarray(u, float)
 
 
 def save_state(path, **kw):
@@ -105,6 +144,11 @@ def cmd_init(a):
     g_shot = a.shot_gain if a.shot_gain is not None else p.gain
     kind = ("model-based pre-distortion" if a.model_first_shot
             else f"flat conversion, target / {g_shot:g}")
+    seed_path = ""
+    if a.seed_drive:
+        u = load_seed_drive(a.seed_drive, t)
+        seed_path = os.path.abspath(a.seed_drive)
+        kind = f"seed drive {os.path.basename(a.seed_drive)}, played as-is"
 
     print(f"channel     : {ch.name}")
     print(f"target      : {np.ptp(v)*ch.mon_scale:.0f} V peak-to-peak over {t[-1]*1e3:.2f} ms")
@@ -125,7 +169,8 @@ def cmd_init(a):
                offset=0.0, tau2=0.0, fn=p.fn, zeta=p.zeta,
                full_scale=a.full_scale, name=(a.name or ch.name),
                gamma=a.gamma, f_cut=a.f_cut, iteration=0,
-               t_offset=a.t_offset * 1e-6, history=np.array([], dtype=object))
+               t_offset=a.t_offset * 1e-6, history=np.array([], dtype=object),
+               seed_path=seed_path)
     print(f"\nwrote {out}\n      {gui}  (GUI-ready, normalised)\nstate {st}")
 
 
@@ -207,7 +252,8 @@ def cmd_step(a):
                full_scale=float(st["full_scale"]), name=str(st["name"]),
                gamma=loop.gamma, f_cut=loop.f_cut,
                iteration=it + 1, t_offset=t_off,
-               history=np.array(loop.history, dtype=object))
+               history=np.array(loop.history, dtype=object),
+               seed_path=str(st["seed_path"]) if "seed_path" in st else "")
     print(f"\n{loop.report()}\n\nwrote {out}\n      {gui}  (GUI-ready, normalised)")
 
 
@@ -283,6 +329,12 @@ def main():
                         "instead of the default flat conversion (target / "
                         "gain). Flat is the default so the first measurement "
                         "shows the chain's raw response directly.")
+    i.add_argument("--seed-drive", metavar="DRIVE.CSV", default=None,
+                   help="play THIS drive (time_us,voltage_V, AWG volts) as "
+                        "iteration 0 instead of any first shot -- an edited "
+                        "converged drive against its edited target, for "
+                        "instance. Must share the target's point count and "
+                        "grid. Recorded in the state as seed_path.")
     i.set_defaults(func=cmd_init)
 
     s = sub.add_parser("step", help="one ILC iteration from measured traces")

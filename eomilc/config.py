@@ -44,6 +44,19 @@ class Channel:
     fine_ratio: float = 100.0                    # coarse:fine attenuation
     mon_scale: float = HV_PER_MON                # output units per measured volt
     out_name: str = "EOM"                        # what the scaled output is called
+    # Optical calibration (polarimetry campaign, 31 Aug - 1 Sep 2026), in
+    # output units (V at the EOM = monitor V x mon_scale). v90_hv is the
+    # 90-degree rotation point, i.e. the REAL peak of a rotation-ramp target
+    # (the 5200 V targets overshoot it); eo_zero_hv is where the rotation is
+    # zero -- an offset, not a gain, so a target that starts at 0 V starts
+    # |eo_zero_hv| away from the EO zero; cmd_hv_gain_meas is the end-to-end
+    # command->HV gain from that measurement (V90 commanded at the AWG =
+    # v90_hv / cmd_hv_gain_meas / mon_scale); hysteresis_pct is the rise/fall
+    # difference of the monitor against the light. NaN = not measured (GEN).
+    v90_hv: float = float("nan")
+    eo_zero_hv: float = float("nan")
+    cmd_hv_gain_meas: float = float("nan")
+    hysteresis_pct: float = float("nan")
 
     def _table(self, pts, amplitude_mon: float) -> float:
         """Calibration lookup, refused loudly when there is nothing to look
@@ -120,6 +133,10 @@ EO1 = Channel(
     zeta_pts=np.array([0.2407, 0.2295, 0.2144, 0.2109, 0.2124, 0.2062]),
     noise_trek_in_rms=143.7e-6,
     has_fine_channel=False,
+    # 1 Sep 2026 (Maarten's table): V90 5128.3 V at the monitor = 9.168 V
+    # commanded; measured gain 0.5594 vs the 0.5586 the tables give here.
+    v90_hv=5128.3, eo_zero_hv=-20.7, cmd_hv_gain_meas=0.5594,
+    hysteresis_pct=0.21,
 )
 
 EO2 = Channel(
@@ -143,6 +160,11 @@ EO2 = Channel(
     zeta_pts=np.array([0.2142, 0.2163, 0.2014, 0.2074, 0.2143, 0.2094]),
     noise_trek_in_rms=623.5e-6,
     has_fine_channel=True, fine_ratio=100.0,
+    # 1 Sep 2026 (Maarten's table): V90 5137.4 V at the monitor = 8.672 V
+    # commanded; measured gain 0.5924 vs 0.6078 from gain_pts (the 2.5 %
+    # contradiction noted above, unchanged). Hysteresis 4x smaller than X1.
+    v90_hv=5137.4, eo_zero_hv=-8.7, cmd_hv_gain_meas=0.5924,
+    hysteresis_pct=0.047,
 )
 
 # A blank channel for any OTHER system: unity divider, target CSVs read in

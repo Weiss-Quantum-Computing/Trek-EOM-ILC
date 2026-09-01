@@ -1,6 +1,7 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-47 numbered checks: state round-trips, the span guard, the model ladder,
+50 numbered checks: state round-trips, the span guard, the header-less
+file refusal, the FRQ-vs-record check, the seed-drive Init, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-stem overlays, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
@@ -87,6 +88,60 @@ try:
 except RuntimeError as e:
     print(f"[3] span guard fired as it should: {str(e)[:80]}...")
 
+# a header-less index,value file (the Waveform Editor's default save) must
+# be refused by name, not read as 5500 points of seconds
+ed_csv = os.path.join(SCRATCH, "editor_style.csv")
+with open(ed_csv, "w") as f:
+    f.write("".join(f"{i+1},{v:.10g}\n"
+                    for i, v in enumerate(s.loop.target * 1000)))
+try:
+    ilc_gui.run_ilc.load_target(ed_csv)
+    raise AssertionError("header-less editor file was not refused")
+except ValueError as e:
+    assert "ILC header" in str(e), str(e)
+    print(f"[3b] header-less editor file refused: {str(e)[:70]}...")
+
+# the FRQ-vs-record check in check_awg_channel, against a fake generator
+import re as _re
+import ilc_bench
+
+
+def _fake_parse(reply):
+    _, _, payload = reply.strip().partition(" ")
+    fields = [x.strip() for x in payload.split(",") if x.strip()]
+    out = {}
+    if len(fields) % 2:
+        out["STATE"] = fields.pop(0)
+    for k, v in zip(fields[0::2], fields[1::2]):
+        m = _re.match(r"^(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)[A-Za-z]*$", v)
+        out[k] = m.group(1) if m else v
+    return out
+
+
+class _FakeAwg:
+    def __init__(self, frq):
+        self.frq = frq
+
+    def read_channel(self, ch):
+        return {"BSWV": f"C{ch}:BSWV WVTP,ARB,FRQ,{self.frq:.6f}HZ,AMP,20V,OFST,0V",
+                "SRATE": f"C{ch}:SRATE MODE,DDS,VALUE,1000000",
+                "OUTP": f"C{ch}:OUTP OFF,LOAD,HZ"}
+
+
+_saved_mod = ilc_bench._AWGMOD
+ilc_bench._AWGMOD = type("M", (), {"parse_reply": staticmethod(_fake_parse)})
+_period = len(s.t) * s.loop.dt
+_p_ok, _n_ok = ilc_bench.check_awg_channel(_FakeAwg(1 / _period), 1,
+                                           expect_period=_period)
+_p_bad, _ = ilc_bench.check_awg_channel(_FakeAwg(1.1 / _period), 1,
+                                        expect_period=_period)
+ilc_bench._AWGMOD = _saved_mod
+assert not [p for p in _p_ok if "FRQ" in p], _p_ok
+assert [p for p in _p_bad if "FRQ" in p], _p_bad
+assert "FRQ" in _n_ok[0]
+print(f"[3c] check_awg_channel: matching FRQ passes, a 10% stale FRQ is "
+      f"flagged: {[p for p in _p_bad if 'FRQ' in p][0][:60]}...")
+
 # ---- 2. full GUI drive-through ---------------------------------------------
 import tkinter as tk
 root = tk.Tk()
@@ -108,6 +163,50 @@ app.state_var.set(STATE)
 app.do_load()
 root.update()
 print(f"[4] GUI load: summary = {app.summary.cget('text')!r}")
+
+# Init with a seed drive: iteration 0 is the seed sample for sample, the
+# state records where it came from, and a seed on the wrong grid is refused
+seed_tgt = os.path.join(SCRATCH, "seed_target.csv")
+seed_drv = os.path.join(SCRATCH, "seed_drive.csv")
+ilc_gui.outputs.write_awg_csv(seed_tgt, s.t, s.loop.target * 1000,
+                              "target copy for the seed check")
+ilc_gui.outputs.write_awg_csv(seed_drv, s.t, s.u, "seed copy")
+app.target_var.set(seed_tgt)
+app.seed_var.set(seed_drv)
+app.stem_var.set("SEEDT")
+app.channel_var.set("EO1")
+app.model_var.set(ilc_gui.KEY2LABEL["static"])
+app.pgain_var.set("0.56")
+app.do_init()
+root.update()
+assert app.session.stem == "SEEDT" and app.session.iteration == 0
+assert np.allclose(app.session.u, s.u), "seed drive was not played as-is"
+assert app.session.seed_path == os.path.abspath(seed_drv)
+_st_seed = ilc_gui.run_ilc.load_state(app.session.state_path)
+assert str(_st_seed["seed_path"]) == os.path.abspath(seed_drv)
+_s_seed = ilc_gui.load_session(app.session.state_path)
+assert _s_seed.seed_path == os.path.abspath(seed_drv), "seed_path lost on reload"
+assert "seed" in app.summary.cget("text")
+print(f"[4b] seed Init: iteration 0 = the seed drive, seed_path in the state "
+      f"and back through load_session")
+bad_seed = os.path.join(SCRATCH, "seed_short.csv")
+ilc_gui.outputs.write_awg_csv(bad_seed, s.t[:-10], s.u[:-10], "wrong grid")
+app.seed_var.set(bad_seed)
+_errs = []
+_orig_err = _mb.showerror
+_mb.showerror = lambda title, msg, **k: _errs.append(msg)
+app.do_init()
+_mb.showerror = _orig_err
+assert _errs and "points" in _errs[0], _errs
+assert app.session.stem == "SEEDT" and np.allclose(app.session.u, s.u)
+print(f"[4c] a seed on the wrong grid is refused: {_errs[0][:70]}...")
+app.seed_var.set("")
+app.model_var.set(ilc_gui.KEY2LABEL["frf"])     # back to the launch default:
+app.pgain_var.set("")                           # the FRF-mode checks below
+app.state_var.set(STATE)                        # rely on it
+app.do_load()
+root.update()
+assert app.session.stem == "MKJX1" and not app.session.seed_path
 
 # FRF viewer
 app.frf_var.set(FRF)

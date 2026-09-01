@@ -157,6 +157,8 @@ class Session:
         self.frf_use = 0.0           # are self-documenting and a resumed
         self.frf_max = 0.0           # session restores the same model
         self.frf_error = ""          # why the recorded FRF would not load
+        self.seed_path = ""          # the drive Init played as iteration 0,
+                                     # when it was not the flat conversion
 
     @property
     def channel(self):
@@ -175,6 +177,7 @@ def load_session(path) -> Session:
     s.frf_path = str(st["frf_path"]) if "frf_path" in st else ""
     s.frf_use = float(st["frf_use"]) if "frf_use" in st else 0.0
     s.frf_max = float(st["frf_max"]) if "frf_max" in st else 0.0
+    s.seed_path = str(st["seed_path"]) if "seed_path" in st else ""
     if s.model_key == "frf" and s.frf_path and os.path.exists(s.frf_path):
         try:                       # the loop resumes with its recorded inverse
             loop.frf = ilc.FRF(s.frf_path, f_use=s.frf_use, f_max=s.frf_max)
@@ -197,7 +200,7 @@ def save_session(s: Session):
              gamma=lp.gamma, f_cut=lp.f_cut, iteration=s.iteration,
              t_offset=s.t_off, history=np.array(lp.history, dtype=object),
              model=s.model_key, frf_path=s.frf_path,
-             frf_use=s.frf_use, frf_max=s.frf_max)
+             frf_use=s.frf_use, frf_max=s.frf_max, seed_path=s.seed_path)
 
 
 def avg_spectrum(e, dt, k=1):
@@ -562,6 +565,8 @@ class App:
                  hold_runs=self.holdruns_var.get(),
                  hold_gap=self.holdgap_var.get(),
                  keep_native=self.keepnative_var.get(),
+                 keep_verticals=self.keepvert_var.get(),
+                 seed_drive=self.seed_var.get(),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -644,14 +649,30 @@ class App:
         ttk.Label(r4, text="(AWG: AMP = 2x full scale, OFST 0)",
                   foreground="#666666").pack(side="left")
 
+        # Seed drive: iteration 0 = an EXISTING drive CSV instead of the flat
+        # conversion. This is how a converged drive edited in the Waveform
+        # Editor (endpoint clipped, offset added, hold changed) is played and
+        # measured against its edited target without re-learning from
+        # scratch (the Sep 2026 edit-transfer campaign). Same N and dt as
+        # the target, enforced; the limit check runs on it like on any
+        # drive. Blank = the flat first shot. Cleared with the channel.
+        self.seed_var = tk.StringVar(value=self.cfg.get("seed_drive", ""))
+        self._path_row(sf, 5, "Seed drive", self.seed_var,
+                       lambda: self._browse(self.seed_var, "Drive CSV",
+                                            "*.csv", RUN_DIR))
+        ttk.Label(sf, text="(optional: iteration 0 = this drive as-is)",
+                  foreground="#666666").grid(row=5, column=3, columnspan=2,
+                                             sticky="w")
+
         b = ttk.Button(sf, text="Init  (first shot = flat conversion, "
-                                "target / gain)", command=self.do_init)
-        b.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+                                "target / gain; or the seed drive)",
+                       command=self.do_init)
+        b.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         self._actions.append(b)
 
         self.summary = ttk.Label(sf, text="no session loaded", justify="left",
                                  font=MONO)
-        self.summary.grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        self.summary.grid(row=7, column=0, columnspan=4, sticky="w", pady=(2, 0))
         sf.columnconfigure(1, weight=1)
 
         # ---- inverse model -------------------------------------------
@@ -802,6 +823,15 @@ class App:
         ttk.Checkbutton(r0b, text="keep native-rate avg",
                         variable=self.keepnative_var).pack(side="left",
                                                            padx=(10, 0))
+        # Auto-set sizes the scope verticals from the session's spans, so a
+        # session with a smaller target (an edited endpoint) lands on a
+        # finer V/div and a different 8-bit lattice than the campaign it is
+        # compared against. Ticked, Auto-set leaves V/div and offset alone.
+        self.keepvert_var = tk.BooleanVar(
+            value=bool(self.cfg.get("keep_verticals", False)))
+        ttk.Checkbutton(r0b, text="keep verticals",
+                        variable=self.keepvert_var).pack(side="left",
+                                                         padx=(10, 0))
         rr = ttk.Frame(bf); rr.grid(row=2, column=0, sticky="ew", pady=(2, 0))
         b = ttk.Button(rr, text="Auto-set instruments", command=self.do_autoset)
         b.pack(side="left", fill="x", expand=True)
@@ -1126,6 +1156,7 @@ class App:
         for v in self._param_vars.values():
             v.set("")
         self.shotgain_var.set("")
+        self.seed_var.set("")        # a drive is in ONE chain's volts
         # The FRF file goes too. On the measured-FRF rung the FRF IS the
         # model, so a browsed one surviving a channel switch was the same
         # leak the parameter boxes above are cleared to prevent -- and the
@@ -1631,7 +1662,21 @@ class App:
                         gamma=f["gamma"], f_cut=f["f_cut"])
         u = loop.first_shot(gain=g_shot)
         g_used = g_shot if g_shot is not None else plant.gain
+        seed = self.seed_var.get().strip()
+        if seed:
+            try:
+                u = run_ilc.load_seed_drive(seed, t)
+            except (ValueError, OSError, KeyError) as e:
+                return messagebox.showerror("Init", f"seed drive: {e}")
+            seed = os.path.abspath(seed)
         rep = loop.check(u)
+        if seed and not rep and not messagebox.askyesno(
+                "Seed drive fails the limit check",
+                f"{rep}\n\nThe bench loop and Hold refuse to play a drive "
+                f"that fails this check, so this session could not be "
+                f"measured as it stands. Keep it anyway (fix the file, then "
+                f"Init again)?"):
+            return
 
         os.makedirs(RUN_DIR, exist_ok=True)
         # _i00, NOT _iter0: this is the same file _write_iteration produces
@@ -1642,9 +1687,11 @@ class App:
         # swapped its reference from "the iteration-0 drive" to "the flat
         # conversion", which differ by whatever the gain box has done since.
         out = os.path.join(RUN_DIR, f"drive_{stem}_i00.csv")
+        how = (f"seed drive {os.path.basename(seed)}, played as-is" if seed
+               else "flat conversion, target / gain")
         outputs.write_awg_csv(out, t, u,
                               comment=f"{chname} ILC iteration 0 "
-                                      f"(flat conversion, target / gain)\n{plant}")
+                                      f"({how})\n{plant}")
         wname = f"{stem}_i00"
         os.makedirs(AWG_WAVEFORMS, exist_ok=True)
         gui = outputs.write_bk_waveform(os.path.join(AWG_WAVEFORMS, wname + ".csv"),
@@ -1654,6 +1701,7 @@ class App:
                     t_off=f["t_offset_us"] * 1e-6)
         s.model_key = mode
         s.frf_path, s.frf_use, s.frf_max = frf_rec
+        s.seed_path = seed
         save_session(s)
         self.session = s
         self.state_var.set(state_path)
@@ -1666,9 +1714,17 @@ class App:
                  f"{t[-1]*1e3:.2f} ms, {len(v)} points at {dt*1e6:.3f} us")
         sep = ("" if abs(g_used - plant.gain) < 1e-12 else
                f"; the model gain is {plant.gain:g}, a separate knob")
-        self.log(f"  first shot  : flat conversion (target / {g_used:g}{sep}), "
-                 f"drive peak {np.abs(u).max():.4f} V -- no pre-distortion, "
-                 f"the first measurement shows the chain's raw response")
+        if seed:
+            self.log(f"  first shot  : SEED drive {seed} played as-is "
+                     f"(no conversion, no pre-distortion), drive peak "
+                     f"{np.abs(u).max():.4f} V, idle {u[0]*1e3:+.1f}/"
+                     f"{u[-1]*1e3:+.1f} mV -- recorded in the state as "
+                     f"seed_path")
+        else:
+            self.log(f"  first shot  : flat conversion (target / {g_used:g}"
+                     f"{sep}), drive peak {np.abs(u).max():.4f} V -- no "
+                     f"pre-distortion, the first measurement shows the "
+                     f"chain's raw response")
         self.log(f"  predicted   : peak error "
                  f"{np.abs(plant.forward(u)-v).max()*ch.mon_scale:.1f} V "
                  f"(the model's guess at what that measurement shows)")
@@ -1713,6 +1769,8 @@ class App:
                f"gamma {lp.gamma:g}, {band}"
                f"t-offset {s.t_off*1e6:g} us, "
                f"history {len(lp.history)} iterations")
+        if s.seed_path:
+            txt += f"\niteration 0 was seed {os.path.basename(s.seed_path)}"
         self.summary.configure(text=txt)
 
     # --------------------------------------------------- shared step pieces
@@ -1994,14 +2052,15 @@ class App:
         period = float(s.t[-1]) + float(s.loop.dt)
         u, v = s.u, s.loop.target
         wname = f"{s.stem}_i{s.iteration:02d}"
+        keep_vert = bool(self.keepvert_var.get())
         self.run_worker(lambda: self._autoset_work(
             period, float(u.min()), float(u.max()),
             float(v.min()), float(v.max()), s.full_scale,
-            int(f["awg_ch"]), int(f["scope_ch"]), wname),
+            int(f["awg_ch"]), int(f["scope_ch"]), wname, keep_vert),
             "auto-setting instruments...")
 
     def _autoset_work(self, period, u_lo, u_hi, v_lo, v_hi, fs,
-                      awg_ch, scope_ch, wname):
+                      awg_ch, scope_ch, wname, keep_verticals=False):
         # Connect BOTH instruments before writing to either: a scope that
         # does not answer (first live test: Scope Grab held its VISA session)
         # must not leave a half-configured bench.
@@ -2066,10 +2125,15 @@ class App:
             scope.put(":ACQuire:TYPE", "HRES")
             for ch, lo, hi, what in ((awg_ch, u_lo, u_hi, "drive"),
                                      (scope_ch, v_lo, v_hi, "monitor")):
+                scope.put(f":CHANnel{ch}:DISPlay", "1")
+                if keep_verticals:
+                    print(f"scope CH{ch} ({what}): {scope.get(f':CHANnel{ch}:SCALe')} "
+                          f"V/div, offset {scope.get(f':CHANnel{ch}:OFFSet')} V "
+                          f"-- left as found (keep verticals ticked)")
+                    continue
                 span = max(hi - lo, 1e-3)
                 scale = nice_setting(1.25 * span / 8)      # 8 vertical divs
                 mid = 0.5 * (hi + lo)
-                scope.put(f":CHANnel{ch}:DISPlay", "1")
                 scope.put(f":CHANnel{ch}:SCALe", f"{scale:.6g}")
                 scope.put(f":CHANnel{ch}:OFFSet", f"{mid:.6g}")
                 print(f"scope CH{ch} ({what}): {scale:.3g} V/div, offset "
@@ -2174,7 +2238,8 @@ class App:
         switched_on = False
         try:
             problems, notes = ilc_bench.check_awg_channel(
-                awg, awg_ch, full_scale=s.full_scale)
+                awg, awg_ch, full_scale=s.full_scale,
+                expect_period=len(s.t) * s.loop.dt)
             for note in notes:
                 print("      ", note)
             acq = scope.get(":ACQuire:TYPE")
@@ -2186,6 +2251,16 @@ class App:
                 for p in problems:
                     print("  !", p)
                 print("REFUSING -- fix the setup first.")
+                return
+            # The same guard the bench loop runs before every upload. Hold
+            # used to skip it, and with seed drives Hold is the path that
+            # plays hand-edited samples (1 Sep 2026).
+            rep = s.loop.check(s.u)
+            print("       limit check:", rep)
+            if not rep:
+                print("REFUSING to play this drive: it fails the limit check "
+                      "(an edited seed past the idle cap or the rails?). Fix "
+                      "the file and Init again.")
                 return
 
             it = s.iteration
@@ -2324,7 +2399,8 @@ class App:
         switched_on = False
         try:
             problems, notes = ilc_bench.check_awg_channel(
-                awg, awg_ch, full_scale=s.full_scale)
+                awg, awg_ch, full_scale=s.full_scale,
+                expect_period=len(s.t) * s.loop.dt)
             for n in notes:
                 print("      ", n)
             acq = scope.get(":ACQuire:TYPE")
@@ -2533,8 +2609,9 @@ class App:
         vert_saved = None        # ramp verticals, put back at the end
         try:
             problems, notes = ilc_bench.check_awg_channel(
-                awg, awg_ch, full_scale=s.full_scale)
-            for nn in notes:
+                awg, awg_ch, full_scale=s.full_scale,
+                expect_period=t_sess)   # the channel must still hold the
+            for nn in notes:            # session's period before a probe
                 print("      ", nn)
             acq = scope.get(":ACQuire:TYPE")
             print(f"       scope acquisition {acq}, {repeats} repeats")

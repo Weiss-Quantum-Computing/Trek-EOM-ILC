@@ -220,13 +220,33 @@ def make_analyzer(mod, addr=None):
 
 # --------------------------------------------------------------------- AWG
 def check_awg_channel(awg, ch, expect_rate=None, expect_clock="DDS",
-                      full_scale=10.0, tol=0.02):
-    """Refuse to upload into a channel that isn't set up the way we assume."""
+                      full_scale=10.0, tol=0.02, expect_period=None):
+    """Refuse to upload into a channel that isn't set up the way we assume.
+
+    `expect_period` is the record's N x dt in seconds. Under DDS the stored
+    record is resampled into one FRQ period, so a record of a different
+    length uploaded to a channel still at the previous FRQ plays
+    time-scaled -- and the alignment check cannot see it (it cross-
+    correlates the record START only). Found 1 Sep 2026 while planning the
+    hold-length edits; nothing had checked FRQ against the record before.
+    """
     blocks = awg.read_channel(ch)
     bswv = awg_parse(blocks["BSWV"])
     srate = awg_parse(blocks["SRATE"])
     outp = awg_parse(blocks["OUTP"])
     problems, notes = [], []
+
+    frq = as_float(bswv.get("FRQ"))
+    if expect_period:
+        if frq is None:
+            problems.append("BSWV reports no FRQ, so the record period cannot "
+                            "be confirmed against N x dt")
+        elif abs(frq * expect_period - 1.0) > 1e-4:
+            problems.append(
+                f"FRQ is {frq:.6g} Hz (period {1e3/frq:.4f} ms) but this "
+                f"record is {expect_period*1e3:.4f} ms (N x dt); under DDS "
+                f"the burst would play time-scaled. Run Auto-set with the "
+                f"output OFF, or set FRQ = {1/expect_period:.6g} Hz.")
 
     amp = as_float(bswv.get("AMP"))
     ofst = as_float(bswv.get("OFST"))
@@ -254,7 +274,7 @@ def check_awg_channel(awg, ch, expect_rate=None, expect_clock="DDS",
 
     notes.append(f"CH{ch}: output {outp.get('STATE')}, load {outp.get('LOAD')}, "
                  f"{bswv.get('WVTP')}, clock {clock} @ {rate} Sa/s, "
-                 f"AMP {amp} Vpp, OFST {ofst} V")
+                 f"FRQ {frq} Hz, AMP {amp} Vpp, OFST {ofst} V")
     return problems, notes
 
 
@@ -839,6 +859,7 @@ def main():
         t_off = (float(st["t_offset"]) if a.t_offset is None
                  else a.t_offset * 1e-6)
         state_path = a.resume
+        seed_path = str(st["seed_path"]) if "seed_path" in st else ""
         print(f"resuming {ch.name} at iteration {k0}, f_cut {loop.f_cut/1e3:g} kHz")
     else:
         if not (a.channel and a.target and a.t_offset is not None):
@@ -866,6 +887,7 @@ def main():
         full_scale = a.full_scale
         t_off = a.t_offset * 1e-6
         state_path = os.path.join(a.outdir, f"drive_{stem}.state.npz")
+        seed_path = ""
         if os.path.exists(state_path) and not a.overwrite_state:
             sys.exit(f"{state_path} already exists. A fresh run would destroy it "
                      f"- it did once, taking a four-iteration manual state with "
@@ -892,7 +914,8 @@ def main():
                  fn=loop.plant.fn, zeta=loop.plant.zeta,
                  full_scale=full_scale, name=stem, gamma=loop.gamma,
                  f_cut=loop.f_cut, iteration=iteration, t_offset=t_off,
-                 history=np.array(loop.history, dtype=object))
+                 history=np.array(loop.history, dtype=object),
+                 seed_path=seed_path)
 
     # ---- instruments
     awg = make_awg(_AWGMOD)
@@ -901,7 +924,8 @@ def main():
     print("Scope:", scope.connect())
 
     problems, notes = check_awg_channel(awg, a.awg_ch, expect_rate=a.sample_rate,
-                                        full_scale=a.full_scale)
+                                        full_scale=a.full_scale,
+                                        expect_period=len(t) * dt)
     for n in notes:
         print("      ", n)
     acq = scope.get(":ACQuire:TYPE")
