@@ -434,10 +434,15 @@ def recall_snapshots(s: Session):
         s.snapshots.append(snap)
 
 
-def read_captures(pattern, mon_col, t, t_off):
+def read_captures(pattern, mon_col, t, t_off, stack=None):
     """Average every capture the glob matches, with the span guard from
     run_ilc: one zoomed file extrapolated flat once manufactured 172 V of
-    fake error out of a real 26 V, so a short capture is a hard refusal."""
+    fake error out of a real 26 V, so a short capture is a hard refusal.
+
+    `stack`, a dict, gets stack["stack"] = the (n_files, len(t)) traces
+    behind the average -- the noise-floor readout needs the shots, not
+    their mean. A dict rather than a third return so every caller of the
+    two-tuple stays as it is (the same shape as _bench_capture's aux_store)."""
     files = sorted(glob.glob(pattern))
     if not files:
         raise RuntimeError(f"no scope files matched {pattern!r}")
@@ -452,6 +457,8 @@ def read_captures(pattern, mon_col, t, t_off):
                 f"or mismatched capture matched the glob -- tighten the pattern "
                 f"so only full-window captures of THIS iteration match.")
         traces.append(scopeio.resample(tr.t, tr[mon_col], t, t_offset=t_off))
+    if stack is not None:
+        stack["stack"] = np.asarray(traces, float)
     return ilc.averaged(traces), files
 
 
@@ -2130,6 +2137,56 @@ class App:
             s.model_key = cfg["mode"]
             s.frf_path, s.frf_use, s.frf_max = "", 0.0, 0.0
 
+    def _noise_floor(self, stack):
+        """One log line per measurement: where the error has fallen under
+        the measurement's own scatter, against the band the update acts on
+        (f_cut, or the taper's end on the FRF rung). Returns the numbers for
+        the metrics dict -- empty when there is nothing to estimate from."""
+        s = self.session
+        f_top = s.loop.frf.f_max if s.loop.frf is not None else s.loop.f_cut
+        try:
+            nb = ilc.learnable_band(s.loop.target, stack, s.loop.dt, f_top)
+        except ValueError as e:
+            print(f"         noise floor: not estimated -- {e}")
+            return {}
+        n, k, r, ff = nb["n_shots"], nb["factor"], nb["ratio_top"], nb["f_floor"]
+        edge = f"{f_top/1e3:g} kHz"
+        if not np.isfinite(r):
+            print(f"         noise floor: the {n} shots are identical -- no "
+                  f"repeatability to compare against")
+        elif ff is None:
+            print(f"         noise floor: error is {r:.1f}x the {n}-shot "
+                  f"repeatability at the band edge ({edge}) -- still learning "
+                  f"across the band")
+        elif ff <= 0:
+            print(f"         noise floor: error is under {k:g}x the {n}-shot "
+                  f"repeatability in EVERY band to {edge} -- nothing left to "
+                  f"learn; further iterations only add noise")
+        else:
+            print(f"         noise floor: nothing left to learn above "
+                  f"{ff/1e3:.0f} kHz (error under {k:g}x the {n}-shot "
+                  f"repeatability there); the band edge is {edge} -- lower it "
+                  f"to ~{ff/1e3:.0f} kHz, or stop")
+        return dict(f_floor=ff, noise_ratio_top=float(r))
+
+    def _plateau_line(self):
+        """When the history says the loop is re-learning noise, say so --
+        and name the best iteration, whose drive is on disk. Silent
+        otherwise: the noise-floor line is already there every time, and a
+        second every-iteration line would bury both."""
+        s = self.session
+        p = ilc.plateau(s.loop.history)
+        if not p or not p["flat"]:
+            return
+        print(f"         PLATEAU: peak error flat for {p['n']} iterations "
+              f"(best {p['best_recent']:.1f} V, before that "
+              f"{p['best_before']:.1f} V) while the update is not shrinking "
+              f"({p['upd_recent']*1e3:.0f} mV rms, was "
+              f"{p['upd_before']*1e3:.0f}) -- the loop is re-learning noise. "
+              f"Stop, or lower the band edge. Best so far: iteration "
+              f"{p['best_it']} at {p['best']:.1f} V, "
+              f"drive_{s.stem}_i{p['best_it']:02d}.csv")
+
     def _write_iteration(self, wname):
         """Drive CSV in run\\, GUI-previewable copy in the AWG library --
         exactly the pair the CLIs leave behind."""
@@ -2164,7 +2221,8 @@ class App:
     def _step_work(self, cfg, pattern, mon, refit, force, zerobase):
         s = self.session
         self._apply_settings(cfg)
-        y, files = read_captures(pattern, mon, s.t, s.t_off)
+        stk = {}                             # the files behind the average
+        y, files = read_captures(pattern, mon, s.t, s.t_off, stack=stk)
         print(f"averaging {len(files)} capture(s):")
         for f in files:
             print(f"   {os.path.basename(f)}")
@@ -2187,6 +2245,7 @@ class App:
                              f"meas_{s.stem}_i{it:02d}.npy"), y)
         print(f"iteration {it}: error peak {m['peak_err_hv']:7.1f} V   "
               f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
+        m.update(self._noise_floor(stk["stack"]))
         if refit:
             fit_key = cfg["mode"] if cfg["mode"] != "frf" else "resonant"
             p2, info = plantmod.identify(s.u, y, s.loop.dt, model=fit_key)
@@ -2197,6 +2256,7 @@ class App:
         u_prev = s.u
         u_next = s.loop.update(s.u, y)
         s.loop.history[-1]["model"] = cfg["desc"]
+        s.loop.history[-1]["update_rms"] = ilc.update_rms(u_prev, u_next)
         rep = s.loop.check(u_next)
         print(f"limit check: {rep}")
         if not rep and not force:
@@ -2209,6 +2269,7 @@ class App:
         s.u = u_next
         s.iteration = it + 1
         s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev, t_wall=time.time()))
+        self._plateau_line()
         self._write_iteration(f"{s.stem}_i{s.iteration:02d}")
         save_session(s)
         print(f"state saved, now at iteration {s.iteration}")
@@ -2562,8 +2623,10 @@ class App:
                                     f"meas_{s.stem}_i{it:02d}_r{r:02d}"
                                     f"_native.npz")
                        if keep_native else None)
+                stk = {}                     # the shots behind the average
                 y = self._bench_capture(scope, scope_ch, s.t, s.t_off,
-                                        repeats, wait_s, native_path=nat)
+                                        repeats, wait_s, native_path=nat,
+                                        aux_store=stk)
                 np.save(os.path.join(os.path.dirname(s.state_path),
                                      f"meas_{s.stem}_i{it:02d}_r{r:02d}.npy"),
                         y)
@@ -2573,6 +2636,8 @@ class App:
                 print(f"  r{r} (+{fmt_span(time.time() - t_start)}): error "
                       f"peak {m['peak_err_hv']:7.1f} V   "
                       f"rms {m['rms_err_hv']:6.2f} V")
+                m.update(self._noise_floor(
+                    stk["capture"].grid[f"CH{scope_ch}"]))
                 self.msgs.put(("call", self._redraw_iterations))
                 if j < runs - 1 and gap_s > 0:
                     # sleep in slices so Stop stays responsive
@@ -2724,13 +2789,17 @@ class App:
                                                wait_s)
                 nat = (os.path.join(RUN_DIR, f"meas_{wname}_native.npz")
                        if keep_native else None)
+                stk = {}                     # the shots behind the average
                 y = self._bench_capture(scope, scope_ch, s.t, s.t_off,
-                                        repeats, wait_s, native_path=nat)
+                                        repeats, wait_s, native_path=nat,
+                                        aux_store=stk)
                 np.save(os.path.join(RUN_DIR, f"meas_{wname}.npy"), y)
                 m = s.loop.metrics(y)
                 m["model"] = cfg["desc"]
                 print(f"         error: peak {m['peak_err_hv']:7.1f} V   "
                       f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
+                m.update(self._noise_floor(
+                    stk["capture"].grid[f"CH{scope_ch}"]))
                 s.snapshots.append(dict(it=k, y=y, m=m, u=u, t_wall=time.time()))
                 u_now = u
                 self.msgs.put(("call",
@@ -2738,8 +2807,11 @@ class App:
                                (self._refresh_summary(),
                                 self._show_iteration(u, y, m, k))))
                 if k < k0 + iterations and not self.stop_evt.is_set():
-                    u = s.loop.update(u, y)
+                    u_new = s.loop.update(u, y)
                     s.loop.history[-1]["model"] = cfg["desc"]
+                    s.loop.history[-1]["update_rms"] = ilc.update_rms(u, u_new)
+                    self._plateau_line()
+                    u = u_new
                     s.u = u
                     s.iteration = k + 1
                     save_session(s)

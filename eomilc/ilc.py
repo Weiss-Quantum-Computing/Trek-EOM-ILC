@@ -394,3 +394,106 @@ def averaged(traces: list) -> np.ndarray:
     8-bit trace has an LSB worth tens of volts at the output."""
     a = np.asarray(traces, float)
     return a.mean(axis=0)
+
+
+def learnable_band(target, stack, dt: float, f_top: float,
+                   factor: float = 2.0, bw: float = 5e3) -> dict:
+    """Where the loop has run out of error to learn.
+
+    `stack` is the (n_shots, n) set of single shots whose mean is the
+    measurement the update will act on.  Per frequency, the error
+    |FFT(target - mean)| is compared with the standard error of that mean,
+    sqrt(variance across shots / n_shots), in bands `bw` wide up to `f_top`
+    (f_cut on the parametric rungs, the taper's end on the FRF rung).
+
+    Below `factor` times the noise the measured error is mostly the
+    measurement's own scatter, and the update it drives is the inverse's
+    gain times noise laid into the drive -- 40-65x at 50-70 kHz on X1 with
+    the second-order lead, fresh every iteration, so it does not average
+    away.  P92PX1B (2 Sep 2026): the peak error stopped falling at
+    iteration 5; iterations 6-20 put 26 mV rms of 50-70 kHz into the drive
+    and 1.4 V rms of ripple onto the EOM that the flat first shot never had.
+
+    Returns dict(f_floor, ratio_top, n_shots, factor, bands).  f_floor is
+    the lowest band edge above which EVERY band up to f_top sits under
+    `factor` x noise: None while the loop is still learning at f_top,
+    0.0 when nothing is left anywhere.  ratio_top is error/noise in the
+    band just below f_top.  bands is [(lo, hi, err_rms, noise_rms)].
+    """
+    stack = np.asarray(stack, float)
+    if stack.ndim != 2 or stack.shape[0] < 2:
+        raise ValueError("a repeatability estimate needs at least two shots")
+    n_sh, n = stack.shape
+    y = stack.mean(axis=0)
+    w = np.hanning(n)
+    f = np.fft.rfftfreq(n, dt)
+    E = np.abs(np.fft.rfft((np.asarray(target, float) - y) * w))
+    D = np.fft.rfft((stack - y) * w, axis=1)              # per-shot deviation
+    sem = np.sqrt(np.mean(np.abs(D) ** 2, axis=0) / (n_sh - 1))
+    edges = np.arange(0.0, float(f_top) + bw, bw)
+    bands = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (f >= lo) & (f < min(hi, f_top))
+        if not m.any():
+            continue
+        bands.append((float(lo), float(min(hi, f_top)),
+                      float(np.sqrt(np.sum(E[m] ** 2))),
+                      float(np.sqrt(np.sum(sem[m] ** 2)))))
+    if not bands:
+        raise ValueError(f"no FFT bin below f_top = {f_top:g} Hz")
+    ratio = [e / s if s > 0 else float("inf") for _, _, e, s in bands]
+    f_floor = None
+    for i, (lo, _, _, _) in enumerate(bands):
+        if all(r < factor for r in ratio[i:]):
+            f_floor = lo
+            break
+    return dict(f_floor=f_floor, ratio_top=ratio[-1], n_shots=int(n_sh),
+                factor=float(factor), bands=bands)
+
+
+def update_rms(u_prev, u_next) -> float:
+    """Size of one update, rms volts at the AWG -- the number `plateau`
+    watches, recorded into each history entry by the front ends."""
+    d = np.asarray(u_next, float) - np.asarray(u_prev, float)
+    return float(np.sqrt(np.mean(d * d)))
+
+
+def plateau(history: list, n: int = 5, tol: float = 0.15):
+    """Is the loop re-learning noise?
+
+    `learnable_band` catches error that has fallen under the measurement's
+    scatter.  It cannot catch the subtler regime: ripple the loop CREATED
+    from amplified scatter is repeatable, so it reads as genuine error and
+    the loop keeps "correcting" it -- while injecting fresh scatter at the
+    same gain.  The signature is in the history: the peak error stops
+    falling, and the update does not shrink.  A loop still converging shows
+    both moving; a loop that has finished shows the update collapsing.
+    P92PX1B (2 Sep 2026) sat at 2.7-3.5 V from iteration 5 to 20 while the
+    update held near 30 mV rms -- fifteen iterations that put 1.4 V rms of
+    50-70 kHz ripple onto the EOM.
+
+    Over the last `n` entries: flat when the best peak error there is not
+    below the best of everything before it by more than `tol`, AND the
+    median update over those `n` is not below the median of the `n` before
+    by more than `tol`.  Needs n+1 entries carrying `update_rms`; returns
+    None before that.  Otherwise a dict with `flat`, the two bests, the two
+    update medians, `best_it` (which iteration's drive was best) and `n`.
+    """
+    peaks = [h.get("peak_err_hv") for h in history if isinstance(h, dict)]
+    upds = [h.get("update_rms") for h in history if isinstance(h, dict)]
+    k = len(upds)                                  # trailing run that has it
+    while k > 0 and upds[k - 1] is not None:
+        k -= 1
+    tail = [float(v) for v in upds[k:]]
+    if len(peaks) < n + 1 or len(tail) < n + 1:
+        return None
+    best_recent = float(min(peaks[-n:]))
+    best_before = float(min(peaks[:-n]))
+    upd_recent = float(np.median(tail[-n:]))
+    upd_before = float(np.median(tail[:-n][-n:]))
+    flat = (best_recent >= (1 - tol) * best_before
+            and upd_recent >= (1 - tol) * upd_before)
+    return dict(flat=bool(flat), n=int(n), best_recent=best_recent,
+                best_before=best_before, upd_recent=upd_recent,
+                upd_before=upd_before, best_it=int(np.argmin(peaks)),
+                best=float(min(peaks)))

@@ -219,6 +219,27 @@ The **Model** combobox selects what the update divides the error by:
   parameters are **not unique** once ζ > 1 (three real poles split between
   the section and τ several ways), so compare fits by the residual and the
   boundary, not by the fₙ/ζ/τ triple.
+- Every measurement logs a **noise floor** line: the error spectrum against
+  the standard error of the shot average, in 5 kHz bands up to the band
+  edge (`f_cut`, or the taper's end on the FRF rung). *"Nothing left to
+  learn above 38 kHz"* means the error there is under 2× the measurement's
+  own scatter — the update it drives is the inverse's gain times noise
+  (40–65× at 50–70 kHz on X1 with the second-order lead), laid into the
+  drive fresh every iteration, so it never averages away. Lower the band
+  edge to that frequency, or stop. P92PX1B (2 Sep): the peak error stopped
+  falling at iteration 5; iterations 6–20 put 26 mV rms of 50–70 kHz into
+  the drive and 1.4 V rms of ripple onto the EOM the flat shot never had.
+- The noise-floor line cannot see one thing: ripple the loop *created* from
+  amplified scatter is repeatable, so it reads as genuine error and the loop
+  keeps "correcting" it while injecting fresh scatter at the same gain. That
+  shows in the history instead, and a **PLATEAU** line fires when it does:
+  the best peak error of the last 5 iterations is not below the best before
+  them by more than 15 %, *and* the median update `rms(u_k − u_{k−1})` over
+  those 5 has not shrunk by more than 15 % either. A loop still converging
+  moves both; a finished loop collapses the update. The line names the best
+  iteration and its drive file — that is the drive to keep. Each history
+  entry now records `update_rms`; states from before 2 Sep lack it and the
+  detector stays silent on them until five new iterations have run.
 - Switching channel **clears** the parameter boxes — numbers never follow
   you from one system to another.
 - Each iteration's history entry is tagged with the model that produced

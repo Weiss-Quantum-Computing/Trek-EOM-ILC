@@ -78,6 +78,61 @@ y2, files = ilc_gui.read_captures(os.path.join(SCRATCH, "fake_ilc_i99*.csv"),
                                   "CH3", s.t, s.t_off)
 print(f"[2] read_captures: {len(files)} file(s), max dev vs source "
       f"{np.abs(y2-y).max():.2e} V")
+
+# [2b] the noise-floor readout: where the error has dropped under the
+# measurement's own scatter. Synthetic: a 10 kHz residual over white noise --
+# every band above 10-15 kHz is noise-only, so the floor lands at 15 kHz;
+# drown the residual and the floor is everywhere (0); put a big residual in
+# the top band and there is no floor (None). Then the real path: read_captures
+# hands the file stack back through its `stack` dict.
+_tt = np.arange(5501) * 2e-6
+_tgt = 0.5 * (1 - np.cos(np.pi * np.clip(_tt / 5e-3, 0, 1)))
+_rng = np.random.default_rng(3)
+def _shots(res_amp, res_f, noise, n=32):
+    res = res_amp * np.sin(2 * np.pi * res_f * _tt)
+    return np.array([_tgt - res + _rng.normal(0, noise, _tt.size)
+                     for _ in range(n)])
+_nb = ilc_gui.ilc.learnable_band(_tgt, _shots(5e-3, 10e3, 1e-3), 2e-6, 80e3)
+assert _nb["f_floor"] == 15e3, _nb["f_floor"]
+assert _nb["ratio_top"] < 2, _nb["ratio_top"]
+assert _nb["n_shots"] == 32
+assert ilc_gui.ilc.learnable_band(_tgt, _shots(5e-3, 10e3, 1.0), 2e-6,
+                                  80e3)["f_floor"] == 0.0
+assert ilc_gui.ilc.learnable_band(_tgt, _shots(0.5, 77e3, 1e-3), 2e-6,
+                                  80e3)["f_floor"] is None
+try:
+    ilc_gui.ilc.learnable_band(_tgt, _shots(5e-3, 10e3, 1e-3, n=1), 2e-6, 80e3)
+    raise AssertionError("one shot must be refused")
+except ValueError:
+    pass
+_stk = {}
+ilc_gui.read_captures(os.path.join(SCRATCH, "fake_ilc_i99*.csv"), "CH3", s.t, s.t_off, stack=_stk)
+assert _stk["stack"].shape == (len(files), len(y2)), _stk["stack"].shape
+print(f"[2b] noise floor: 10 kHz residual over noise -> floor at "
+      f"{_nb['f_floor']/1e3:.0f} kHz; drowned -> everywhere; top-band residual "
+      f"-> none; one shot refused; read_captures hands back the "
+      f"{_stk['stack'].shape[0]}-file stack")
+
+# [2c] the plateau detector: peak error flat over the last 5 entries while
+# the update has not shrunk = re-learning noise. A converging history (both
+# falling) stays quiet; a plateau fires and names the best iteration; too
+# little history, or a pre-detector state without update_rms, returns None.
+def _hist(peaks, upds=None):
+    return [dict(peak_err_hv=p, **({"update_rms": u} if u is not None else {}))
+            for p, u in zip(peaks, upds or [None] * len(peaks))]
+_conv = _hist([100, 50, 25, 12, 6, 3, 1.5, 0.8],
+              [.040, .020, .010, .005, .0025, .0012, .0006, .0003])
+assert ilc_gui.ilc.plateau(_conv)["flat"] is False
+_flat = _hist([100, 50, 25, 12, 6, 4, 3.8, 3.0, 2.8, 3.5, 2.8, 3.1, 3.0, 3.3],
+              [.040, .020, .010, .006, .030, .031, .029, .032, .030, .031,
+               .029, .030, .031, .030])
+_p = ilc_gui.ilc.plateau(_flat)
+assert _p["flat"] is True and _p["best_it"] == 8 and _p["best"] == 2.8, _p
+assert ilc_gui.ilc.plateau(_flat[:5]) is None                 # too short
+assert ilc_gui.ilc.plateau(_hist([100, 50, 25, 12, 6, 4, 3.8])) is None  # no update_rms
+print(f"[2c] plateau: converging history quiet; flat history fires naming "
+      f"iteration {_p['best_it']} ({_p['best']:.1f} V); short and pre-detector "
+      f"histories return None")
 assert np.abs(y2 - y).max() < 1e-9
 
 # span guard must refuse a zoomed capture
@@ -454,6 +509,25 @@ print(f"[14b] third order: fn {_3['fn']:.0f} Hz zeta {_3['zeta']:.2f} tau "
       f"{_3['tau']:.1f} us; phase residual {_r2['resid_phase_deg']:.1f} -> "
       f"{_r3['resid_phase_deg']:.1f} deg, contraction boundary "
       f"{_b2/1e3:.0f} -> " + (f"{_b3/1e3:.0f} kHz" if _b3 else "off the band"))
+
+# [14c] the PLATEAU log line: fires on the flat history from [2c] and names
+# the best iteration's drive; stays silent on the converging one. The
+# session's real history is put back afterwards.
+import io, contextlib
+_keep = list(app.session.loop.history)
+app.session.loop.history = _flat
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    app._plateau_line()
+assert "PLATEAU" in _buf.getvalue() and "_i08.csv" in _buf.getvalue(), _buf.getvalue()
+app.session.loop.history = _conv
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    app._plateau_line()
+assert _buf.getvalue() == "", _buf.getvalue()
+app.session.loop.history = _keep
+print("[14c] PLATEAU line fires on the flat history (naming drive_*_i08.csv), "
+      "silent on the converging one")
 
 # ---- GEN: truly from scratch, no priors anywhere ---------------------------
 t_g, v_g = ilc_gui.build_target_waveform("ramp up-hold-return", 2.0,
