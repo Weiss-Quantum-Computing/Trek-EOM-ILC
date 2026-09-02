@@ -196,6 +196,7 @@ The **Model** combobox selects what the update divides the error by:
 | gain only (0th) | gain | `f_cut` |
 | one pole (1st) | gain, τ | `f_cut` |
 | second order | gain, fₙ, ζ | `f_cut` |
+| third order | gain, fₙ, ζ, τ | `f_cut` |
 | measured FRF | the file | `full strength to` / `taper to zero at` |
 
 - Parameters come from typing, or from **Replace values with a fit…**,
@@ -209,6 +210,15 @@ The **Model** combobox selects what the update divides the error by:
   the gain, short on lag terms for a slow ramp). Nothing is filled from a
   table any more: the Aug ramp-fit tables encoded a resonance the FRFs
   contradicted, and they were Trek-only.
+- **Third order** is the second-order section *times* a real pole, which is
+  the general third-order all-pole form: the ζ > 1 the X1 FRFs want makes
+  the section two real poles, and τ is the third. It is worth a rung on this
+  bench — fitted to `frf_EOX1FRF.csv` up to 60 kHz it takes the phase
+  residual from 11.3° to 5.3° and moves the contraction boundary from
+  71.6 kHz to 106.8 kHz, which is what decides how high `f_cut` may go. Its
+  parameters are **not unique** once ζ > 1 (three real poles split between
+  the section and τ several ways), so compare fits by the residual and the
+  boundary, not by the fₙ/ζ/τ triple.
 - Switching channel **clears** the parameter boxes — numbers never follow
   you from one system to another.
 - Each iteration's history entry is tagged with the model that produced
@@ -403,7 +413,7 @@ and it behaves like any entry again.
 
 | field | what it does |
 |---|---|
-| **Model** *(panel)* | What the update divides the error by: gain only (0th), one pole (1st), second order (resonant), or the measured FRF. Not stored in the state — the state stores the plant *parameters*; which form is active is your choice each session. Every history entry is tagged with the model that produced it. |
+| **Model** *(panel)* | What the update divides the error by: gain only (0th), one pole (1st), second order (resonant), third order (resonant + pole), or the measured FRF. Not stored in the state — the state stores the plant *parameters*; which form is active is your choice each session. Every history entry is tagged with the model that produced it. |
 | **gain** *(state)* | The model's DC gain, AWG volts → measured volts. Used by every parametric lead (`e/gain` is the whole 0th-order correction) and by the model-predicted-output trace. Fallback source for the first-shot gain. |
 | **tau us** *(state)* | One-pole time constant, µs. Only the one-pole model reads it. On the Trek chains it equals the resonance's group delay (~28 µs) — the lag without the ring. |
 | **fn Hz**, **zeta** *(state)* | Second-order natural frequency and damping ratio. Only the second-order model reads them. Any ζ > 0 is accepted: ζ > 1 is two real poles, which is what the Trek chains' FRFs fit (X1 at 0.5 V: fₙ ≈ 7.3 kHz, ζ ≈ 1.1); the ζ ≈ 0.2 resonance of the Aug ramp fits was withdrawn. |

@@ -125,7 +125,17 @@ class Plant:
         return s + f", offset={self.offset*1e3:.2f} mV)"
 
 
-MODELS = ("resonant", "one_pole", "two_pole", "static")
+# "third_order" is a second-order section TIMES a real pole (fn, zeta, tau),
+# which is the general third-order all-pole form: the pair covers a resonance,
+# or -- at zeta > 1 -- two real poles, and tau is the third. `Plant` already
+# applies and inverts all three, so nothing below the model list needed
+# changing to add it.
+#
+# The parameterisation is not unique once zeta > 1: three real poles can be
+# split between the section and tau several ways, so two fits of the same
+# response can report different (fn, zeta, tau) triples. H(f) is what the loop
+# divides by; read the residual and the contraction boundary, not the labels.
+MODELS = ("resonant", "third_order", "one_pole", "two_pole", "static")
 
 
 def identify(u: np.ndarray, y: np.ndarray, dt: float,
@@ -151,6 +161,11 @@ def identify(u: np.ndarray, y: np.ndarray, dt: float,
             g, fn, zeta, off = p
             return Plant(gain=g, offset=off, fn=max(fn, 1.0),
                          zeta=float(np.clip(zeta, 1e-3, 10.0)), dt=dt)
+        if model == "third_order":
+            g, fn, zeta, tau, off = p
+            return Plant(gain=g, offset=off, fn=max(fn, 1.0),
+                         zeta=float(np.clip(zeta, 1e-3, 10.0)),
+                         tau=max(tau, dt), dt=dt)
         if model == "two_pole":
             g, tau, tau2, off = p
             return Plant(gain=g, tau=max(tau, dt), offset=off, tau2=max(tau2, 0.0), dt=dt)
@@ -165,6 +180,9 @@ def identify(u: np.ndarray, y: np.ndarray, dt: float,
 
     if model == "resonant":
         p0, xs = [g0, 2500.0, 0.22, 0.0], [0.1, 500.0, 0.05, 1e-3]
+    elif model == "third_order":
+        p0, xs = ([g0, 2500.0, 0.22, 25e-6, 0.0],
+                  [0.1, 500.0, 0.05, 5e-6, 1e-3])
     elif model == "two_pole":
         p0, xs = [g0, 25e-6, 5e-6, 0.0], [0.1, 5e-6, 5e-6, 1e-3]
     elif model == "static":
@@ -212,7 +230,8 @@ def fit_frf(f, H, model: str = "one_pole", f_hi: float | None = None,
     gain of 0.56 on X1); so it is the median |H| of the `n_dc` lowest tones
     unless `gain` is given.  Only the dynamic terms are fitted, in log space
     so they stay positive; the resonant form's zeta is unbounded above
-    (zeta > 1 = two real poles).
+    (zeta > 1 = two real poles), and "third_order" adds a real pole to that
+    section -- see the note on MODELS about its parameters not being unique.
 
     Returns (Plant, info) like `identify`: info carries the band, the gain
     source, and the rms magnitude (%) and phase (deg) residuals in band.
@@ -249,6 +268,10 @@ def fit_frf(f, H, model: str = "one_pole", f_hi: float | None = None,
         if model == "two_pole":
             t1, t2 = sorted(np.exp(p), reverse=True)
             return Plant(gain=gain, tau=float(t1), tau2=float(t2), dt=dt)
+        if model == "third_order":
+            return Plant(gain=gain, fn=float(np.exp(p[0])),
+                         zeta=float(np.exp(p[1])), tau=float(np.exp(p[2])),
+                         dt=dt)
         return Plant(gain=gain, fn=float(np.exp(p[0])),
                      zeta=float(np.exp(p[1])), dt=dt)
 
@@ -263,6 +286,13 @@ def fit_frf(f, H, model: str = "one_pole", f_hi: float | None = None,
     elif model == "two_pole":
         t0 = 1 / (2 * np.pi * _phase_crossing(f, H, -45.0, hi / 3))
         p0 = [np.log(t0), np.log(t0 / 5)]
+    elif model == "third_order":
+        # The pair where the phase passes -90, the extra pole near where it
+        # reaches -180: a third-order all-pole run ends at -270, and those
+        # two landmarks separate the section from the pole well enough for
+        # least_squares to take it from there.
+        p0 = [np.log(_phase_crossing(f, H, -90.0, hi / 2)), np.log(1.0),
+              np.log(1 / (2 * np.pi * _phase_crossing(f, H, -180.0, hi)))]
     else:
         p0 = [np.log(_phase_crossing(f, H, -90.0, hi / 2)), np.log(1.0)]
     if p0:

@@ -415,6 +415,46 @@ root.update()
 print(f"[14] Fit to FRF: resonant fn {_fn:.0f} Hz zeta {_z:.2f} (two real "
       f"poles), one-pole tau {_tau:.1f} us, gain {_g:.4f}; FRF overlay drawn")
 
+# The third-order rung: a second-order section TIMES a real pole, so all four
+# boxes are live and the fit has to beat the second-order one on the same
+# tones -- both in residual and in where the update stops contracting, which
+# is the number that decides how high f_cut may go.
+app.model_var.set("second order (resonant)")
+app._update_model_fields()
+assert app._param_entries["tau"].instate(["disabled"]), \
+    "second order must grey tau -- it has no real pole"
+app.model_var.set("third order (resonant + pole)")
+app._update_model_fields()
+# ttk carries state as flags, and cget('state') hands back a Tcl_Obj that
+# never equals the string 'normal' -- instate is the API that answers.
+assert not any(app._param_entries[k].instate(["disabled"])
+               for k in ("gain", "fn", "zeta", "tau")), \
+    "third order must leave gain, fn, zeta AND tau editable"
+app.do_fit_frf(FRF, "third_order", 40e3)
+pump_until_idle()
+root.update()
+_3 = {k: float(v.get()) for k, v in
+      (("gain", app.pgain_var), ("fn", app.pfn_var),
+       ("zeta", app.pzeta_var), ("tau", app.ptau_var))}
+assert _3["tau"] > 0 and _3["fn"] > 0 and _3["zeta"] > 0, _3
+_f, _H = ilc_gui.ilc._read_frf(FRF)
+_r2 = ilc_gui.plantmod.fit_frf(_f, _H, model="resonant", f_hi=40e3)[1]
+_r3 = ilc_gui.plantmod.fit_frf(_f, _H, model="third_order", f_hi=40e3)[1]
+assert _r3["resid_phase_deg"] < _r2["resid_phase_deg"], (_r2, _r3)
+_b2 = ilc_gui.plantmod.contraction(
+    _f, _H, ilc_gui.plantmod.fit_frf(_f, _H, model="resonant", f_hi=40e3)[0], 0.6)[1]
+_b3 = ilc_gui.plantmod.contraction(
+    _f, _H, ilc_gui.plantmod.fit_frf(_f, _H, model="third_order", f_hi=40e3)[0], 0.6)[1]
+assert _b2 is not None and (_b3 is None or _b3 > _b2), \
+    f"third order did not push the contraction boundary out: {_b2} -> {_b3}"
+# and it round-trips through a state file like any other rung
+app.model_var.set("second order (resonant)")
+app._update_model_fields()
+print(f"[14b] third order: fn {_3['fn']:.0f} Hz zeta {_3['zeta']:.2f} tau "
+      f"{_3['tau']:.1f} us; phase residual {_r2['resid_phase_deg']:.1f} -> "
+      f"{_r3['resid_phase_deg']:.1f} deg, contraction boundary "
+      f"{_b2/1e3:.0f} -> " + (f"{_b3/1e3:.0f} kHz" if _b3 else "off the band"))
+
 # ---- GEN: truly from scratch, no priors anywhere ---------------------------
 t_g, v_g = ilc_gui.build_target_waveform("ramp up-hold-return", 2.0,
                                          0.5, 2.0, 3.0, 2.0, 0.5, 2.0)

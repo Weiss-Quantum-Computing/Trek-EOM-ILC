@@ -158,14 +158,16 @@ MODEL_LABELS = (
     ("gain only (0th order)", "static"),
     ("one pole (1st order)", "one_pole"),
     ("second order (resonant)", "resonant"),
+    ("third order (resonant + pole)", "third_order"),
     ("measured FRF (nonparametric)", "frf"),
 )
 LABEL2KEY = dict(MODEL_LABELS)
 KEY2LABEL = {k: l for l, k in MODEL_LABELS}
 PARAMS_FOR = {"static": ("gain",), "one_pole": ("gain", "tau"),
-              "resonant": ("gain", "fn", "zeta"), "frf": ()}
+              "resonant": ("gain", "fn", "zeta"),
+              "third_order": ("gain", "fn", "zeta", "tau"), "frf": ()}
 DESC_FOR = {"static": "gain only", "one_pole": "one pole",
-            "resonant": "2nd order"}
+            "resonant": "2nd order", "third_order": "3rd order"}
 
 
 # ---------------------------------------------------------------- session
@@ -4381,13 +4383,14 @@ class App:
                 overlay = None
         if overlay:
             fg = np.geomspace(f_lo_all, f_hi_all, 300)
-            w = 2j * np.pi * fg
-            H = np.full(fg.shape, overlay["gain"], complex)
-            if "tau" in overlay:
-                H = H / (1 + w * overlay["tau"] * 1e-6)
-            if "fn" in overlay:
-                wn = 2 * np.pi * overlay["fn"]
-                H = H * wn ** 2 / (w ** 2 + 2 * overlay["zeta"] * wn * w + wn ** 2)
+            # Plant.response rather than a second hand-rolled copy of it:
+            # this is the same H that fit_frf minimises against and that the
+            # contraction number divides by, so the curve drawn here cannot
+            # drift from the one the loop is judged on -- and a new rung
+            # (third order) overlays correctly without touching this block.
+            # response() is continuous, so dt does not enter.
+            dt_ov = self.session.loop.dt if self.session is not None else 2e-6
+            H = self._plant_from(overlay, dt_ov).response(fg)
             axm.loglog(fg, np.abs(H), "--", lw=1.1, color="#c68000",
                        label=f"model: {DESC_FOR[key]}")
             axp.semilogx(fg, np.degrees(np.unwrap(np.angle(H))), "--",
