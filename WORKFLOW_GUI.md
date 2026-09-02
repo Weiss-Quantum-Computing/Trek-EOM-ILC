@@ -265,12 +265,24 @@ every one recalled from `meas_*.npy` beside the state at load — is
 available.
 
 The **Compare** box underneath overlays *other campaigns* on the same
-plots: space-separated stems (`OLDX1 OLDX2:all OLDX3:0,3` — each
+plots: space-separated keys (`OLDX1 OLDX2:all OLDX3:0,3` — each
 optionally with the Iterations grammar after a colon, blank meaning that
-stem's last measured iteration). Their states load read-only from the
-active state's directory and are never saved or stepped; each stem draws
-in its own colour, on its own time grid and monitor scale, against its
-own reference drive. The Convergence tab and the Table always show a compared stem's
+campaign's last measured iteration). A key is a stem in the active
+state's directory, or whatever **Add campaigns...** mapped to a state
+file *anywhere on disk* — an archived run, another bench PC's `run\`,
+a folder of last month's captures. Picking a file appends its key to the
+box, so what is typed stays the record of what is drawn; a picked
+campaign whose stem is already spoken for is keyed `STEM@folder`, which
+is what lets the same campaign name in two folders be compared against
+itself. **Clear** unloads the box, the picked paths and the cached
+states. The line underneath says what actually resolved (green), how many
+keys did not (amber), or the grammar when nothing is loaded — the log
+carries the reason, plus each campaign's channel, grid and stored
+iterations when it is added, and a NOTE when its channel or time grid
+differs from the session it is going on top of. Their states load
+read-only and are never saved or stepped; each campaign draws in its own
+colour, on its own time grid and monitor scale, against its own
+reference drive. The Convergence tab and the Table always show a compared stem's
 whole campaign — that is usually the comparison that matters
 (X1 vs X2, or the same target before and after a model change).
 
@@ -361,6 +373,10 @@ Three kinds of persistence, marked in the tables:
 
 ### Session
 
+Every path field scrolls to the **end** of what it holds, so a path too long
+for its box shows the file name rather than the drive letter; click into one
+and it behaves like any entry again.
+
 | field | what it does |
 |---|---|
 | **State** *(config)* | Path to a `drive_<stem>.state.npz`. **Load state** rebuilds the whole campaign from it: target, current drive, plant, γ, f_cut, t-offset, iteration counter, error history — and recalls every `meas_*.npy` sharing the stem beside it into the plots. The remembered state reloads automatically at launch. |
@@ -433,7 +449,7 @@ Three kinds of persistence, marked in the tables:
 | field | what it does |
 |---|---|
 | **Iterations shown** *(config)* | Which stored iterations the Drive corrections, Drive updates, Error and Error spectrum tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
-| **Compare** *(config)* | Other campaigns overlaid on the same plots, read-only: space-separated stems, each optionally `stem:ITERS` with the Iterations grammar (`OLDX1 OLDX2:all OLDX3:0,3`); a blank selection means that stem's last measured iteration. States load from the active state's directory (`drive_<stem>.state.npz` plus its `meas_*.npy` / `drive_*_iNN.csv`), never saved or stepped. Each stem gets one colour (hues chosen clear of the active session's viridis ramp), older selected iterations blending toward white; hold runs ride along dashed when **runs** is on. Overlays land on Error, Error spectrum, Drive corrections, Drive spectrum, Drive updates (each stem against its *own* reference and prior drives, on its *own* time grid and monitor scale), Convergence (the stem's whole peak+rms error history, regardless of the iteration selection), and the Waveforms output pane (last selected measurement, plus that stem's target when it differs). Δt labels stay active-session-only. A stem with no state or no measurements is reported in the log once per spec. |
+| **Compare** *(config, paths remembered)* | Other campaigns overlaid on the same plots, read-only: space-separated keys, each optionally `key:ITERS` with the Iterations grammar (`OLDX1 OLDX2:all OLDX3:0,3`); a blank selection means that campaign's last measured iteration. A key is a stem in the active state's directory (`drive_<stem>.state.npz` plus its `meas_*.npy` / `drive_*_iNN.csv`), or a state file elsewhere picked with **Add campaigns...** — which appends its key to the box and keys a name collision `STEM@folder`. **Clear** empties the box, the picked paths and the state cache. The status line under the box names what resolved and counts what did not. Never saved or stepped. Each stem gets one colour (hues chosen clear of the active session's viridis ramp), older selected iterations blending toward white; hold runs ride along dashed when **runs** is on. Overlays land on Error, Error spectrum, Drive corrections, Drive spectrum, Drive updates (each stem against its *own* reference and prior drives, on its *own* time grid and monitor scale), Convergence (the stem's whole peak+rms error history, regardless of the iteration selection), and the Waveforms output pane (last selected measurement, plus that stem's target when it differs). Δt labels stay active-session-only. A stem with no state or no measurements is reported in the log once per spec. |
 | **dot every Nth sample** *(config)* | Marker density on every data trace: blank = auto (~180 dots per trace), a number = that literal subsampling step, `1` = every real sample gets a dot. Enter or **Redraw** applies everywhere, the Waveforms tab and target preview included. |
 | **runs** *(config)* | Show or hide Hold runs on the Error / Error spectrum / Convergence tabs. Runs of every selected iteration draw dashed after their base trace. |
 | **Δt labels** *(config)* | Append wall-clock offsets to legend labels: runs relative to their iteration's base measurement, base iterations relative to the previous one. Off by default — plot clutter only when the timing question is live. |

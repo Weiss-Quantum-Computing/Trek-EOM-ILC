@@ -117,6 +117,37 @@ PRED_COLOUR = "#8a8a8a"
 # purple and cyan sit last because they can pass for viridis endpoints
 CMP_COLOURS = ["#ff7f0e", "#e377c2", "#8c564b", "#9467bd", "#17becf",
                "#7f7f7f"]
+# The Compare box's grammar, shown where the status line would be once
+# something is loaded -- the hint is only wanted while the box is empty.
+CMP_HINT = ("nothing loaded -- stems in this run folder, e.g. "
+            "'TSTX1 OLDX1:all OLDX2:0,3' (blank sel = last iter)")
+# The status line has to be kept to a length: a Label asks for room to draw
+# its text, and the request goes all the way up to the window, so a line of
+# campaign names would resize the panel every time one was added.
+CMP_STATUS_CHARS = 96
+
+
+def _norm_path(p):
+    """A path in the one spelling paths are compared in. The file dialog
+    hands back forward slashes on Windows and whatever case the folder is
+    stored in, so a picked path and a typed one for the same file are not
+    equal as strings."""
+    return os.path.normcase(os.path.abspath(p))
+
+
+def _same_file(a, b):
+    return _norm_path(a) == _norm_path(b)
+
+
+def elide(text, width):
+    """Long text shortened from the middle, so both ends survive - which for
+    a campaign key is the stem at one end and the folder tag at the other."""
+    text = str(text)
+    if len(text) <= width:
+        return text
+    keep = max(width - 3, 2)
+    head = (keep + 1) // 2
+    return text[:head] + "..." + text[len(text) - (keep - head):]
 
 # The model ladder: what the update divides the error by, in increasing order
 # of how much of the chain it knows about.  The first three are parametric
@@ -557,6 +588,7 @@ class App:
                  stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
                  iter_sel=self.itersel_var.get(),
                  cmp_sel=self.cmpsel_var.get(),
+                 cmp_paths=dict(self._cmp_paths),
                  spec_avg=self.specavg_var.get(),
                  dot_step=self.dotstep_var.get(),
                  show_runs=self.showruns_var.get(),
@@ -601,9 +633,10 @@ class App:
         sf = ttk.LabelFrame(left, text="Session", padding=3)
         sf.pack(fill="x", pady=(0, 2))
         self.state_var = tk.StringVar(value=self.cfg.get("state", ""))
-        self._path_row(sf, 0, "State", self.state_var,
-                       lambda: self._browse(self.state_var, "State files",
-                                            "*.state.npz", RUN_DIR))
+        self.state_entry = self._path_row(
+            sf, 0, "State", self.state_var,
+            lambda: self._browse(self.state_var, "State files",
+                                 "*.state.npz", RUN_DIR))
         b = ttk.Button(sf, text="Load state", command=self.do_load)
         b.grid(row=0, column=3, padx=2)
         self._actions = [b]
@@ -919,17 +952,27 @@ class App:
         self._actions.append(b)
         self._dot_warned = None
 
-        # second row: other campaigns overlaid read-only on the same plots
+        # second row: other campaigns overlaid read-only on the same plots.
+        # Picked with a dialog as well as typed, because the comparison that
+        # matters usually crosses folders -- last week's archived campaign
+        # against this one -- and those stems cannot be typed at all.
         sel2 = ttk.Frame(right)
         sel2.pack(fill="x", pady=(0, 2))
         ttk.Label(sel2, text="Compare").pack(side="left")
         self.cmpsel_var = tk.StringVar(value=self.cfg.get("cmp_sel", ""))
-        e3 = ttk.Entry(sel2, textvariable=self.cmpsel_var, width=26)
+        e3 = ttk.Entry(sel2, textvariable=self.cmpsel_var, width=30)
         e3.pack(side="left", padx=2)
         e3.bind("<Return>", lambda ev: self._redraw_iterations())
-        ttk.Label(sel2, text="other stems, e.g. 'TSTX1 OLDX1:all OLDX2:0,3' "
-                             "(blank sel = last iter)",
-                  foreground="#666666").pack(side="left")
+        self._show_tail(e3, self.cmpsel_var)
+        b = ttk.Button(sel2, text="Add campaigns...", width=16,
+                       command=self.do_compare_add)
+        b.pack(side="left", padx=2)
+        self._actions.append(b)
+        self.cmp_clear_btn = ttk.Button(sel2, text="Clear", width=6,
+                                        command=self.do_compare_clear,
+                                        state="disabled")
+        self.cmp_clear_btn.pack(side="left")
+        self._actions.append(self.cmp_clear_btn)
         ttk.Label(sel2, text="segs (blank = raw FFT)",
                   foreground="#666666").pack(side="right")
         self.specavg_var = tk.StringVar(value=self.cfg.get("spec_avg", ""))
@@ -938,9 +981,27 @@ class App:
         e4.bind("<Return>", lambda ev: self._redraw_iterations())
         ttk.Label(sel2, text="spectra avg").pack(side="right")
         self._specavg_warned = None
+
+        # third row: what the Compare box actually resolved to. The box holds
+        # a grammar, not a result -- a stem typed one letter wrong, or an
+        # archive whose state file has moved, used to say so only in the log,
+        # under whatever else the panel had printed since.
+        sel3 = ttk.Frame(right)
+        sel3.pack(fill="x", pady=(0, 2))
+        self.cmp_status = ttk.Label(sel3, text=CMP_HINT, foreground="#666666")
+        self.cmp_status.pack(side="left")
         self._cmp_cache = {}         # state path -> (state mtime, Session)
         self._cmp_logged = set()     # compare warnings already shown ...
         self._cmp_lastspec = None    # ... for this spec (reset on change)
+        # keys picked with the dialog -> the state file they name, so a
+        # campaign outside the loaded session's run folder can be compared
+        # against at all. A typed key that is not in here still falls back to
+        # the run folder, which is what every stem did before the picker.
+        self._cmp_paths = {k: v for k, v in
+                           (self.cfg.get("cmp_paths") or {}).items()
+                           if isinstance(k, str) and isinstance(v, str)}
+        self._cmp_last = []          # the groups the last redraw resolved
+        self._cmp_described = set()  # campaigns already spelled out
 
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
@@ -1012,10 +1073,41 @@ class App:
 
     def _path_row(self, parent, row, label, var, browse):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
-        ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew",
-                                                 padx=2)
+        e = ttk.Entry(parent, textvariable=var)
+        e.grid(row=row, column=1, sticky="ew", padx=2)
+        self._show_tail(e, var)
         ttk.Button(parent, text="...", width=3, command=browse).grid(
             row=row, column=2)
+        return e
+
+    def _show_tail(self, entry, var):
+        """An entry that scrolls to the END of what it holds.
+
+        Tk only scrolls an Entry to keep the INSERTION CURSOR visible, and a
+        programmatic set() leaves that at character 0 -- so every path the
+        panel fills in for you (Browse, Load state, the restored config, the
+        channel's FRF) showed 'C:\\Users\\mzd416\\Desktop\\Pyth' and hid the
+        file name, which is the half that says which one it is.
+
+        Only moved while the box is not being typed in: an entry with focus
+        keeps Tk's own cursor-following, so editing the middle of a path
+        still behaves."""
+        def tail(*_):
+            try:
+                if entry.winfo_exists() and entry.focus_get() is not entry:
+                    entry.xview_moveto(1.0)
+            except tk.TclError:
+                pass
+        var.trace_add("write", lambda *_: entry.after_idle(tail))
+        # leaving the box is the other moment the tail matters: the cursor
+        # was left wherever the edit ended, which is rarely the end
+        entry.bind("<FocusOut>", lambda ev: entry.after_idle(tail), add="+")
+        # and on every resize -- which is also how the FIRST value gets its
+        # tail. A value set before the panel is laid out (the restored config,
+        # a Load fired from the startup reload) reaches an entry that is still
+        # zero-width, and scrolling a box with no width does nothing.
+        entry.bind("<Configure>", lambda ev: tail(), add="+")
+        return entry
 
     def _browse(self, var, name, pat, initdir):
         p = filedialog.askopenfilename(
@@ -1081,6 +1173,9 @@ class App:
         for b in self._actions:
             b.configure(state=state)
         self.stop_btn.configure(state="normal" if busy else "disabled")
+        # Clear has a second condition -- there has to be something loaded --
+        # so it re-derives its own state rather than taking the blanket one
+        self._refresh_compare_status()
         if not busy:
             self.progress.configure(value=0)
             self.status.configure(text="ready")
@@ -3063,40 +3158,228 @@ class App:
             self._cmp_logged.add(msg)
             self.log(msg)
 
+    def _cmp_resolve(self, key):
+        """A Compare key -> the state file it names, or None.
+
+        Picked campaigns win: the dialog wrote key -> path, and that path is
+        the whole point of having picked it. Anything else is a stem in the
+        loaded session's run folder, which is what every key meant before
+        the picker existed -- so a typed spec, a remembered one, and the
+        suite's fixtures all keep working."""
+        picked = self._cmp_paths.get(key)
+        if picked:
+            return picked if os.path.exists(picked) else None
+        run_dir = os.path.dirname(self.session.state_path)
+        path = os.path.join(run_dir, f"drive_{key}.state.npz")
+        return path if os.path.exists(path) else None
+
+    @staticmethod
+    def _cmp_key(path, taken):
+        """The Compare key for a picked state file: its stem, or stem@folder
+        when that stem is already spoken for by a DIFFERENT file. `taken` is
+        {key: path} of everything already named.
+
+        Two campaigns of the same name in two folders -- an archived run and
+        the one it was repeated as -- is exactly the comparison the picker
+        was added for, and a bare stem cannot name both."""
+        def free(k):
+            other = taken.get(k)
+            return other is None or _same_file(other, path)
+
+        stem = re.sub(r"^drive_|\.state\.npz$", "", os.path.basename(path))
+        if free(stem):
+            return stem
+        tag = os.path.basename(os.path.dirname(os.path.abspath(path))) or "?"
+        key, n = f"{stem}@{tag}", 2
+        while not free(key):                     # the same folder NAME twice
+            key, n = f"{stem}@{tag}~{n}", n + 1  # up the tree: number rather
+        return key                               # than quietly collide
+
+    def do_compare_add(self):
+        """Pick campaigns to overlay, from anywhere on disk.
+
+        The typed grammar stays the record of what is shown -- picking a file
+        appends its key to the box (keeping any :ITERS already typed for that
+        key), so the two are one thing seen two ways rather than two lists
+        that can disagree."""
+        if self.session is None:
+            return messagebox.showerror(
+                "Compare", "Load a session first -- compare overlays ride "
+                           "the active campaign's plots.")
+        paths = filedialog.askopenfilenames(
+            title="Pick the state files of the campaigns to compare",
+            initialdir=os.path.dirname(self.session.state_path) or RUN_DIR,
+            filetypes=(("ILC state files", "*.state.npz"),
+                       ("All files", "*.*")))
+        if not paths:
+            return
+        # what each key already points at: the picked map, the run folder's
+        # own stems (so picking run\drive_GENX keeps calling it GENX), and
+        # the active campaign's stem -- an ARCHIVED campaign of the same name
+        # is a different measurement and has to get a key of its own
+        run_dir = os.path.dirname(self.session.state_path)
+        taken = dict(self._cmp_paths)
+        taken.setdefault(self.session.stem, self.session.state_path)
+        for tok in self.cmpsel_var.get().split():
+            key = tok.partition(":")[0]
+            if key and key not in taken:
+                taken[key] = os.path.join(run_dir,
+                                          f"drive_{key}.state.npz")
+        added = []
+        for p in paths:
+            p = os.path.abspath(p)
+            if not os.path.exists(p):        # a stale shortcut, a dead drive
+                self.log(f"compare: {p} is not there -- skipped")
+                continue
+            if _same_file(p, self.session.state_path):
+                self.log(f"compare: {os.path.basename(p)} is the loaded "
+                         f"session -- skipped")
+                continue
+            key = self._cmp_key(p, taken)
+            taken[key] = p
+            # a campaign the run folder already answers for under this key
+            # needs no map entry, and not writing one keeps the remembered
+            # config free of paths that go stale when a folder is renamed
+            plain = os.path.join(run_dir, f"drive_{key}.state.npz")
+            if os.path.exists(plain) and _same_file(plain, p):
+                self._cmp_paths.pop(key, None)
+            else:
+                self._cmp_paths[key] = p
+            if key not in [t.partition(":")[0]
+                           for t in self.cmpsel_var.get().split()]:
+                added.append(key)
+        if added:
+            spec = " ".join(self.cmpsel_var.get().split() + added)
+            self.cmpsel_var.set(spec)
+        self._cmp_logged.clear()
+        self._cmp_lastspec = None       # force a fresh round of warnings
+        self._redraw_iterations()       # which describes what resolved
+
+    def do_compare_clear(self):
+        """Unload every comparison: the box, the picked paths and the cache.
+
+        The cache goes too -- keeping a loaded Session for a campaign nobody
+        is drawing any more is memory held for no reason, and it would serve
+        a stale copy if the campaign is stepped before it is compared
+        against again."""
+        self.cmpsel_var.set("")
+        self._cmp_paths.clear()
+        self._cmp_cache.clear()
+        self._cmp_logged.clear()
+        self._cmp_lastspec = None
+        self._cmp_described.clear()
+        self.log("compare: cleared. Nothing is drawn alongside any more.")
+        self._redraw_iterations()
+
+    def _describe_compare(self):
+        """What each resolved campaign is, said once per campaign.
+
+        The status line has room for the names; this is the line that says
+        whether the thing now riding the plots is even commensurable with the
+        session underneath it. Said for a typed key as much as a picked one --
+        the trap does not care how the campaign got into the box."""
+        s0 = self.session
+        for key, cs, snaps, _col in self._cmp_last:
+            token = (key, cs.state_path)
+            if token in self._cmp_described:
+                continue
+            self._cmp_described.add(token)
+            its = sorted({sn["it"] for sn in cs.snapshots})
+            self.log(f"  {key}   {cs.channel}   {len(cs.t)} pts @ "
+                     f"{cs.loop.dt*1e6:g} us   "
+                     f"{len(its)} stored iteration(s)"
+                     + (f" ({its[0]}-{its[-1]})" if its else "")
+                     + f"   {cs.model_key or 'no model recorded'}")
+            # A different channel or a different grid does not stop the
+            # overlay -- both are legitimate comparisons -- but the metrics
+            # underneath them are then not the same measurement, and that is
+            # invisible in a plot of two curves.
+            if cs.channel != s0.channel:
+                self.log(f"    NOTE: {key} is {cs.channel}, this session is "
+                         f"{s0.channel} -- different monitor scaling, so the "
+                         f"error metrics are not directly comparable")
+            if len(cs.t) != len(s0.t) or abs(cs.loop.dt - s0.loop.dt) > 1e-15:
+                self.log(f"    NOTE: {key} runs {len(cs.t)} pts @ "
+                         f"{cs.loop.dt*1e6:g} us against this session's "
+                         f"{len(s0.t)} @ {s0.loop.dt*1e6:g} us -- it is drawn "
+                         f"on its own grid, and its spectra have their own "
+                         f"bin width")
+
+    def _refresh_compare_status(self):
+        """Main thread. Keep the compare line telling the truth: what
+        resolved, and how much of the box did not."""
+        asked = len({t.partition(":")[0]
+                     for t in self.cmpsel_var.get().split()
+                     if t.partition(":")[0]})
+        got = self._cmp_last
+        if got:
+            names = "; ".join(
+                f"{k} ({len(sn)} iter)" if sn else f"{k} (history only)"
+                for k, _cs, sn, _c in got)
+            text = f"{len(got)} campaign(s): {names}"
+            colour = "#006600"
+            if asked > len(got):
+                text += f"   [{asked - len(got)} not shown -- see the log]"
+                colour = "#cc6600"
+        elif asked:
+            text = (f"{asked} stem(s) in the box, none resolved -- "
+                    f"see the log")
+            colour = "#cc6600"
+        else:
+            text, colour = CMP_HINT, "#666666"
+        self.cmp_status.configure(text=elide(text, CMP_STATUS_CHARS),
+                                  foreground=colour)
+        self.cmp_clear_btn.configure(
+            state="normal" if (asked or self._cmp_paths) and not self.busy
+            else "disabled")
+
     def _compare_groups(self):
-        """The Compare box -> [(stem, session, snaps, colour)]: sibling
-        campaigns from the active state's directory, loaded read-only (never
-        saved, never stepped) and overlaid on the analysis plots. Grammar:
-        space-separated stems, each optionally stem:ITERS with the
-        Iterations grammar; a blank selection means that stem's last
-        measured iteration."""
+        """The Compare box -> [(key, session, snaps, colour)]: other
+        campaigns loaded read-only (never saved, never stepped) and overlaid
+        on the analysis plots. Grammar: space-separated keys, each optionally
+        key:ITERS with the Iterations grammar; a blank selection means that
+        campaign's last measured iteration.
+
+        A key is a stem in the loaded session's run folder, or whatever the
+        Add campaigns... dialog mapped to a state file elsewhere."""
         s0 = self.session
         spec = self.cmpsel_var.get().strip() if s0 is not None else ""
         if spec != self._cmp_lastspec:
             self._cmp_lastspec = spec
             self._cmp_logged.clear()
         if not spec:
+            self._cmp_last = []
             return []
         run_dir = os.path.dirname(s0.state_path)
         groups, seen = [], set()
         for tok in spec.split():
-            stem, _, isel = tok.partition(":")
-            if not stem or stem in seen:
+            key, _, isel = tok.partition(":")
+            if not key or key in seen:
                 continue
-            seen.add(stem)
-            if stem == s0.stem:
-                self._log_once(f"compare: {stem!r} is the loaded session "
+            seen.add(key)
+            path = self._cmp_resolve(key)
+            # compared by FILE, not by stem: by the naming convention the run
+            # folder's file for the active stem is the loaded state, but an
+            # archived campaign of the SAME NAME in another folder is a
+            # different measurement and exactly what the picker is for
+            if path is not None and _same_file(path, s0.state_path):
+                self._log_once(f"compare: {key!r} is the loaded session "
                                f"-- skipped")
                 continue
-            path = os.path.join(run_dir, f"drive_{stem}.state.npz")
-            if not os.path.exists(path):
+            if path is None:
+                if self._cmp_paths.get(key):
+                    self._log_once(
+                        f"compare: the file picked for {key!r} is gone: "
+                        f"{self._cmp_paths[key]}")
+                    continue
                 have = sorted(
                     re.match(r"drive_(.+)\.state\.npz$",
                              os.path.basename(p)).group(1)
                     for p in glob.glob(os.path.join(run_dir,
                                                     "drive_*.state.npz")))
-                self._log_once(f"compare: no state for {stem!r} in {run_dir} "
-                               f"(available: {', '.join(have) or 'none'})")
+                self._log_once(f"compare: no state for {key!r} in {run_dir} "
+                               f"(available: {', '.join(have) or 'none'}) "
+                               f"-- Add campaigns... reaches other folders")
                 continue
             mt = os.path.getmtime(path)
             cached = self._cmp_cache.get(path)
@@ -3107,15 +3390,16 @@ class App:
                     cs = load_session(path)
                     recall_snapshots(cs)
                 except Exception as e:
-                    self._log_once(f"compare: could not load {stem!r}: {e}")
+                    self._log_once(f"compare: could not load {key!r}: {e}")
                     continue
                 self._cmp_cache[path] = (mt, cs)
             snaps = self._snaps_for(cs, isel, 1, log=self._log_once)
             if not snaps and not cs.snapshots:
-                self._log_once(f"compare: {stem!r} has no stored measurements"
+                self._log_once(f"compare: {key!r} has no stored measurements"
                                f" -- only its convergence history can show")
-            groups.append((stem, cs, snaps,
+            groups.append((key, cs, snaps,
                            CMP_COLOURS[len(groups) % len(CMP_COLOURS)]))
+        self._cmp_last = groups
         return groups
 
     def _cmp_colour(self, base, idx, n):
@@ -3278,6 +3562,8 @@ class App:
         self._fill_table(cmp)
         if self._wave_redraw is not None:
             self._wave_redraw()
+        self._refresh_compare_status()
+        self._describe_compare()
 
     def _show_session(self, select_tab=False):
         """Everything drawable from a freshly loaded/inited session: target,

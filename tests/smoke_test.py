@@ -1,9 +1,10 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-50 numbered checks: state round-trips, the span guard, the header-less
+53 numbered checks: state round-trips, the span guard, the header-less
 file refusal, the FRQ-vs-record check, the seed-drive Init, the model ladder,
 the GEN from-scratch path, flat first shot, hold-run display, plot
-overlays, compare-stem overlays, drive spectrum, spectrum
+overlays, compare-campaign overlays and their picker, status line and
+tail-scrolling path entries, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
 probe + measurement maths + overlay viewer, the iteration
 table, dot density, linked time axes, and the multi-channel capture the
@@ -580,6 +581,85 @@ assert glabs == ["GENX iter 0"], glabs
 app.cmpsel_var.set("GENX:all")               # left set for the screenshots
 app._redraw_iterations(); root.update()
 print("[31] compare grammar: blank = last iter, 'GENX:0' picks iteration 0")
+
+# the picker: campaigns from OUTSIDE the run folder, which no stem can name.
+# SCRATCH holds the original drive_MKJX1.state.npz -- same stem as the loaded
+# session, a different file, which is exactly the collision the keying is for.
+_picked = []
+ilc_gui.filedialog.askopenfilenames = lambda **k: tuple(_picked)
+app.cmpsel_var.set("")
+app._cmp_paths.clear()
+_picked[:] = [os.path.join(SCRATCH, "drive_MKJX1.state.npz")]
+app.do_compare_add(); root.update()
+key = app.cmpsel_var.get().strip()
+assert key.startswith("MKJX1@"), (
+    "an archived campaign of the loaded stem was not given its own key: "
+    + repr(key))
+assert app._cmp_paths.get(key) == os.path.abspath(_picked[0]), app._cmp_paths
+elabs = [l.get_label() for l in app.ax_err.get_lines()]
+assert any(l.startswith(key) for l in elabs), (key, elabs)
+assert key in app.cmp_status.cget("text"), app.cmp_status.cget("text")
+assert str(app.cmp_clear_btn.cget("state")) == "normal"
+# picking the loaded session itself is refused, not drawn against itself
+_picked[:] = [app.session.state_path]
+app.do_compare_add(); root.update()
+assert app.cmpsel_var.get().strip() == key, app.cmpsel_var.get()
+assert "is the loaded session" in app.log_text.get("1.0", "end")
+# a run-folder pick keeps its bare stem and writes no path to remember
+_picked[:] = [os.path.join(ilc_gui.RUN_DIR, "drive_GENX.state.npz")]
+app.do_compare_add(); root.update()
+assert "GENX" in app.cmpsel_var.get().split(), app.cmpsel_var.get()
+assert "GENX" not in app._cmp_paths, app._cmp_paths
+assert "2 campaign(s)" in app.cmp_status.cget("text"), (
+    app.cmp_status.cget("text"))
+app.do_compare_clear(); root.update()
+assert app.cmpsel_var.get() == "" and not app._cmp_paths and not app._cmp_cache
+assert not any(l.get_label().startswith("MKJX1@")
+               for l in app.ax_err.get_lines()), "Clear left the overlays up"
+assert str(app.cmp_clear_btn.cget("state")) == "disabled"
+assert "nothing loaded" in app.cmp_status.cget("text"), (
+    app.cmp_status.cget("text"))
+print("[51] compare picker: an out-of-folder campaign of the SAME stem got "
+      "its own key and drew, the loaded session was refused, a run-folder "
+      "pick stayed a bare stem, Clear emptied box, map, cache and plots")
+
+# a stem typed one letter wrong says so on the status line, not only in the log
+app.cmpsel_var.set("GENX NOPE")
+app._redraw_iterations(); root.update()
+txt = app.cmp_status.cget("text")
+assert "1 campaign(s)" in txt and "not shown" in txt, txt
+app.cmpsel_var.set("NOPE")
+app._redraw_iterations(); root.update()
+assert "none resolved" in app.cmp_status.cget("text"), (
+    app.cmp_status.cget("text"))
+app.cmpsel_var.set("GENX:all")               # back to the screenshot state
+app._redraw_iterations(); root.update()
+# a typed key is described like a picked one, with the NOTE that says the
+# metrics are not commensurable -- and said once, however often the plots
+# redraw (Clear forgets, so only the redraws since the last one are counted)
+said = app.log_text.get("1.0", "end").count("NOTE: GENX is GEN")
+assert said >= 1, "a GEN campaign under an EO1 session was not flagged"
+assert "stored iteration(s)" in app.log_text.get("1.0", "end"), \
+    "no campaign was described"
+app._redraw_iterations(); root.update()
+app._redraw_iterations(); root.update()
+assert app.log_text.get("1.0", "end").count("NOTE: GENX is GEN") == said, \
+    "the compare description repeats on every redraw"
+print("[52] compare status line: names what resolved, counts what did not, "
+      "says so when nothing did, and each campaign is spelled out once "
+      "(channel/grid NOTE included)")
+
+# a path entry shows the END of what it holds -- the file name, not the drive
+app.state_var.set(os.path.join(SCRATCH, "a" * 120, "drive_MKJX1.state.npz"))
+root.update_idletasks(); root.update()
+first, last = app.state_entry.xview()
+assert last >= 0.999 and first > 0, (
+    "the state entry is showing the head of an overflowing path: "
+    + repr((first, last)))
+app.state_var.set(app.session.state_path)
+root.update_idletasks(); root.update()
+print("[53] path entries scroll to the tail: a path too long for its box "
+      "shows the file name, not the drive letter")
 
 # drive-corrections spectrum: same shape as the error spectrum, base
 # measurements only, each stem against its own reference drive
