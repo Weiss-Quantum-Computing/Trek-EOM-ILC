@@ -270,16 +270,11 @@ def avg_spectrum(e, dt, k=1):
     return f[1:], (acc / m)[1:] * 2 / w.sum()
 
 
-# The MSO-X accepts only these readout counts (:WAVeform:POINts); asked for
-# anything else it rounds to a value it likes -- possibly DOWN, so pick the
-# next one up ourselves. Without an explicit request it hands over 5000
-# points regardless of the band (measured 26 Aug: 3 us readout of a 15 ms
-# window killed the first 200 kHz FRF run).
-SCOPE_PTS = (2000, 5000, 10000, 20000, 50000, 62500)
-
-
-def scope_points_for(need):
-    return next((p for p in SCOPE_PTS if p >= need), SCOPE_PTS[-1])
+# The readout-count table moved into eomilc.scope so ilc_bench can size its
+# alignment readout by the same rule the panel's captures use. Re-bound here
+# because every call site in this file (and the smoke test) names it locally.
+SCOPE_PTS = scopeio.SCOPE_PTS
+scope_points_for = scopeio.scope_points_for
 
 
 def pd_channel(cfg=None):
@@ -755,11 +750,13 @@ class App:
 
         r3 = ttk.Frame(vf); r3.grid(row=3, column=0, columnspan=4,
                                     sticky="ew", pady=(2, 1))
-        b = ttk.Button(r3, text="From calibration", command=self.do_calib)
+        # One button, two fits, explained in the dialog it opens. The old
+        # 'From calibration' (the Aug ramp-fit tables, Trek-only, and a
+        # resonance the FRFs later contradicted) is gone: parameters are
+        # typed or fitted to data from THIS system, nothing else.
+        b = ttk.Button(r3, text="Replace values with a fit...",
+                       command=self.do_fit_dialog)
         b.pack(side="left", fill="x", expand=True)
-        self._actions.append(b)
-        b = ttk.Button(r3, text="Fit from measurement", command=self.do_fit)
-        b.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self._actions.append(b)
 
         self.frf_var = tk.StringVar(value=self.cfg.get("frf", ""))
@@ -1312,8 +1309,8 @@ class App:
 
     def _entry_params(self, key, strict):
         """Panel entries for model `key` -> dict.  strict=False returns None
-        on any blank entry (caller falls back to calibration); strict=True
-        raises with a hint at the two fill buttons."""
+        on any blank entry (the caller says which and how to fill it);
+        strict=True raises with a hint at the fit button."""
         vals = {}
         for k in PARAMS_FOR[key]:
             txt = self._param_vars[k].get().strip()
@@ -1322,7 +1319,7 @@ class App:
                     return None
                 raise RuntimeError(
                     f"'{k}' is blank for the {KEY2LABEL[key]} model -- type a "
-                    f"value, or use From calibration / Fit from measurement")
+                    f"value, or use 'Replace values with a fit...'")
             try:
                 vals[k] = float(txt)
             except ValueError:
@@ -1344,38 +1341,189 @@ class App:
                               zeta=params.get("zeta", 0.0),
                               offset=offset, dt=dt)
 
-    def do_calib(self):
-        """Fill the parameter boxes from the measured calibration tables at
-        the amplitude actually in use -- fn falls with drive (the EOM
-        capacitance is voltage dependent), so the amplitude matters."""
+    # ------------------------------------------------------------ fitting
+    def do_fit_dialog(self):
+        """'Replace values with a fit?' -- the two ways the selected rung's
+        parameters can be filled from data, each explained, and Cancel.
+        Both overwrite the parameter boxes; the loop picks the new values up
+        at the next Init/Step/Bench (those read the boxes)."""
+        key = self._model_key()
+        if key == "frf":
+            return messagebox.showinfo(
+                "Replace values with a fit",
+                "The measured FRF has no parameters to fit -- the measurement "
+                "IS the identification. Use Measure FRF... to take one (or "
+                "the CLI: tools/sysid_make.py + sysid_fit.py), set the taper "
+                "inside its coherent band, and the loop divides by it "
+                "directly. Fitting belongs to the parametric rungs.")
+        names = ", ".join(PARAMS_FOR[key])
+        fps = self._frf_paths()
+        frf_ok = len(fps) == 1 and os.path.exists(fps[0])
+        meas_ok = self.session is not None and (
+            bool(self.session.snapshots) or bool(self.meas_var.get().strip()))
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Replace values with a fit?")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        fr = ttk.Frame(dlg, padding=10)
+        fr.pack(fill="both", expand=True)
+        ttk.Label(fr, text=f"Model: {KEY2LABEL[key]}  --  parameters: {names}",
+                  font=MONO).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(fr, foreground="#666666", wraplength=560, justify="left", text=(
+            "Either option overwrites the parameter boxes. The loop uses the "
+            "new values from the next Init, Step or bench iteration; nothing "
+            "already played changes.")).grid(row=1, column=0, columnspan=3,
+                                             sticky="w", pady=(2, 8))
+
+        # ---- option A: the FRF
+        a = ttk.LabelFrame(fr, text="Fit to FRF", padding=6)
+        a.grid(row=2, column=0, columnspan=3, sticky="ew")
+        ttk.Label(a, wraplength=540, justify="left", text=(
+            "Least squares of this model form to the measured transfer "
+            "function in the FRF field: log-magnitude and phase with equal "
+            "weight, coherent tones only, from the lowest tone up to the "
+            "frequency below. Every frequency counts the same, so this is "
+            "the fit that matters for loop stability -- the log reports the "
+            "magnitude and phase residual in band and the frequency where "
+            "|1 - gamma*H/H_model| first reaches 1, i.e. where the update "
+            "stops contracting with these values. Only the dynamic terms "
+            "are fitted; the gain is never free (a free gain absorbs model "
+            "mismatch: 0.70 against a measured 0.56 on X1). It is the gain "
+            "box when that holds a value -- a gain known from the loop's own "
+            "DC contraction beats the FRF's lowest tone, which sits at a few "
+            "hundred Hz and reads 0.59 on X1 -- else the median |H| of the "
+            "three lowest tones. Second order accepts zeta > 1 (two real "
+            "poles).")
+                  ).grid(row=0, column=0, columnspan=4, sticky="w")
         try:
-            # The CHOSEN channel, not the loaded session's: after switching
-            # the combobox to another system, filling from the old session's
-            # calibration would smuggle that chain's numbers across.
-            ch = CHANNELS[self.channel_var.get()]
-            if self.session is not None and self.session.channel == ch.name:
-                amp = float(np.ptp(self.session.loop.target))
-            else:
-                tpath = self.target_var.get().strip()
-                if not os.path.exists(tpath):
-                    raise RuntimeError(
-                        "load a session or set a target file first -- the "
-                        "tables are amplitude-dependent, so the target sets "
-                        "which row applies")
-                _, v = run_ilc.load_target(tpath, ch.mon_scale)
-                amp = float(np.ptp(v))
-            # a channel with no tables (GEN) raises here rather than
-            # borrowing another system's numbers
-            self.pgain_var.set(f"{ch.gain(amp):.4f}")
-            self.ptau_var.set(f"{ch.tau(amp)*1e6:.2f}")
-            self.pfn_var.set(f"{ch.fn(amp):.0f}")
-            self.pzeta_var.set(f"{ch.zeta(amp):.3f}")
-        except (RuntimeError, ValueError) as e:
-            return messagebox.showerror("From calibration", str(e))
-        self.log(f"calibration at {amp*ch.mon_scale:.0f} V pk-pk ({ch.name}): "
-                 f"gain {ch.gain(amp):.4f}, tau {ch.tau(amp)*1e6:.2f} us "
-                 f"(one-pole), fn {ch.fn(amp):.0f} Hz, zeta {ch.zeta(amp):.3f} "
-                 f"(tables measured 2026-08-20/21)")
+            fhi0 = max(float(self.fcut_var.get()), 20e3)
+        except ValueError:
+            fhi0 = 40e3
+        fhi_var = tk.StringVar(value=f"{fhi0:g}")
+        have_gain = bool(self.pgain_var.get().strip())
+        fixg_var = tk.BooleanVar(value=not have_gain)
+        ttk.Label(a, text="fit up to Hz").grid(row=1, column=0, sticky="w",
+                                                pady=(4, 0))
+        ttk.Entry(a, textvariable=fhi_var, width=9).grid(row=1, column=1,
+                                                         sticky="w", pady=(4, 0))
+        ttk.Checkbutton(a, text="gain from the lowest tones (untick: keep the gain box)",
+                        variable=fixg_var).grid(row=1, column=2, sticky="w",
+                                                padx=(12, 0), pady=(4, 0))
+        ttk.Label(a, foreground="#666666", text=(
+            "(prefilled: f_cut, at least 20 kHz -- the band the model has to "
+            "be right in)")).grid(row=1, column=3, sticky="w", padx=(8, 0),
+                                  pady=(4, 0))
+        src_a = (os.path.basename(fps[0]) if frf_ok else
+                 ("no FRF file in the FRF field" if not fps else
+                  f"the FRF field lists {len(fps)} files (Show FRF's overlay "
+                  f"view); a fit needs exactly one" if len(fps) > 1 else
+                  f"FRF not found: {fps[0]}"))
+        ttk.Label(a, text=f"source: {src_a}", foreground="#666666").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        def go_frf():
+            try:
+                f_hi = float(fhi_var.get())
+                if f_hi <= 0:
+                    raise ValueError
+            except ValueError:
+                return messagebox.showerror("Fit to FRF", "'fit up to' must be "
+                                            "a positive frequency in Hz",
+                                            parent=dlg)
+            gain = None
+            if not fixg_var.get():
+                txt = self.pgain_var.get().strip()
+                try:
+                    gain = float(txt)
+                    if gain <= 0:
+                        raise ValueError
+                except ValueError:
+                    return messagebox.showerror(
+                        "Fit to FRF", "the gain box is not a positive number; "
+                        "type one or tick 'gain from the lowest tones'",
+                        parent=dlg)
+            dlg.destroy()
+            self.do_fit_frf(fps[0], key, f_hi, gain)
+
+        bb = ttk.Button(a, text="Fit to FRF", command=go_frf,
+                        state="normal" if frf_ok else "disabled")
+        bb.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
+        # ---- option B: the played pair
+        b = ttk.LabelFrame(fr, text="Fit to measurement", padding=6)
+        b.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Label(b, wraplength=540, justify="left", text=(
+            "plant.identify on the last played drive/response pair in the "
+            "time domain: the latest measurement in this session (against "
+            "the drive that produced it), else the Captures glob. Weighted by "
+            "the record's own spectrum, so on a slow ramp -- almost all of it "
+            "below a few kHz -- the gain comes out right and the lag terms "
+            "come out short (27 us against 70 us from the FRF on X1). Use it "
+            "for the gain, or when no FRF has been measured yet.")
+                  ).grid(row=0, column=0, sticky="w")
+        src_b = ("the latest measurement in this session"
+                 if self.session is not None and self.session.snapshots else
+                 f"the Captures glob {self.meas_var.get().strip()}"
+                 if meas_ok else
+                 "nothing to fit from: load or init a session and run an "
+                 "iteration, or set the Captures glob")
+        ttk.Label(b, text=f"source: {src_b}", foreground="#666666").grid(
+            row=1, column=0, sticky="w", pady=(4, 0))
+
+        def go_meas():
+            dlg.destroy()
+            self.do_fit()
+
+        ttk.Button(b, text="Fit to measurement", command=go_meas,
+                   state="normal" if meas_ok else "disabled").grid(
+            row=2, column=0, sticky="ew", pady=(6, 0))
+
+        ttk.Button(fr, text="Cancel", command=dlg.destroy).grid(
+            row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+
+    def do_fit_frf(self, path, model_key, f_hi, gain=None):
+        """Fit the selected parametric rung to the FRF file `path` up to
+        f_hi Hz; gain None = the median |H| of the lowest tones. Works with
+        or without a session (the fit lives in frequency, not on a grid)."""
+        try:
+            gamma = float(self.gamma_var.get())
+        except ValueError:
+            gamma = 0.6
+        dt = self.session.loop.dt if self.session is not None else 2e-6
+        self.run_worker(lambda: self._fit_frf_work(path, model_key, f_hi,
+                                                   gain, gamma, dt),
+                        "fitting model to the FRF...")
+
+    def _fit_frf_work(self, path, model_key, f_hi, gain, gamma, dt):
+        f, H = ilc._read_frf(path)
+        p, info = plantmod.fit_frf(f, H, model=model_key, f_hi=f_hi,
+                                   gain=gain, dt=dt)
+        lam, f_b = plantmod.contraction(f, H, p, gamma)
+        band = (f >= info["f_lo"]) & (f <= info["f_hi"])
+        print(f"fit ({KEY2LABEL[model_key]}) to {os.path.basename(path)}, "
+              f"{info['n_tones']} tones {info['f_lo']:.0f} Hz - "
+              f"{info['f_hi']/1e3:.4g} kHz:")
+        print(f"  {p}")
+        print(f"  gain: {info['gain_source']}")
+        print(f"  residual in band: {info['resid_mag_pct']:.1f}% rms magnitude, "
+              f"{info['resid_phase_deg']:.1f} deg rms phase -- what this form "
+              f"cannot follow in the measured response")
+        worst = int(np.argmax(lam[band]))
+        print(f"  contraction |1 - {gamma:g} H/H_model|: worst in band "
+              f"{lam[band][worst]:.2f} at {f[band][worst]/1e3:.1f} kHz; "
+              + (f"first reaches 1 at {f_b/1e3:.1f} kHz -- the update stops "
+                 f"contracting there; keep f_cut below it (the Q filter "
+                 f"shields a little past it)" if f_b is not None else
+                 f"below 1 at every measured tone to {f[-1]/1e3:.0f} kHz"))
+        self.msgs.put(("call", lambda: self._after_frf_fit(p)))
+
+    def _after_frf_fit(self, p):
+        self._set_param_entries(p)
+        try:
+            self.do_show_frf()          # the fitted model over the tones
+        except Exception as e:          # the overlay is a courtesy
+            self.log(f"(FRF overlay not drawn: {e})")
 
     def do_fit(self):
         """Identify the selected parametric model from real data: the last
@@ -1383,14 +1531,15 @@ class App:
         key = self._model_key()
         if key == "frf":
             return messagebox.showinfo(
-                "Fit from measurement",
+                "Fit to measurement",
                 "The measured FRF is not fitted here -- the measurement IS "
                 "the identification. Use Measure FRF... to take one (or the "
                 "CLI: tools/sysid_make.py + sysid_fit.py), then set the "
                 "taper inside its coherent band and switch the Model to "
                 "'measured FRF'. Fit belongs to the parametric rungs.")
         if self.session is None:
-            return messagebox.showerror("Fit", "load or init a session first")
+            return messagebox.showerror("Fit to measurement",
+                                        "load or init a session first")
         pattern = self.meas_var.get().strip()
         mon = self.moncol_var.get()
         self.run_worker(lambda: self._fit_work(key, pattern, mon),
@@ -1727,7 +1876,12 @@ class App:
             except RuntimeError as e:
                 return messagebox.showerror("Init", str(e))
             frf_rec = (fps[0], fb["f_use"], fb["f_max"])
-        seed_key = "resonant" if mode == "frf" else mode
+        # On the measured-FRF rung the stored parametric plant is only the
+        # gain (the model-predicted trace and the DC scale): the FRF drives
+        # the updates. It used to be seeded with the calibration tables'
+        # resonance, which put the withdrawn 2.3 kHz / 0.21 into every FRF
+        # state's record.
+        seed_key = "static" if mode == "frf" else mode
         # one-number bootstrap: a typed first-shot gain can seed a blank
         # model gain, so either box alone is enough to start from scratch
         if not self.pgain_var.get().strip() and self.shotgain_var.get().strip():
@@ -1738,23 +1892,25 @@ class App:
             params = self._entry_params(seed_key, strict=False)
         except RuntimeError as e:
             return messagebox.showerror("Init", str(e))
-        if params is not None:
-            plant = self._plant_from(params, dt)
-            seed_src = "from the panel entries"
-        else:
-            try:
-                plant = ch.plant(float(np.ptp(v)), dt, model=seed_key)
-            except ValueError as e:
-                return messagebox.showerror(
-                    "Init", f"{e}\n\nStarting from scratch, a typed gain with "
-                            f"the gain-only model is enough: guess it "
-                            f"conservatively (drive comes out larger if gain "
-                            f"is guessed high), run one iteration, then 'Fit "
-                            f"from measurement' replaces the guess with the "
-                            f"measured value.")
-            seed_src = "from the calibration tables"
+        if params is None:
+            # No silent fallback to any table: the numbers come from this
+            # system -- typed, or fitted to its FRF or its played response.
+            blank = [k for k in PARAMS_FOR[seed_key]
+                     if not self._param_vars[k].get().strip()]
+            return messagebox.showerror(
+                "Init", f"The {KEY2LABEL[seed_key]} model has no value for "
+                        f"{', '.join(blank)}.\n\nType it, or fill it with "
+                        f"'Replace values with a fit...' (Fit to FRF needs "
+                        f"only an FRF file in the FRF field; Fit to "
+                        f"measurement needs a played iteration).\n\nStarting "
+                        f"from scratch: choose 'gain only', type a "
+                        f"conservative gain -- high is the safe direction, "
+                        f"the loop converges for gamma*g_true/g_model < 2 -- "
+                        f"Init, run one iteration, then fit.")
+        plant = self._plant_from(params, dt)
+        seed_src = "from the panel entries"
         loop = ilc.Loop(plant=plant, target=v, dt=dt, channel=ch,
-                        gamma=f["gamma"], f_cut=f["f_cut"])
+                        gamma=f["gamma"], f_cut=f["f_cut"], limits=ch.limits)
         u = loop.first_shot(gain=g_shot)
         g_used = g_shot if g_shot is not None else plant.gain
         seed = self.seed_var.get().strip()
@@ -1860,7 +2016,7 @@ class App:
                f"{len(s.t)} pts, dt {lp.dt*1e6:.2f} us\n"
                f"drive peak {np.abs(s.u).max():.3f} V, idle "
                f"{idle[0]:+.1f}/{idle[1]:+.1f} mV of "
-               f"{LIMITS.idle_awg*1e3:.0f} mV cap\n"
+               f"{lp.limits.idle_awg*1e3:.0f} mV cap\n"
                f"gamma {lp.gamma:g}, {band}"
                f"t-offset {s.t_off*1e6:g} us, "
                f"history {len(lp.history)} iterations")
@@ -2221,10 +2377,30 @@ class App:
             for ch, lo, hi, what in ((awg_ch, u_lo, u_hi, "drive"),
                                      (scope_ch, v_lo, v_hi, "monitor")):
                 scope.put(f":CHANnel{ch}:DISPlay", "1")
+                # DC, always -- and before the verticals, and regardless of
+                # 'keep verticals'. The ILC error is an absolute level, so AC
+                # coupling does not rescale the measurement, it deletes the
+                # part being measured: the monitor's DC is the EOM voltage,
+                # and the drive's is the idle the end clamp exists to bound.
+                # A noise capture leaves these channels AC on purpose
+                # (eomilc.rin, ilc_bench.noise_capture set and restore it),
+                # so a restore that did not run would otherwise sit here
+                # silently until the next campaign learned nonsense. Coupling
+                # first for the reason ilc_bench.scope_apply gives: the offset
+                # written after it is interpreted against the coupling then in
+                # force. 'keep verticals' is about V/div and offset -- the
+                # ones you may want hand-tuned -- not about which half of the
+                # signal reaches the digitiser.
+                was = scope.try_get(f":CHANnel{ch}:COUPling")
+                scope.put(f":CHANnel{ch}:COUPling", "DC")
+                if was is not None and was.upper() != "DC":
+                    print(f"scope CH{ch} ({what}): coupling was {was} -- set "
+                          f"to DC (AC deletes the level the loop measures)")
                 if keep_verticals:
                     print(f"scope CH{ch} ({what}): {scope.get(f':CHANnel{ch}:SCALe')} "
-                          f"V/div, offset {scope.get(f':CHANnel{ch}:OFFSet')} V "
-                          f"-- left as found (keep verticals ticked)")
+                          f"V/div, offset {scope.get(f':CHANnel{ch}:OFFSet')} V, "
+                          f"DC -- verticals left as found (keep verticals "
+                          f"ticked); coupling is not a vertical")
                     continue
                 span = max(hi - lo, 1e-3)
                 scale = nice_setting(1.25 * span / 8)      # 8 vertical divs
@@ -2232,7 +2408,7 @@ class App:
                 scope.put(f":CHANnel{ch}:SCALe", f"{scale:.6g}")
                 scope.put(f":CHANnel{ch}:OFFSet", f"{mid:.6g}")
                 print(f"scope CH{ch} ({what}): {scale:.3g} V/div, offset "
-                      f"{mid:+.3g} V (signal {lo:+.3g}..{hi:+.3g} V)")
+                      f"{mid:+.3g} V, DC (signal {lo:+.3g}..{hi:+.3g} V)")
             print(f"scope: {rng*1e3:.4g} ms window ({rng/10*1e3:.4g} ms/div), "
                   f"position +{period/2*1e3:.4g} ms, acquisition HRES")
             print("trigger source and level NOT touched -- they belong to "
@@ -2638,12 +2814,13 @@ class App:
                                        f"full scale ({s.full_scale:g} V)")
                 mode, n_p, dt_p = plan_frf_grid(len(s.t), s.loop.dt, f_hi)
                 u, bins = build_frf_probe(n_p, dt_p, peak, f_lo, f_hi, tones)
+                lim = s.loop.limits          # this channel's, not the Trek's
                 slew, i_pk, hv_pk = probe_demand(u, dt_p, s.loop.plant.gain,
-                                                 s.loop.channel)
-                if hv_pk > LIMITS.hv_max:
+                                                 s.loop.channel, lim)
+                if hv_pk > lim.hv_max:
                     raise RuntimeError(
                         f"flat-gain peak output {hv_pk:.0f} V exceeds the "
-                        f"{LIMITS.hv_max:.0f} V limit -- lower the probe peak")
+                        f"{lim.hv_max:.0f} V limit -- lower the probe peak")
                 f = self._floats(awg_ch=self.awgch_var,
                                  scope_ch=self.scopech_var,
                                  repeats=self.repeats_var, wait=self.wait_var)
@@ -2651,15 +2828,16 @@ class App:
             except (RuntimeError, ValueError) as e:
                 return messagebox.showerror("Measure FRF", str(e),
                                             parent=dlg)
-            if (slew > LIMITS.slew_hv or i_pk > LIMITS.current) and \
+            if (slew > lim.slew_hv or i_pk > lim.current) and \
                     not messagebox.askyesno(
                         "Probe demand", parent=dlg, message=(
                     f"Under a FLAT-GAIN worst case this probe asks the "
                     f"amplifier for {slew/1e6:.0f} V/us "
                     f"({i_pk*1e3:.1f} mA into "
-                    f"{LIMITS.load_capacitance*1e12:.0f} pF) -- past the "
-                    f"{LIMITS.slew_hv/1e6:.0f} V/us / "
-                    f"{LIMITS.current*1e3:.0f} mA 610E specs.\n\n"
+                    f"{lim.load_capacitance*1e12:.0f} pF) -- past the "
+                    f"{lim.slew_hv/1e6:.0f} V/us / "
+                    f"{lim.current*1e3:.0f} mA limits configured for "
+                    f"{s.channel} (the 610E specs on the Trek chains).\n\n"
                     f"The Trek cannot actually exceed its own limits: above "
                     f"its band the amp's slew/current limiting caps what "
                     f"flows, so the real cost is time spent limiting during "
@@ -3628,7 +3806,7 @@ class App:
         ax.axhline(fs, color="#c62828", lw=0.8, ls="--")
         ax.axhline(-fs, color="#c62828", lw=0.8, ls="--",
                    label=f"+/-{fs:g} V full scale (AMP {2*fs:g} Vpp, OFST 0)")
-        cap = LIMITS.idle_awg
+        cap = s.loop.limits.idle_awg
         ax.axhline(cap, color="#c62828", lw=0.6, ls=":")
         ax.axhline(-cap, color="#c62828", lw=0.6, ls=":")
         ax.plot([tms[0], tms[-1]], [u[0], u[-1]], "o", color=c, ms=4, mfc="none")

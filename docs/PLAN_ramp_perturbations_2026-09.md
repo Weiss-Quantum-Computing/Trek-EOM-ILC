@@ -440,10 +440,12 @@ Error spectrum at k = 16), named in the notes as `drive_<stem>_iNN.csv`.
 
 ### Phase 2, the second-order rung on X1
 
-**2.1 `PR2P5X1`.** Config A; target PARX1; Model = second order; gain 0.56,
-fn 7311 Hz, zeta 1.10 typed by hand (From calibration would fill the
-withdrawn 2.3 kHz / 0.21 resonance; do not press it); f_cut 50 kHz; gamma
-0.6; 20 iterations. Predicted: contraction 0.4/iteration; floor below
+**2.1 `PR2P5X1`.** Config A; target `target_PARX1_V90.csv`; Model = second
+order; gain 0.56 in the gain box, then *Replace values with a fit... > Fit
+to FRF* on `frf_FR200Kp5VX1.csv` up to 40 kHz with the gain box kept
+(expected fn about 7.2 to 7.3 kHz, zeta 1.10 to 1.14, boundary 54 kHz in
+the log; the values of `frf_fit.py` and of the panel agree to the fit
+band); f_cut 50 kHz; gamma 0.6; 20 iterations. Predicted: contraction 0.4/iteration; floor below
 0.5 V rms; 10 to 25 kHz residual about half of `PR1PX1C`'s; no growth
 anywhere below 54 kHz. Rule per Section 3. The panel accepts zeta > 1 (the
 entry check requires only zeta > 0) and `Plant.lead` is exact for two real
@@ -656,10 +658,19 @@ was found.
   which is a behaviour change to agree on, not a bug fix.
 - **I4. Second-order rung usable, but two buttons mislead.** zeta > 1 is
   accepted and the lead is correct for two real poles; From calibration
-  fills the withdrawn resonance and Fit from measurement is biased on ramp
-  records. The parameters come from `frf_fit.py` on the FRF file. A
-  "fit to FRF" action in the panel would remove the hand step; not needed
-  for this campaign.
+  filled the withdrawn resonance and Fit from measurement is biased on ramp
+  records. Done 2 Sep: one button, *Replace values with a fit...*, opens
+  a dialog offering *Fit to FRF* (`plant.fit_frf`: equal-weight log
+  magnitude and phase over the coherent tones up to a chosen frequency,
+  gain kept from the box or taken from the lowest tones, the in-band
+  residual and the contraction boundary |1 - gamma H/H_model| = 1
+  reported) or *Fit to measurement* (the time-domain identify), each
+  explained, and Cancel. From calibration is removed; the Aug tables stay
+  in `config.py` as the record and for the CLI seed only. Step 2.1 can
+  now take fn and zeta from the button instead of by hand. Also done:
+  the limit set is per channel (`Channel.limits`), so the GEN channel is
+  bound by the generator rail alone rather than the Trek's 6 kV, slew,
+  current and 100 mV idle numbers.
 - **I5. Whole-record metrics only.** The Table reports whole-record rms and
   peak; Phase 3's corner windows and plateau means need the offline script
   specified in Phase 3. About 60 lines against `ilc_gui.load_session` and

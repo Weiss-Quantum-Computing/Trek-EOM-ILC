@@ -65,14 +65,15 @@ def check_limits(u_awg: np.ndarray, v_mon: np.ndarray, dt: float,
         msgs.append(f"peak slew {slew/1e6:.2f} V/us is over half the limit")
 
     i_pk = lim.load_capacitance * slew
-    if i_pk > lim.current:
-        ok = False
-        msgs.append(f"peak current {i_pk*1e3:.2f} mA into {lim.load_capacitance*1e12:.0f} pF "
-                    f"exceeds {lim.current*1e3:.1f} mA "
-                    f"(max load here is {lim.current/slew*1e12:.0f} pF)")
-    else:
-        msgs.append(f"peak current {i_pk*1e3:.2f} mA of {lim.current*1e3:.1f} mA "
-                    f"(assumes {lim.load_capacitance*1e12:.0f} pF -- measure it)")
+    if lim.load_capacitance > 0 and np.isfinite(lim.current):
+        if i_pk > lim.current:
+            ok = False
+            msgs.append(f"peak current {i_pk*1e3:.2f} mA into {lim.load_capacitance*1e12:.0f} pF "
+                        f"exceeds {lim.current*1e3:.1f} mA "
+                        f"(max load here is {lim.current/slew*1e12:.0f} pF)")
+        else:
+            msgs.append(f"peak current {i_pk*1e3:.2f} mA of {lim.current*1e3:.1f} mA "
+                        f"(assumes {lim.load_capacitance*1e12:.0f} pF -- measure it)")
 
     idle = float(u_awg[0])
     if abs(idle) > lim.idle_awg + 1e-9:
@@ -129,11 +130,12 @@ class Loop:
         first shot, at the cost of baking the model's opinion into the very
         measurement you would use to judge the model.
         """
+        cap = self.limits.idle_awg
         if flat:
             g = self.plant.gain if gain is None else float(gain)
-            return _limit_ends(np.asarray(self.target, float) / g)
+            return _limit_ends(np.asarray(self.target, float) / g, cap)
         u = self.plant.inverse(self.target)
-        return _limit_ends(smooth(u, self.dt, self.f_cut))
+        return _limit_ends(smooth(u, self.dt, self.f_cut), cap)
 
     def update(self, u_k: np.ndarray, y_k: np.ndarray) -> np.ndarray:
         """One ILC step.  y_k is the measured monitor trace, already aligned
@@ -163,7 +165,7 @@ class Loop:
             u_next = smooth(u_k + self.gamma * self.plant.lead(e),
                             self.dt, self.f_cut)
         self.history.append(self.metrics(y_k))
-        return _limit_ends(u_next)
+        return _limit_ends(u_next, self.limits.idle_awg)
 
     # --------------------------------------------------------------- metrics
     def metrics(self, y: np.ndarray) -> dict:

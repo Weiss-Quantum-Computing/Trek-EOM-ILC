@@ -70,7 +70,7 @@ pre-distorted seed.)
 | `eomilc/` | the library: `config` (calibration), `plant` (models + fitting), `ilc` (the loop), `outputs` (file emission), `scope` (capture reader) |
 | `run_ilc.py` | manual driver — `init` / `step` / `emit-ni` |
 | `ilc_bench.py` | closed-loop driver, upload → capture → update with no hands |
-| `ilc_gui.py` | panel front end for both drivers, with per-iteration plots (waveforms, error, spectrum, convergence, FRF); same state files as the CLIs, so GUI and CLI steps interleave. The inverse model is selectable — gain-only (0th order), one pole, second order, or the measured FRF — with parameters tuned by hand, filled from the calibration tables, or fitted from a measurement; the convergence plot marks where the model changed. `ilc_gui.bat` launches it with the Anaconda interpreter |
+| `ilc_gui.py` | panel front end for both drivers, with per-iteration plots (waveforms, error, spectrum, convergence, FRF); same state files as the CLIs, so GUI and CLI steps interleave. The inverse model is selectable — gain-only (0th order), one pole, second order, or the measured FRF — with parameters typed, fitted to a measured FRF, or fitted to a played drive/response pair (one button, both fits explained); the convergence plot marks where the model changed. `ilc_gui.bat` launches it with the Anaconda interpreter |
 | `tools/` | target builders and system-ID: `make_target.py` (MKJ target at any peak and grid), `make_ramp_target.py`, `sysid_make.py` (Schroeder multitone probe), `sysid_fit.py` (probe captures → `run/frf_<name>.csv`) |
 | `simulation/` | off-bench validation: `simulate.py`, `make_validation_fig.py` and its figure |
 | `characterisation/` | the 2026-08-21 analysis that produced every constant in `config.py` |
@@ -147,18 +147,20 @@ Bootstrapping with no target, no state, and no model:
    (output/drive ratio; ILC converges for `γ·g_true/g_model < 2`, so guessing
    the gain HIGH is the safe direction — the correction comes out small).
    Init writes the state file from scratch; nothing is inherited.
-3. **Measure and refine** — after the first iteration, *Fit from measurement*
-   replaces the guess with the identified value; step up the model ladder as
-   the residual demands, or measure an FRF with `tools/sysid_make.py` +
-   `tools/sysid_fit.py` (both system-agnostic: they fit whatever drive and
-   response the scope columns carry).
+3. **Measure and refine** — after the first iteration, *Replace values with
+   a fit… → Fit to measurement* replaces the guess with the identified
+   value; measure an FRF (the panel's *Measure FRF…*, or
+   `tools/sysid_make.py` + `tools/sysid_fit.py` — all system-agnostic) and
+   *Fit to FRF* gives the dynamic terms of whichever rung the residual
+   demands, with the frequency past which that rung stops contracting.
 
-Two things do **not** genericize automatically: `Limits` in
-`eomilc/config.py` keeps its Trek-era numbers (rails, slew, 6 kV ceiling) —
-review them before trusting the guard on a chain where they could bind
-differently — and bench mode's instrument layer is the BK4063B + MSO-X pair;
-another bench brings its own upload/capture path (the manual
-step-from-captures loop works with any scope CSV).
+The limit guard is per channel (`Channel.limits`): EO1/EO2 carry the Trek
+610E numbers (rails, 20 V/µs, 2 mA, 6 kV, the 100 mV idle cap), GEN carries
+the open set — nothing binds but the ±10 V generator rail. One thing does
+**not** genericize automatically: bench mode's instrument layer is the
+BK4063B + MSO-X pair; another bench brings its own upload/capture path (the
+manual step-from-captures loop works with any scope CSV, and the 11-character
+waveform-name cap is the 4063B's).
 
 ## Calibration lives in `eomilc/config.py`
 

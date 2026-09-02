@@ -116,7 +116,8 @@ def build_loop(state):
                        fn=float(state.get("fn", 0.0)), zeta=float(state.get("zeta", 0.0)),
                        dt=float(state["dt"]))
     loop = ilc.Loop(plant=p, target=state["target"], dt=float(state["dt"]), channel=ch,
-                    gamma=float(state["gamma"]), f_cut=float(state["f_cut"]))
+                    gamma=float(state["gamma"]), f_cut=float(state["f_cut"]),
+                    limits=ch.limits)
     loop.history = list(state["history"]) if "history" in state else []
     return loop
 
@@ -139,7 +140,8 @@ def cmd_init(a):
         p.tau, p.fn, p.zeta = a.tau * 1e-6, 0.0, 0.0   # explicit one-pole override
     gain, tau = p.gain, p.tau
 
-    loop = ilc.Loop(plant=p, target=v, dt=dt, channel=ch, gamma=a.gamma, f_cut=a.f_cut)
+    loop = ilc.Loop(plant=p, target=v, dt=dt, channel=ch, gamma=a.gamma, f_cut=a.f_cut,
+                    limits=ch.limits)
     u = loop.first_shot(flat=not a.model_first_shot, gain=a.shot_gain)
     g_shot = a.shot_gain if a.shot_gain is not None else p.gain
     kind = ("model-based pre-distortion" if a.model_first_shot

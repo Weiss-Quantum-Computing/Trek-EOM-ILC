@@ -28,6 +28,34 @@ HV_PER_MON = 1000.0          # nominal monitor scale, V of output per V of monit
 
 
 @dataclass
+class Limits:
+    """Hard limits the emitted waveform must respect.
+
+    These are per CHANNEL (`Channel.limits`): the numbers below are the Trek
+    610E + EOM chain's, and they bind on EO1/EO2 only.  `GEN_LIMITS` is the
+    open set for any other system -- the generator rail is the one limit a
+    drive has regardless of what it feeds -- so a generic session is not
+    refused by a 6 kV ceiling or a 100 mV idle cap it never asked for.
+    """
+    awg_rail: float = 10.0            # V peak at the AWG / NI output
+    trek_in_rail: float = 10.0        # V peak at the amplifier input (after the divider)
+    slew_hv: float = 20.0e6           # V/s at the EOM (610E spec, >20 V/us)
+    current: float = 2.0e-3           # A, 610E output current limit
+    load_capacitance: float = 200e-12 # F, EOM + HV cable + strays -- MEASURE THIS
+    hv_max: float = 6000.0            # EOM safe working voltage
+    idle_awg: float = 0.100           # V, cap on the record's first/last sample.
+                                      # The AWG holds the first sample between
+                                      # bursts, so this bounds the standing level
+                                      # on the EOM while letting the loop trim
+                                      # the chain's own idle offsets to zero.
+
+LIMITS = Limits()                               # the Trek chains
+GEN_LIMITS = Limits(slew_hv=float("inf"), current=float("inf"),
+                    load_capacitance=0.0, hv_max=float("inf"),
+                    idle_awg=10.0)              # any other system: rail only
+
+
+@dataclass
 class Channel:
     name: str
     divider: float           # AWG -> Trek input, measured, amplitude independent
@@ -57,6 +85,15 @@ class Channel:
     eo_zero_hv: float = float("nan")
     cmd_hv_gain_meas: float = float("nan")
     hysteresis_pct: float = float("nan")
+    # The limit set the guard applies to this chain (see Limits).
+    limits: Limits = field(default_factory=lambda: LIMITS)
+
+    # NOTE on the *_pts tables (1 Sep 2026): they are the 20-21 Aug Trek
+    # ramp-fit record and feed `plant()` for the CLI drivers' seed only. The
+    # panel no longer reads them -- its parameters are typed, fitted to a
+    # measured FRF, or fitted to a played drive/response pair -- because the
+    # resonance they encode (fn 2.2-3.0 kHz, zeta 0.21) was a large-signal
+    # artefact of those fits and the FRFs contradict it.
 
     def _table(self, pts, amplitude_mon: float) -> float:
         """Calibration lookup, refused loudly when there is nothing to look
@@ -168,12 +205,11 @@ EO2 = Channel(
 )
 
 # A blank channel for any OTHER system: unity divider, target CSVs read in
-# the same units the scope measures (mon_scale 1), and NO calibration tables
-# -- asking it for gain/tau/fn/zeta raises rather than interpolating Trek
-# numbers.  Start it with a typed gain (the gain-only model is enough), then
-# let the first measurement feed identify() or a sysid FRF.  The Limits guard
-# still applies with its Trek-era numbers; review those before trusting it
-# on a chain where they could bind differently.
+# the same units the scope measures (mon_scale 1), NO calibration tables --
+# asking it for gain/tau/fn/zeta raises rather than interpolating Trek
+# numbers -- and the open limit set (GEN_LIMITS: the generator rail and
+# nothing else).  Start it with a typed gain (the gain-only model is enough),
+# then fit the model to a measured FRF or to the first played pair.
 GEN = Channel(
     name="GEN",
     divider=1.0, divider_tol=0.0,
@@ -181,24 +217,7 @@ GEN = Channel(
     amp_pts=np.array([]), gain_pts=np.array([]), tau_pts=np.array([]),
     fn_pts=np.array([]), zeta_pts=np.array([]),
     mon_scale=1.0, out_name="output",
+    limits=GEN_LIMITS,
 )
 
 CHANNELS = {"EO1": EO1, "EO2": EO2, "GEN": GEN}
-
-
-@dataclass
-class Limits:
-    """Hard limits the emitted waveform must respect."""
-    awg_rail: float = 10.0            # V peak at the AWG / NI output
-    trek_in_rail: float = 10.0        # V peak at the Trek input
-    slew_hv: float = 20.0e6           # V/s at the EOM (610E spec, >20 V/us)
-    current: float = 2.0e-3           # A, 610E output current limit
-    load_capacitance: float = 200e-12 # F, EOM + HV cable + strays -- MEASURE THIS
-    hv_max: float = 6000.0            # EOM safe working voltage
-    idle_awg: float = 0.100           # V, cap on the record's first/last sample.
-                                      # The AWG holds the first sample between
-                                      # bursts, so this bounds the standing level
-                                      # on the EOM while letting the loop trim
-                                      # the chain's own idle offsets to zero.
-
-LIMITS = Limits()

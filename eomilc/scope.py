@@ -123,6 +123,28 @@ def find_trigger_offset(t: np.ndarray, y: np.ndarray, frac: float = 0.5) -> floa
     return float(t[i])
 
 
+# ------------------------------------------------------------------ readout
+#
+# The MSO-X accepts only these counts (:WAVeform:POINts); asked for anything
+# else it rounds to a value it likes -- possibly DOWN, so pick the next one up
+# ourselves. Asking is not optional: `Scope.waveform` writes
+# :WAVeform:POINts:MODE on every call and the scope RESETS the point count when
+# that mode is set, so a call that names no count gets whatever the scope falls
+# back to. That is how a 3 us readout of a 15 ms window killed the first
+# 200 kHz FRF run (26 Aug), and how the alignment check ended up the one
+# capture in the loop whose resolution nobody chose (2 Sep).
+#
+# It lives here rather than in the panel because ilc_bench needs the same rule:
+# one table, so a capture and the alignment check that precedes it are read at
+# the same depth.
+SCOPE_PTS = (2000, 5000, 10000, 20000, 50000, 62500)
+
+
+def scope_points_for(need):
+    """Smallest readout count the scope offers that is at least `need`."""
+    return next((p for p in SCOPE_PTS if p >= need), SCOPE_PTS[-1])
+
+
 # ------------------------------------------------------------------ spectra
 #
 # The SR760 stops at 100 kHz, so the intensity servo's bump at 150-300 kHz is

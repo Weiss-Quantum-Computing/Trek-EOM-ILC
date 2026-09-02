@@ -327,15 +327,26 @@ def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
 
 
 # ------------------------------------------------------------------- scope
-def verify_alignment(scope, drive_ch, u, t_grid, t_off, wait_s):
+def verify_alignment(scope, drive_ch, u, t_grid, t_off, wait_s, points=None):
     """One shot of the DRIVE channel, cross-correlated against the drive we
     just uploaded. A stale --t-offset poisons every measurement invisibly -- a
     250 us leftover once sent a ten-iteration run chasing its own alignment --
-    and the capture can simply check, so it does."""
+    and the capture can simply check, so it does.
+
+    `points` names the readout depth, defaulting to the same >= 2 samples per
+    grid step `capture` uses. Naming it matters: `Scope.waveform` writes
+    :WAVeform:POINts:MODE on every call and the scope resets the point count
+    when that mode is set, so a call that asks for nothing is read at whatever
+    depth the scope falls back to. This was the one capture in the loop that
+    did not ask, which left its resolution to whatever the previous operation
+    happened to leave behind -- worth about +/-5 us on the answer below,
+    against a 10 us threshold.
+    """
     got = scope.single(wait_s=wait_s)
     if got is not True:
         sys.exit("alignment check: no trigger -- is the burst running?")
-    ts, vs = scope.waveform(drive_ch)
+    ts, vs = scope.waveform(
+        drive_ch, points=points or scopeio.scope_points_for(2.2 * len(t_grid)))
     scope.run()
     if float(np.ptp(vs)) < 0.5:
         sys.exit(f"alignment check: scope CH{drive_ch} is flat -- is the AWG "
@@ -850,7 +861,8 @@ def main():
                                fn=float(st.get("fn", 0.0)),
                                zeta=float(st.get("zeta", 0.0)), dt=dt)
         loop = ilc.Loop(plant=model, target=v, dt=dt, channel=ch,
-                        gamma=float(st["gamma"]), f_cut=float(st["f_cut"]))
+                        gamma=float(st["gamma"]), f_cut=float(st["f_cut"]),
+                        limits=ch.limits)
         loop.history = list(st["history"])
         u = st["u"]
         k0 = int(st["iteration"])
@@ -880,7 +892,7 @@ def main():
         amp = float(np.ptp(v))
         model = ch.plant(amp, dt, model=a.model)
         loop = ilc.Loop(plant=model, target=v, dt=dt, channel=ch,
-                        gamma=a.gamma, f_cut=a.f_cut)
+                        gamma=a.gamma, f_cut=a.f_cut, limits=ch.limits)
         u = loop.first_shot()
         k0 = 0
         stem = a.name or ch.name
@@ -973,7 +985,7 @@ def main():
             if k == k0:
                 time.sleep(0.5)          # let the new upload start playing
                 verify_alignment(scope, a.drive_scope_ch or a.awg_ch,
-                                 u, t, t_off, a.wait)
+                                 u, t, t_off, a.wait, points=a.points)
 
             y = capture(scope, [a.scope_ch], f"CH{a.scope_ch}", t, t_off,
                         repeats=a.repeats, wait_s=a.wait, points=a.points)

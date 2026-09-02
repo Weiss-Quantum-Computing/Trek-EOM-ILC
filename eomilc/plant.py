@@ -92,6 +92,27 @@ class Plant:
         """
         return self.lead(np.asarray(v, float) - self.offset)
 
+    def response(self, f) -> np.ndarray:
+        """Continuous-time H(f) of this model: gain times the dynamic terms.
+
+        This is the transfer function `lead` inverts (the derivative form),
+        not the discrete filters `forward` runs -- the two agree well below
+        Nyquist, and it is the continuous one a measured FRF is compared and
+        fitted against.  Any zeta > 0 is allowed: zeta > 1 is two real poles
+        at wn*(zeta -/+ sqrt(zeta^2 - 1)), which is what the Trek chains'
+        FRFs turned out to want (X1 at 0.5 V: fn 7.3 kHz, zeta 1.1).
+        """
+        w = 2 * np.pi * np.asarray(f, float)
+        H = np.full(w.shape, self.gain, complex)
+        if self.tau > 0:
+            H = H / (1 + 1j * w * self.tau)
+        if self.tau2 > 0:
+            H = H / (1 + 1j * w * self.tau2)
+        if self.fn > 0:
+            wn = 2 * np.pi * self.fn
+            H = H / (1 + 2j * self.zeta * w / wn - (w / wn) ** 2)
+        return H
+
     def __repr__(self):
         s = f"Plant(gain={self.gain:.4f}"
         if self.fn > 0:
@@ -129,7 +150,7 @@ def identify(u: np.ndarray, y: np.ndarray, dt: float,
         if model == "resonant":
             g, fn, zeta, off = p
             return Plant(gain=g, offset=off, fn=max(fn, 1.0),
-                         zeta=float(np.clip(zeta, 1e-3, 3.0)), dt=dt)
+                         zeta=float(np.clip(zeta, 1e-3, 10.0)), dt=dt)
         if model == "two_pole":
             g, tau, tau2, off = p
             return Plant(gain=g, tau=max(tau, dt), offset=off, tau2=max(tau2, 0.0), dt=dt)
@@ -160,6 +181,118 @@ def identify(u: np.ndarray, y: np.ndarray, dt: float,
                 resid_rms_pct=100 * float(r.std()) / span,
                 resid_peak_pct=100 * float(np.abs(r).max()) / span, span=float(span))
     return plant, info
+
+
+def _phase_crossing(f: np.ndarray, H: np.ndarray, deg: float, fallback: float) -> float:
+    """Lowest frequency where the unwrapped phase of H passes `deg` (< 0)."""
+    ph = np.degrees(np.unwrap(np.angle(H)))
+    below = np.flatnonzero(ph <= deg)
+    if below.size == 0 or below[0] == 0:
+        return fallback
+    i = below[0]
+    return float(np.interp(deg, [ph[i], ph[i - 1]], [f[i], f[i - 1]]))
+
+
+def fit_frf(f, H, model: str = "one_pole", f_hi: float | None = None,
+            f_lo: float | None = None, gain: float | None = None,
+            n_dc: int = 3, dt: float = 1e-6) -> tuple[Plant, dict]:
+    """Least-squares fit of a parametric Plant to a measured response H(f).
+
+    `f` in Hz and `H` complex (monitor per drive), as `ilc._read_frf` hands
+    them over -- coherent tones only.  The residual is log(H / H_model):
+    real part the log-magnitude error, imaginary part the phase error in
+    radians, weighted equally, over the tones between `f_lo` (default the
+    lowest tone) and `f_hi` (default the highest).  Every tone counts the
+    same, which is the point: a time-domain fit to a ramp record weights
+    the band the ramp lives in and returns lag terms 2-3x short (27 us
+    against 70 us on X1 -- see `identify`).
+
+    The gain is NOT free by default.  Over a band where the form is
+    imperfect a free gain absorbs model mismatch (0.70 against a measured DC
+    gain of 0.56 on X1); so it is the median |H| of the `n_dc` lowest tones
+    unless `gain` is given.  Only the dynamic terms are fitted, in log space
+    so they stay positive; the resonant form's zeta is unbounded above
+    (zeta > 1 = two real poles).
+
+    Returns (Plant, info) like `identify`: info carries the band, the gain
+    source, and the rms magnitude (%) and phase (deg) residuals in band.
+    """
+    if model not in MODELS:
+        raise ValueError(f"model must be one of {MODELS}, not {model!r}")
+    f = np.asarray(f, float)
+    H = np.asarray(H, complex)
+    order = np.argsort(f)
+    f, H = f[order], H[order]
+    if f.size < 3:
+        raise ValueError("an FRF fit needs at least three coherent tones")
+    lo = float(f[0]) if f_lo is None else float(f_lo)
+    hi = float(f[-1]) if f_hi is None else float(f_hi)
+    m = (f >= lo) & (f <= hi)
+    if m.sum() < 3:
+        raise ValueError(f"only {int(m.sum())} tone(s) between {lo:g} and "
+                         f"{hi:g} Hz -- widen the fit band")
+    if gain is None:
+        k = max(1, min(int(n_dc), f.size))
+        gain = float(np.median(np.abs(H[:k])))
+        gain_src = f"median |H| of the {k} lowest tones ({f[0]:.0f}-{f[k-1]:.0f} Hz)"
+    else:
+        gain = float(gain)
+        gain_src = "fixed by the caller"
+    fm, Hm = f[m], H[m]
+    w = 2 * np.pi * fm
+
+    def build(p):
+        if model == "static":
+            return Plant(gain=gain, dt=dt)
+        if model == "one_pole":
+            return Plant(gain=gain, tau=float(np.exp(p[0])), dt=dt)
+        if model == "two_pole":
+            t1, t2 = sorted(np.exp(p), reverse=True)
+            return Plant(gain=gain, tau=float(t1), tau2=float(t2), dt=dt)
+        return Plant(gain=gain, fn=float(np.exp(p[0])),
+                     zeta=float(np.exp(p[1])), dt=dt)
+
+    def resid(p):
+        r = np.log(Hm / build(p).response(fm))
+        return np.concatenate([r.real, r.imag])
+
+    if model == "static":
+        p0 = []
+    elif model == "one_pole":
+        p0 = [np.log(1 / (2 * np.pi * _phase_crossing(f, H, -45.0, hi / 3)))]
+    elif model == "two_pole":
+        t0 = 1 / (2 * np.pi * _phase_crossing(f, H, -45.0, hi / 3))
+        p0 = [np.log(t0), np.log(t0 / 5)]
+    else:
+        p0 = [np.log(_phase_crossing(f, H, -90.0, hi / 2)), np.log(1.0)]
+    if p0:
+        sol = least_squares(resid, p0, x_scale=[0.5] * len(p0))
+        plant, r = build(sol.x), sol.fun
+    else:
+        plant = build([])
+        r = resid([])
+    n = fm.size
+    info = dict(model=model, f_lo=lo, f_hi=hi, n_tones=int(n),
+                gain=gain, gain_source=gain_src,
+                resid_mag_pct=100 * float(np.sqrt(np.mean(r[:n] ** 2))),
+                resid_phase_deg=float(np.degrees(np.sqrt(np.mean(r[n:] ** 2)))))
+    return plant, info
+
+
+def contraction(f, H, plant: Plant, gamma: float) -> tuple[np.ndarray, float | None]:
+    """|1 - gamma * H / H_model| per tone, and the lowest tone where it
+    reaches 1.
+
+    That factor is what one ILC iteration multiplies drive-coupled error by
+    at each frequency when the update divides by `plant` and the chain is
+    really H: below 1 the loop contracts there, at or above 1 it does not
+    (the Q filter at f_cut then has to shield the band).  Returns
+    (lambda per tone, f_boundary or None when no tone reaches 1).
+    """
+    f = np.asarray(f, float)
+    lam = np.abs(1 - gamma * np.asarray(H, complex) / plant.response(f))
+    hit = np.flatnonzero(lam >= 1.0)
+    return lam, (float(f[hit[0]]) if hit.size else None)
 
 
 def smooth(x: np.ndarray, dt: float, f_cut: float) -> np.ndarray:

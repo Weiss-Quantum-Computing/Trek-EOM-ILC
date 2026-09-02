@@ -1,7 +1,8 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-53 numbered checks: state round-trips, the span guard, the header-less
-file refusal, the FRQ-vs-record check, the seed-drive Init, the model ladder,
+55 numbered checks: state round-trips, the span guard, the header-less
+file refusal, the FRQ-vs-record check, the seed-drive Init, the model ladder
+with Fit to FRF, the per-channel limits,
 the GEN from-scratch path, flat first shot, hold-run display, plot
 overlays, compare-campaign overlays and their picker, status line and
 tail-scrolling path entries, drive spectrum, spectrum
@@ -243,10 +244,14 @@ assert int(st["iteration"]) == it0 + 1
 print(f"[8] state round-trips through run_ilc.load_state, iteration "
       f"{int(st['iteration'])}, history {len(list(st['history']))}")
 
-# init a brand-new session from the real target into scratch dirs
+# init a brand-new session from the real target into scratch dirs (the
+# model is the launch-default measured FRF, whose stored plant is the gain
+# alone -- typed here, as a fresh panel would have it)
 app.target_var.set(os.path.join(REPO, "waveforms", "target_MKJX1.csv"))
 app.channel_var.set("EO1")
 app.stem_var.set("TSTX1")
+if not app.pgain_var.get().strip():
+    app.pgain_var.set("0.5584")
 app.do_init()
 root.update()
 print(f"[9] init: {app.session.stem} iter {app.session.iteration}, "
@@ -352,10 +357,11 @@ assert not bad, f"panes not reset: {bad} (all: {lims})"
 assert app._t_range is None
 print("[29] Home on a synced pane resets every time plot")
 
-# model ladder: a gain-only step, parameters from the calibration tables
+# model ladder: a gain-only step from a typed gain (no calibration tables
+# any more -- parameters are typed or fitted to this system's own data)
 app.model_var.set("gain only (0th order)")
 app._update_model_fields()
-app.do_calib()
+app.pgain_var.set("0.5584")
 root.update()
 it0 = app.session.iteration
 app.do_step()
@@ -376,13 +382,38 @@ assert app.ptau_var.get(), "one-pole fit did not fill tau"
 print(f"[13] one-pole fit OK: gain {app.pgain_var.get()}, "
       f"tau {app.ptau_var.get()} us")
 
-# FRF tab with the second-order calibration model overlaid
+# Fit to FRF: the second-order rung fitted to the wide X1 probe comes out as
+# two real poles (zeta > 1) a few kHz up, not the withdrawn 2.3 kHz / 0.21
+# resonance; the one-pole rung lands in the 40-90 us the FRF phase implies
+# (the ramp-record fit says 27). Then the FRF tab draws the fit over the tones.
 app.model_var.set("second order (resonant)")
 app._update_model_fields()
-app.do_calib()
-app.do_show_frf()
+app.frf_var.set(FRF)
+app.do_fit_frf(FRF, "resonant", 40e3)
+pump_until_idle()
 root.update()
-print("[14] FRF overlay drawn")
+_fn, _z = float(app.pfn_var.get()), float(app.pzeta_var.get())
+assert 3e3 < _fn < 20e3 and _z > 1.0, f"resonant FRF fit gave fn {_fn}, zeta {_z}"
+_g = float(app.pgain_var.get())
+assert 0.5 < _g < 0.7, f"FRF-fit gain {_g} is not the DC gain of frf_WIDE_X1"
+app.model_var.set("one pole (1st order)")
+app._update_model_fields()
+app.do_fit_frf(FRF, "one_pole", 40e3)
+pump_until_idle()
+root.update()
+_tau = float(app.ptau_var.get())
+assert 40 < _tau < 90, f"one-pole FRF fit gave tau {_tau} us"
+app.do_fit_frf(FRF, "one_pole", 40e3, gain=0.5)
+pump_until_idle()
+root.update()
+assert abs(float(app.pgain_var.get()) - 0.5) < 1e-6, "fixed gain not honoured"
+app.model_var.set("second order (resonant)")
+app._update_model_fields()
+app.do_fit_frf(FRF, "resonant", 40e3)
+pump_until_idle()
+root.update()
+print(f"[14] Fit to FRF: resonant fn {_fn:.0f} Hz zeta {_z:.2f} (two real "
+      f"poles), one-pole tau {_tau:.1f} us, gain {_g:.4f}; FRF overlay drawn")
 
 # ---- GEN: truly from scratch, no priors anywhere ---------------------------
 t_g, v_g = ilc_gui.build_target_waveform("ramp up-hold-return", 2.0,
@@ -397,12 +428,13 @@ app.model_var.set("gain only (0th order)")
 app._update_model_fields()
 for var in (app.pgain_var, app.ptau_var, app.pfn_var, app.pzeta_var):
     var.set("")
-app.do_calib()          # must refuse: GEN has no tables
-app.do_init()           # must refuse: no gain typed, no tables to fall back on
+app.shotgain_var.set("")
+app.do_init()           # must refuse: no gain typed, and no table to fall back on
 assert not os.path.exists(os.path.join(ilc_gui.RUN_DIR,
                                        "drive_GENX.state.npz")), \
     "init built a GEN state without any model information"
-print("[15] GEN refused calibration and blind init, as it must")
+assert app.session is None or app.session.stem != "GENX"
+print("[15] GEN refused a blind init, as it must")
 
 app.pgain_var.set("0.5")
 app.do_init()
@@ -411,6 +443,14 @@ s = app.session
 assert s.channel == "GEN" and s.loop.plant.gain == 0.5
 assert s.loop.plant.fn == 0 and s.loop.plant.tau == 0
 assert s.loop.channel.mon_scale == 1.0
+# GEN carries the open limit set: nothing but the generator rail binds, so a
+# record that idles away from zero is not refused by the Trek's 100 mV cap
+assert s.loop.limits is ilc_gui.CHANNELS["GEN"].limits
+assert s.loop.limits.idle_awg >= 10.0 and not np.isfinite(s.loop.limits.hv_max)
+_rep = s.loop.check(np.full(len(s.t), 3.0))
+assert _rep.ok, f"GEN guard refused a 3 V idle record: {_rep}"
+assert not s.loop.check(np.full(len(s.t), 11.0)).ok, "GEN guard ignored the rail"
+print("[15b] GEN limits: open apart from the 10 V rail")
 assert abs(np.ptp(s.loop.target) - 2.0) < 1e-9, "mon_scale leaked into GEN"
 assert abs(np.abs(s.u).max() - 4.0) < 0.2, \
     f"first shot should be ~target/gain = 4 V, got {np.abs(s.u).max():.2f}"
