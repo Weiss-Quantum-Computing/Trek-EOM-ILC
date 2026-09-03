@@ -284,6 +284,11 @@ The **Model** combobox selects what the update divides the error by:
   iteration and its drive file — that is the drive to keep. Each history
   entry now records `update_rms`; states from before 2 Sep lack it and the
   detector stays silent on them until five new iterations have run.
+- The noise-floor line also lists **noise lines**: narrow peaks in the
+  shot-to-shot scatter at five times the level around them (a
+  free-running oscillation somewhere in the chain, not the ramp). The
+  update can only chase those; the line gives the `notch Hz` text that
+  makes it blind there, and says "notched" once it is.
 - Switching channel or model **swaps** the boxes to what that channel (and
   that model) last had: the first-shot gain, seed drive and browsed FRF are
   remembered per channel, the parameter boxes per channel *and* model, and

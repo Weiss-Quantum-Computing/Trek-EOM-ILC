@@ -109,6 +109,14 @@ def load_state(path):
     return {k: z[k] for k in z.files}
 
 
+def state_notches(state) -> tuple:
+    """The learning notches a state records (absent before 3 Sep 2026)."""
+    if "notches" not in state:
+        return ()
+    a = np.asarray(state["notches"], float).reshape(-1, 2)
+    return tuple((float(f0), float(bw)) for f0, bw in a)
+
+
 def build_loop(state):
     ch = CHANNELS[str(state["channel"])]
     p = plantmod.Plant(gain=float(state["gain"]), tau=float(state["tau"]),
@@ -117,7 +125,7 @@ def build_loop(state):
                        dt=float(state["dt"]))
     loop = ilc.Loop(plant=p, target=state["target"], dt=float(state["dt"]), channel=ch,
                     gamma=float(state["gamma"]), f_cut=float(state["f_cut"]),
-                    limits=ch.limits)
+                    limits=ch.limits, notches=state_notches(state))
     loop.history = list(state["history"]) if "history" in state else []
     return loop
 
@@ -256,7 +264,8 @@ def cmd_step(a):
                iteration=it + 1, t_offset=t_off,
                history=np.array(loop.history, dtype=object),
                seed_path=str(st["seed_path"]) if "seed_path" in st else "",
-               target_path=str(st["target_path"]) if "target_path" in st else "")
+               target_path=str(st["target_path"]) if "target_path" in st else "",
+               notches=np.asarray(loop.notches, float).reshape(-1, 2))
     print(f"\n{loop.report()}\n\nwrote {out}\n      {gui}  (GUI-ready, normalised)")
 
 

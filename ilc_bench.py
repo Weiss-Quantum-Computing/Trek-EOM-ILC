@@ -862,7 +862,10 @@ def main():
                                zeta=float(st.get("zeta", 0.0)), dt=dt)
         loop = ilc.Loop(plant=model, target=v, dt=dt, channel=ch,
                         gamma=float(st["gamma"]), f_cut=float(st["f_cut"]),
-                        limits=ch.limits)
+                        limits=ch.limits,
+                        notches=tuple((float(f0), float(bw)) for f0, bw in
+                                      np.asarray(st["notches"], float).reshape(-1, 2))
+                        if "notches" in st else ())
         loop.history = list(st["history"])
         u = st["u"]
         k0 = int(st["iteration"])
@@ -929,7 +932,8 @@ def main():
                  full_scale=full_scale, name=stem, gamma=loop.gamma,
                  f_cut=loop.f_cut, iteration=iteration, t_offset=t_off,
                  history=np.array(loop.history, dtype=object),
-                 seed_path=seed_path, target_path=target_path)
+                 seed_path=seed_path, target_path=target_path,
+                 notches=np.asarray(loop.notches, float).reshape(-1, 2))
 
     # ---- instruments
     awg = make_awg(_AWGMOD)

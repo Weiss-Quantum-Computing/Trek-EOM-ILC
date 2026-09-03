@@ -251,7 +251,8 @@ def save_session(s: Session):
              t_offset=s.t_off, history=np.array(lp.history, dtype=object),
              model=s.model_key, frf_path=s.frf_path,
              frf_use=s.frf_use, frf_max=s.frf_max, seed_path=s.seed_path,
-             target_path=s.target_path)
+             target_path=s.target_path,
+             notches=np.asarray(lp.notches, float).reshape(-1, 2))
 
 
 def find_target_file(target, mon_scale, dirs):
@@ -688,6 +689,7 @@ class App:
                  f_use=self.fuse_var.get(), f_max=self.fmax_var.get(),
                  model=self.model_var.get(), channel=self.channel_var.get(),
                  stem=self.stem_var.get(), shot_gain=self.shotgain_var.get(),
+                 notch=self.notch_var.get(),
                  iter_sel=self.itersel_var.get(),
                  cmp_sel=self.cmpsel_var.get(),
                  cmp_paths=dict(self._cmp_paths),
@@ -853,6 +855,20 @@ class App:
         self._fcut_entry.pack(
             side="left", padx=(0, 6))
         ttk.Label(r2, text="(learning gain; parametric band edge)",
+                  foreground="#666666").pack(side="left")
+
+        # Learning notches: the update is blind at these lines (both rungs).
+        # The monitors carry a free-running ~24 kHz line the loop can only
+        # chase once f_cut is above it; the noise-floor line names the
+        # candidates. Remembered per channel: each Trek has its own line.
+        r3 = ttk.Frame(vf); r3.grid(row=3, column=0, columnspan=4,
+                                    sticky="ew", pady=1)
+        self.notch_var = tk.StringVar(value=self.cfg.get("notch", ""))
+        ttk.Label(r3, text="notch Hz").pack(side="left", padx=(0, 2))
+        ttk.Entry(r3, textvariable=self.notch_var, width=22).pack(
+            side="left", padx=(0, 6))
+        ttk.Label(r3, text="(f0/width list, e.g. 23700/400 -- the update "
+                           "is blind there; see the noise-floor line)",
                   foreground="#666666").pack(side="left")
 
         r3 = ttk.Frame(vf); r3.grid(row=3, column=0, columnspan=4,
@@ -1352,6 +1368,12 @@ class App:
                 return False
         return bool(result.get("yes"))
 
+    def _notches(self):
+        try:
+            return ilc.parse_notches(self.notch_var.get())
+        except ValueError as e:
+            raise RuntimeError(str(e))
+
     def _floats(self, **pairs):
         out = {}
         for k, v in pairs.items():
@@ -1386,6 +1408,7 @@ class App:
         m["shot_gain"] = self.shotgain_var.get().strip()
         m["seed_drive"] = self.seed_var.get().strip()
         m["frf"] = self.frf_var.get().strip()
+        m["notch"] = self.notch_var.get().strip()
         m.setdefault("models", {})[self._mem_model] = {
             k: self._param_vars[k].get().strip() for k in self._MEM_KEYS}
 
@@ -1426,6 +1449,7 @@ class App:
             v.set("")
         self.shotgain_var.set("")
         self.seed_var.set("")        # a drive is in ONE chain's volts
+        self.notch_var.set("")       # and each Trek has its own line
         # The FRF file goes too. On the measured-FRF rung the FRF IS the
         # model, so a browsed one surviving a channel switch was the same
         # leak the parameter boxes above are cleared to prevent -- and the
@@ -1440,6 +1464,7 @@ class App:
         m = self._field_mem.get(ch) or {}
         self.shotgain_var.set(m.get("shot_gain", ""))
         self.seed_var.set(m.get("seed_drive", ""))
+        self.notch_var.set(m.get("notch", ""))
         if m.get("frf") and os.path.exists(m["frf"]):
             self.frf_var.set(m["frf"])
         self._recall_params(ch, self._mem_model, blank_if_new=True)
@@ -1980,6 +2005,7 @@ class App:
         self.stem_var.set(s.stem)
         self.gamma_var.set(f"{s.loop.gamma:g}")
         self.fcut_var.set(f"{s.loop.f_cut:g}")
+        self.notch_var.set(", ".join(f"{f0:g}/{bw:g}" for f0, bw in s.loop.notches))
         self.toff_var.set(f"{s.t_off*1e6:g}")
         self.fs_var.set(f"{s.full_scale:g}")
         self._set_param_entries(s.loop.plant)
@@ -2139,8 +2165,13 @@ class App:
                         f"Init, run one iteration, then fit.")
         plant = self._plant_from(params, dt)
         seed_src = "from the panel entries"
+        try:
+            notches = self._notches()
+        except RuntimeError as e:
+            return messagebox.showerror("Init", str(e))
         loop = ilc.Loop(plant=plant, target=v, dt=dt, channel=ch,
-                        gamma=f["gamma"], f_cut=f["f_cut"], limits=ch.limits)
+                        gamma=f["gamma"], f_cut=f["f_cut"], limits=ch.limits,
+                        notches=notches)
         u = loop.first_shot(gain=g_shot)
         g_used = g_shot if g_shot is not None else plant.gain
         seed = self.seed_var.get().strip()
@@ -2287,6 +2318,7 @@ class App:
         cfg = self._floats(gamma=self.gamma_var, f_cut=self.fcut_var,
                            t_offset_us=self.toff_var)
         cfg["mode"] = self._model_key()
+        cfg["notches"] = self._notches()
         fpaths = self._frf_paths()
         cfg["frf_path"] = fpaths[0] if fpaths else ""
         if cfg["mode"] == "frf":
@@ -2323,6 +2355,11 @@ class App:
         if abs(cfg["f_cut"] - s.loop.f_cut) > 1e-9:
             print(f"f_cut {s.loop.f_cut:g} -> {cfg['f_cut']:g} Hz")
             s.loop.f_cut = cfg["f_cut"]
+        if tuple(cfg["notches"]) != tuple(s.loop.notches):
+            print("learning notches: " + (", ".join(
+                f"{f0/1e3:g} kHz +/- {bw/2e3:g}" for f0, bw in cfg["notches"])
+                or "none") + " -- the update is blind there")
+            s.loop.notches = tuple(cfg["notches"])
         t_off = cfg["t_offset_us"] * 1e-6
         if abs(t_off - s.t_off) > 1e-9:
             print(f"t-offset {s.t_off*1e6:g} -> {t_off*1e6:g} us -- measured 0 "
@@ -2389,7 +2426,31 @@ class App:
                   f"{ff/1e3:.0f} kHz (error under {k:g}x the {n}-shot "
                   f"repeatability there); the band edge is {edge} -- lower it "
                   f"to ~{ff/1e3:.0f} kHz, or stop")
-        return dict(f_floor=ff, noise_ratio_top=float(r))
+        out = dict(f_floor=ff, noise_ratio_top=float(r))
+        try:
+            lines = ilc.noise_lines(s.loop.target, stack, s.loop.dt, f_top)
+        except ValueError:
+            lines = []
+        if lines:
+            cur = tuple(s.loop.notches)
+            parts, want = [], []
+            for d in lines[:4]:
+                covered = any(abs(d["f0"] - f0) <= bw / 2 for f0, bw in cur)
+                parts.append(f"{d['f0']/1e3:.2f} kHz ({d['ratio']:.0f}x the "
+                             f"scatter around it, {d['sem']*1e3:.3f} mV left "
+                             f"in the {n}-shot mean"
+                             + (", notched)" if covered else ")"))
+                if not covered:
+                    want.append(f"{round(d['f0']/10)*10:.0f}/"
+                                f"{max(400, round(2*d['width']/100)*100):.0f}")
+            print(f"         noise lines: " + "; ".join(parts))
+            if want:
+                print(f"         -> not repeatable shot to shot, so the "
+                      f"update can only chase them: put "
+                      f"'{' '.join(want)}' in the notch field")
+            out["noise_lines"] = [(d["f0"], d["width"], d["sem"], d["ratio"])
+                                  for d in lines]
+        return out
 
     def _model_check_line(self, it, u_now, y_now):
         """After a measurement of iteration `it`: did the chain answer the

@@ -633,6 +633,68 @@ assert m2["peak_err_hv"] < 0.6 * m1["peak_err_hv"], \
 print(f"[17] GEN gain-only loop converges: peak err "
       f"{m1['peak_err_hv']:.3f} -> {m2['peak_err_hv']:.3f} V")
 
+# [17b] learning notches: a free-running line in the monitor (23.7 kHz on
+# X1, not phase-locked, so it survives averaging with a fresh phase) must
+# not be chased. notch_filter takes it out of the error and nothing else;
+# parse_notches reads the field; noise_lines finds it in a shot stack; the
+# GUI carries it into the loop, the state, and back into the field on Load.
+_dtn = s.loop.dt; _tn = s.t
+_e = 1e-3 * np.sin(2 * np.pi * 23.7e3 * _tn) + 1e-3 * np.sin(2 * np.pi * 15e3 * _tn + 0.3)
+_en = ilc_gui.ilc.notch_filter(_e, _dtn, ((23700.0, 400.0),))
+_F = np.fft.rfftfreq(len(_tn), _dtn); _W = np.hanning(len(_tn))
+def _amp(x, f0):
+    A = np.abs(np.fft.rfft(x * _W)) * 2 / _W.sum(); return A[np.argmin(np.abs(_F - f0))]
+assert _amp(_en, 23.7e3) < 0.05 * _amp(_e, 23.7e3), (_amp(_en, 23.7e3), _amp(_e, 23.7e3))
+assert abs(_amp(_en, 15e3) - _amp(_e, 15e3)) < 0.02 * _amp(_e, 15e3)
+assert np.allclose(ilc_gui.ilc.notch_filter(_e, _dtn, ()), _e)
+assert ilc_gui.ilc.parse_notches("23700/400, 24900") == ((23700.0, 400.0), (24900.0, 400.0))
+assert ilc_gui.ilc.parse_notches("") == ()
+try:
+    ilc_gui.ilc.parse_notches("abc"); raise AssertionError("bad notch text accepted")
+except ValueError:
+    pass
+# a stack with a random-phase 23.7 kHz line of 0.5 mV per shot, 64 shots
+_rng = np.random.default_rng(3)
+_stk = np.array([0.4 * s.u + 5e-4 * np.sin(2 * np.pi * 23.7e3 * _tn + _rng.uniform(0, 2 * np.pi))
+                 + 3e-5 * _rng.standard_normal(len(_tn)) for _ in range(64)])
+_ln = ilc_gui.ilc.noise_lines(s.loop.target, _stk, _dtn, 40e3)
+assert _ln and abs(_ln[0]["f0"] - 23.7e3) < 200 and _ln[0]["ratio"] > 5, _ln[:2]
+# the loop: with the notch, the update carries no 23.7 kHz; without, it does
+_lp = ilc_gui.ilc.Loop(plant=s.loop.plant, target=s.loop.target, dt=_dtn,
+                       channel=s.loop.channel, gamma=0.6, f_cut=40e3, limits=s.loop.limits)
+_y = 0.4 * s.u + 5e-4 * np.sin(2 * np.pi * 23.7e3 * _tn)
+_du0 = _lp.update(s.u, _y) - s.u
+_lp.notches = ((23700.0, 400.0),)
+_du1 = _lp.update(s.u, _y) - s.u
+assert _amp(_du1, 23.7e3) < 0.05 * _amp(_du0, 23.7e3), (_amp(_du1, 23.7e3), _amp(_du0, 23.7e3))
+# through the GUI: field -> loop -> state -> field (the extra step is rolled
+# back afterwards: the Compare checks below expect GENX to end at iter 1)
+import glob as _glob, shutil as _shutil
+_gen_before = set(_glob.glob(os.path.join(ilc_gui.RUN_DIR, "*GENX*")))
+_gen_bak = os.path.join(SCRATCH, "genx_state_bak.npz")
+_shutil.copy(s.state_path, _gen_bak)
+app.notch_var.set("23700/400 24900/1500")
+cap3 = os.path.join(SCRATCH, "genx_cap3_001.csv")
+pd.DataFrame({"Time (s)": s.t, "CH1": 0.4 * s.u}).to_csv(cap3, index=False)
+app.meas_var.set(os.path.join(SCRATCH, "genx_cap3*.csv"))
+app.do_step(); pump_until_idle()
+assert s.loop.notches == ((23700.0, 400.0), (24900.0, 1500.0)), s.loop.notches
+_stn = ilc_gui.run_ilc.load_state(s.state_path)
+assert ilc_gui.run_ilc.state_notches(_stn) == ((23700.0, 400.0), (24900.0, 1500.0))
+app.notch_var.set("")
+app.state_var.set(s.state_path); app.do_load(); root.update()
+assert app.notch_var.get() == "23700/400, 24900/1500", app.notch_var.get()
+assert app.session.loop.notches == ((23700.0, 400.0), (24900.0, 1500.0))
+app.notch_var.set("")
+_shutil.copy(_gen_bak, app.session.state_path)
+for _f in set(_glob.glob(os.path.join(ilc_gui.RUN_DIR, "*GENX*"))) - _gen_before:
+    os.remove(_f)
+app.do_load(); root.update()
+s = app.session
+assert s.iteration == 2 and s.loop.notches == (), (s.iteration, s.loop.notches)
+print(f"[17b] learning notches: 23.7 kHz taken out of the error (x{_amp(_e,23.7e3)/max(_amp(_en,23.7e3),1e-12):.0f}), 15 kHz untouched; "
+      f"noise_lines finds the {_ln[0]['f0']/1e3:.2f} kHz line at {_ln[0]['ratio']:.0f}x; update blind there; field -> state -> field")
+
 # drive-updates tab: u_1 - u_0 for the two GEN steps just taken
 app.itersel_var.set("all")
 app._redraw_iterations(); root.update()

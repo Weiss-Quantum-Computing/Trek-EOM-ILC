@@ -13,6 +13,7 @@ particular captured trace.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+import re
 import numpy as np
 
 from .plant import Plant, smooth
@@ -109,6 +110,8 @@ class Loop:
     limits: Limits = field(default_factory=lambda: LIMITS)
     history: list = field(default_factory=list)
     frf: "FRF | None" = None            # measured inverse; see class FRF
+    notches: tuple = ()                 # ((f0 Hz, width Hz), ...): the update
+                                        # is blind there -- see notch_filter
 
     # ---------------------------------------------------------------- drives
     def first_shot(self, flat: bool = True,
@@ -159,9 +162,11 @@ class Loop:
             # the top of the measured band to keep out-of-band noise from
             # aliasing into the correction.
             e = smooth(self.target - y_k, self.dt, self.frf.f_max)
+            e = notch_filter(e, self.dt, self.notches)
             u_next = u_k + self.frf.lead(e, self.dt, self.gamma)
         else:
             e = smooth(self.target - y_k, self.dt, self.f_cut)
+            e = notch_filter(e, self.dt, self.notches)
             u_next = smooth(u_k + self.gamma * self.plant.lead(e),
                             self.dt, self.f_cut)
         self.history.append(self.metrics(y_k))
@@ -474,6 +479,115 @@ def learnable_band(target, stack, dt: float, f_top: float,
             break
     return dict(f_floor=f_floor, ratio_top=ratio[-1], n_shots=int(n_sh),
                 factor=float(factor), bands=bands)
+
+
+def notch_filter(x, dt: float, notches) -> np.ndarray:
+    """x with each (f0, width) in `notches` taken out: a zero-phase Gaussian
+    dip in the spectrum, full width `width` at half depth, applied on a
+    zero-padded record with the end-to-end ramp removed first so the
+    wrap does not leak.  Nothing to do -> x unchanged.
+
+    Why a notch in the LEARNING path: the Trek monitors carry a
+    free-running line -- 23.7 kHz on X1, 24.4-25.4 kHz (wandering) on X2,
+    ~0.5 mV single-shot, 2 Sep 2026 -- that is not on the drive inputs,
+    is there with the drive idle, and is not phase-locked to the trigger,
+    so 64-shot averaging leaves 1/8 of it (0.05 mV) in every measurement
+    with a fresh random phase.  Below f_cut the loop chases it: P92PX1D
+    (f_cut 40 kHz) put 1.4 mV of 23.7 kHz into the drive by iteration 10,
+    a random walk, for an error it can never cancel.  A notch here lets
+    f_cut sit above the line for sharper features while the update stays
+    blind at the line itself; the drive keeps whatever it already has
+    there, and the loop's contraction elsewhere is untouched.
+    """
+    x = np.asarray(x, float)
+    pairs = [(float(f0), float(bw)) for f0, bw in (notches or ())
+             if float(f0) > 0 and float(bw) > 0]
+    if not pairs:
+        return x
+    n = len(x)
+    ramp = x[0] + (x[-1] - x[0]) * np.arange(n) / max(n - 1, 1)
+    m = 2 * n
+    X = np.fft.rfft(x - ramp, m)
+    f = np.fft.rfftfreq(m, dt)
+    g = np.ones_like(f)
+    for f0, bw in pairs:
+        sig = bw / 2.0                      # half depth at +/- bw/2
+        g *= 1.0 - np.exp(-np.log(2.0) * ((f - f0) / sig) ** 2)
+    return np.fft.irfft(X * g, n=m)[:n] + ramp
+
+
+def parse_notches(text) -> tuple:
+    """'23700/400, 24900/1500' -> ((23700.0, 400.0), (24900.0, 1500.0)).
+    A bare frequency gets a 400 Hz width.  Blank -> ()."""
+    out = []
+    for tok in re.split(r"[,\s;]+", str(text or "").strip()):
+        if not tok:
+            continue
+        f0, _, bw = tok.partition("/")
+        try:
+            f0 = float(f0)
+            bw = float(bw) if bw else 400.0
+        except ValueError:
+            raise ValueError(f"notch {tok!r}: use f0/width in Hz, e.g. "
+                             f"23700/400 (width optional, 400 Hz)")
+        if f0 <= 0 or bw <= 0:
+            raise ValueError(f"notch {tok!r}: frequency and width must be "
+                             f"positive")
+        out.append((f0, bw))
+    return tuple(out)
+
+
+def noise_lines(target, stack, dt: float, f_top: float, factor: float = 5.0,
+                span: float = 2e3, f_min: float = 1e3) -> list:
+    """Narrow lines in the measurement's own scatter -- the notch candidates.
+
+    Per FFT bin, the standard error of the shot mean (as learnable_band)
+    is compared with its running median over +/- `span`; runs of bins at
+    `factor` x that floor, between f_min and f_top, are lines.  A line is
+    noise that does not average away in the shots on hand and is not
+    phase-locked to the trigger, so every measurement carries it with a
+    fresh phase and the update can only chase it.  Returns
+    [dict(f0, width, sem, floor, ratio, err)] sorted by ratio, descending:
+    f0 the power-weighted centre (Hz), width the run's span (Hz), sem the
+    rss scatter left in the mean over the run (V), floor the local level
+    per bin (V), err the rss error over the run (V).
+    """
+    stack = np.asarray(stack, float)
+    if stack.ndim != 2 or stack.shape[0] < 2:
+        raise ValueError("a line search needs at least two shots")
+    n_sh, n = stack.shape
+    y = stack.mean(axis=0)
+    w = np.hanning(n)
+    f = np.fft.rfftfreq(n, dt)
+    E = np.abs(np.fft.rfft((np.asarray(target, float) - y) * w)) * 2 / w.sum()
+    D = np.fft.rfft((stack - y) * w, axis=1) * 2 / w.sum()
+    sem = np.sqrt(np.mean(np.abs(D) ** 2, axis=0) / (n_sh - 1))
+    df = f[1] if len(f) > 1 else 1.0
+    k = max(int(round(span / df)), 2)
+    floor = np.empty_like(sem)
+    for i in range(len(sem)):
+        lo, hi = max(0, i - k), min(len(sem), i + k + 1)
+        floor[i] = np.median(sem[lo:hi])
+    hot = (sem > factor * floor) & (f >= f_min) & (f < f_top) & (floor > 0)
+    lines, i = [], 0
+    while i < len(hot):
+        if not hot[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(hot) and (hot[j + 1] or (j + 2 < len(hot) and hot[j + 2])):
+            j += 1
+        sl = slice(i, j + 1)
+        p = sem[sl] ** 2
+        lines.append(dict(f0=float(np.sum(f[sl] * p) / np.sum(p)),
+                          width=float((j - i + 1) * df),
+                          sem=float(np.sqrt(np.sum(p))),
+                          floor=float(np.median(floor[sl])),
+                          ratio=float(np.max(sem[sl] / floor[sl])),
+                          err=float(np.sqrt(np.sum(E[sl] ** 2)))))
+        i = j + 1
+    lines.sort(key=lambda d: -d["ratio"])
+    return lines
 
 
 def update_rms(u_prev, u_next) -> float:
