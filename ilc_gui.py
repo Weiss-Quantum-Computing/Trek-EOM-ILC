@@ -861,14 +861,16 @@ class App:
         # The monitors carry a free-running ~24 kHz line the loop can only
         # chase once f_cut is above it; the noise-floor line names the
         # candidates. Remembered per channel: each Trek has its own line.
-        r3 = ttk.Frame(vf); r3.grid(row=3, column=0, columnspan=4,
+        # Row 6: rows 3-5 are the FRF rows below (gridded after this), and the
+        # note is kept short -- a Label asks for its natural width and the
+        # request goes all the way up to the window, widening the panel.
+        rn = ttk.Frame(vf); rn.grid(row=6, column=0, columnspan=4,
                                     sticky="ew", pady=1)
         self.notch_var = tk.StringVar(value=self.cfg.get("notch", ""))
-        ttk.Label(r3, text="notch Hz").pack(side="left", padx=(0, 2))
-        ttk.Entry(r3, textvariable=self.notch_var, width=22).pack(
+        ttk.Label(rn, text="notch Hz").pack(side="left", padx=(0, 2))
+        ttk.Entry(rn, textvariable=self.notch_var, width=18).pack(
             side="left", padx=(0, 6))
-        ttk.Label(r3, text="(f0/width list, e.g. 23700/400 -- the update "
-                           "is blind there; see the noise-floor line)",
+        ttk.Label(rn, text="(f0/width, e.g. 23700/400; update blind there)",
                   foreground="#666666").pack(side="left")
 
         r3 = ttk.Frame(vf); r3.grid(row=3, column=0, columnspan=4,
