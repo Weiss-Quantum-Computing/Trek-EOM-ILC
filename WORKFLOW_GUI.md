@@ -316,6 +316,11 @@ The **Model** combobox selects what the update divides the error by:
    (demand scales with peak × f hi — the dialog shows the numbers and
    asks); `f lo`/`f hi` pick the record regime automatically (§10);
    name ≤ 11 chars. Prompts in order: demand → overwrite → output-on.
+   The shots are offset-dithered like the loop's captures (drive, monitor
+   and any photodiode channel), because the probe is the same waveform every
+   shot: the converter's per-code pattern would otherwise repeat identically,
+   survive the average of H, and read as *coherent* -- and at the top of the
+   band, where the monitor tone is a tenth of a millivolt, it is what limits H.
 3. It writes `run\frf_<name>.csv`, points the **FRF** field at it, and
    draws the FRF tab. Output OFF at the end; the probe stays the AWG's
    selected waveform until the next bench upload or Auto-set.

@@ -3434,7 +3434,7 @@ class App:
 
     def _frf_capture(self, scope, drive_ch, mon_ch, bins, t_grid, t_off,
                      repeats, wait_s, settle=0.5, f_top=None,
-                     aux_ch=None, window=None):
+                     aux_ch=None, window=None, dither=True, dither_codes=3):
         """Per shot: read the drive, the monitor and optionally a third
         channel from the same acquisition (the record is frozen between
         :SINGle and run), put them on the record grid, and take H = Y/U at
@@ -3469,10 +3469,21 @@ class App:
         Hs, Ha = [], []
         sl = (slice(None) if window is None
               else slice(int(window[0]), int(window[1])))
+        # Dither here as well: the probe is the same waveform every shot, so
+        # the converter's per-code pattern is identical in every shot,
+        # survives the average of H, and -- because it repeats -- reads as
+        # COHERENT. It is what limits H where |H| is small: at the top of
+        # the band the monitor tone is ~0.1 mV against a ~1 mV-per-code
+        # pattern. Every channel read is stepped, drive included.
+        chans = (drive_ch, mon_ch) + ((aux_ch,) if aux_ch is not None else ())
+        plan, restore = self._dither_plan(scope, chans, repeats,
+                                          dither_codes if dither else 0)
         self.msgs.put(("progress", 0, repeats))
-        for i in range(repeats):
+        try:
+          for i in range(repeats):
             if self.stop_evt.is_set():
                 raise RuntimeError("stopped mid-capture; nothing written")
+            self._dither_step(scope, plan, i, repeats, dither_codes)
             got = scope.single(wait_s=wait_s)
             if got is not True:
                 raise RuntimeError(f"no trigger within {wait_s:g} s on "
@@ -3502,6 +3513,8 @@ class App:
                 aa = scopeio.resample(ta, va, t_grid, t_offset=t_off)[sl]
                 Ha.append(np.fft.rfft(aa - aa.mean())[bins] / U[bins])
             self.msgs.put(("progress", i + 1, repeats))
+        finally:
+            self._dither_restore(scope, restore)
         self.msgs.put(("progress", 0, 1))
 
         def reduce(stack):
@@ -3545,6 +3558,71 @@ class App:
             print(f"CH{awg_ch} did not switch on -- aborting")
             return False, True
         return True, True
+
+    # -- offset dither, shared by every multi-shot capture -----------------
+    #
+    # The converter's per-code error pattern (ADC_CODE_PER_VDIV) is a function
+    # of VOLTAGE, so identical shots carry it identically and their mean keeps
+    # it whole. Stepping a channel's offset across a few codes over the shots
+    # puts every shot at a different code phase, and the mean takes the
+    # pattern's mean. The preamble's yorigin already returns true volts, so
+    # nothing downstream changes; the offsets go back on exit.
+
+    def _dither_plan(self, scope, channels, repeats, codes):
+        """(plan, restore) for `channels`: plan = [(ch, offset0, span V)],
+        None when there is nothing to do (dither off, one shot, a scope that
+        cannot report its scale and offset) -- and it says so."""
+        if not (codes and ADC_CODE_PER_VDIV > 0 and repeats > 1
+                and getattr(scope, "try_get", None)):
+            return None, []
+        plan = []
+        for c in channels:
+            sc = scope.try_get(f":CHANnel{c}:SCALe")
+            off = scope.try_get(f":CHANnel{c}:OFFSet")
+            if sc is None or off is None:
+                print("  dither: skipped -- the scope did not report "
+                      "scale/offset")
+                return None, []
+            plan.append((c, float(off),
+                         ADC_CODE_PER_VDIV * float(sc) * max(int(codes), 1)))
+        nc = max(int(codes), 1)
+        print("  dither: " + ", ".join(
+            f"CH{c} offset stepped over {nc} ADC code{'s' if nc > 1 else ''} "
+            f"({span*1e3:.0f} mV)" for c, _, span in plan)
+            + f" across {repeats} shots -- the per-code pattern averages "
+              f"out; restored after")
+        return plan, [(c, off0) for c, off0, _ in plan]
+
+    def _dither_step(self, scope, plan, i, repeats, codes):
+        """Shot i of `repeats`: every channel to its phase, evenly spaced
+        across the span and centred on the original offset. On the first
+        shot the offset is read back, and the scope is called out if it
+        rounds it coarser than a quarter of one code -- the whole point is
+        sub-code steps, and a dither that cannot reach them is not one."""
+        if not plan:
+            return
+        for c, off0, span in plan:
+            scope.put(f":CHANnel{c}:OFFSet",
+                      f"{off0 + span * ((i + 0.5) / repeats - 0.5):.6g}")
+        if i == 0:
+            for c, off0, span in plan:
+                rb = scope.try_get(f":CHANnel{c}:OFFSet")
+                want = off0 + span * (0.5 / repeats - 0.5)
+                code = span / max(int(codes), 1)
+                if rb is not None and abs(float(rb) - want) > 0.25 * code:
+                    print(f"  dither: WARNING CH{c} offset read back "
+                          f"{float(rb):+.5g} V for {want:+.5g} V asked "
+                          f"-- the scope quantises its offset coarser "
+                          f"than a code, so the dither cannot reach "
+                          f"sub-code phases here")
+
+    def _dither_restore(self, scope, restore):
+        for c, off0 in restore:
+            try:
+                scope.put(f":CHANnel{c}:OFFSet", f"{off0:.6g}")
+            except Exception as e:
+                print(f"  dither: could not restore CH{c} offset "
+                      f"{off0:+.5g} V: {e}")
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
                        settle=0.5, native_path=None, aux=(), aux_store=None,
@@ -3616,50 +3694,15 @@ class App:
         # downstream changes. Restored on the way out, however the capture
         # ends. Skipped, and said so, on a scope that cannot report its
         # scale and offset.
-        plan, restore = None, []
-        if (dither and ADC_CODE_PER_VDIV > 0 and repeats > 1
-                and getattr(scope, "try_get", None)):
-            plan = []
-            for c in (ch,) + aux:
-                sc = scope.try_get(f":CHANnel{c}:SCALe")
-                off = scope.try_get(f":CHANnel{c}:OFFSet")
-                if sc is None or off is None:
-                    plan = None
-                    break
-                plan.append((c, float(off),
-                             ADC_CODE_PER_VDIV * float(sc) * max(int(dither_codes), 1)))
-            if plan:
-                restore = [(c, off0) for c, off0, _ in plan]
-                nc = max(int(dither_codes), 1)
-                print("  dither: " + ", ".join(
-                    f"CH{c} offset stepped over {nc} ADC code{'s' if nc > 1 else ''} "
-                    f"({span*1e3:.0f} mV)" for c, _, span in plan)
-                    + f" across {repeats} shots -- the per-code pattern averages "
-                      f"out; restored after")
-            else:
-                print("  dither: skipped -- the scope did not report scale/offset")
+        plan, restore = self._dither_plan(
+            scope, (ch,) + aux, repeats, dither_codes if dither else 0)
         try:
             self.msgs.put(("progress", 0, repeats))
             for i in range(repeats):
                 if self.stop_evt.is_set():
                     raise RuntimeError("stopped mid-capture; this iteration is "
                                        "discarded (state untouched)")
-                if plan:
-                    for c, off0, code in plan:
-                        scope.put(f":CHANnel{c}:OFFSet",
-                                  f"{off0 + code * ((i + 0.5) / repeats - 0.5):.6g}")
-                    if i == 0:
-                        # the whole point is sub-code steps: say so if the scope
-                        # rounds the offset to something coarser than a code
-                        for c, off0, code in plan:
-                            rb = scope.try_get(f":CHANnel{c}:OFFSet")
-                            want = off0 + code * (0.5 / repeats - 0.5)
-                            if rb is not None and abs(float(rb) - want) > 0.25 * code / max(int(dither_codes), 1):
-                                print(f"  dither: WARNING CH{c} offset read back "
-                                      f"{float(rb):+.5g} V for {want:+.5g} V asked "
-                                      f"-- the scope quantises its offset coarser "
-                                      f"than a code, so the dither cannot reach "
-                                      f"sub-code phases here")
+                self._dither_step(scope, plan, i, repeats, dither_codes)
                 got = scope.single(wait_s=wait_s)
                 if got is not True:
                     raise RuntimeError(f"no trigger within {wait_s:g} s on repeat "
@@ -3713,12 +3756,7 @@ class App:
                           f"({keep}) for the ensemble split")
             return ilc.averaged(traces)
         finally:
-            for c, off0 in restore:
-                try:
-                    scope.put(f":CHANnel{c}:OFFSet", f"{off0:.6g}")
-                except Exception as e:
-                    print(f"  dither: could not restore CH{c} offset "
-                          f"{off0:+.5g} V: {e}")
+            self._dither_restore(scope, restore)
 
     # ---------------------------------------------------------------- plots
     def _colour(self):

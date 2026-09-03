@@ -1623,6 +1623,37 @@ print(f"[47] _frf_capture aux: H_pd/H_mon flat at {ratio.mean():.4f} "
       f"(the fake's 0.5); hold-window analysis accepted over "
       f"{nw} of {len(sN.t)} samples")
 
+# [47b] Measure FRF dithers too: drive, monitor and aux offsets are stepped
+# over three codes across the shots and put back, H is unchanged by it (the
+# fake returns true volts whatever the offset), and dither=False leaves the
+# scope alone. A fake with no try_get is skipped silently.
+class _FrfDitherScope(_MultiScope):
+    def __init__(self):
+        self.settings = {":CHANnel1:SCALe": "0.5", ":CHANnel1:OFFSet": "0.0",
+                         ":CHANnel3:SCALe": "0.5", ":CHANnel3:OFFSet": "0.0",
+                         ":CHANnel2:SCALe": "0.2", ":CHANnel2:OFFSet": "0.1"}
+        self.offsets = {1: [], 3: [], 2: []}
+    def try_get(self, q, timeout_ms=2000): return self.settings.get(q)
+    def put(self, k, v):
+        self.settings[k] = v
+        for c in (1, 2, 3):
+            if k == f":CHANnel{c}:OFFSet": self.offsets[c].append(float(v))
+_shot["i"] = 0
+_fds = _FrfDitherScope()
+_rd = app._frf_capture(_fds, 1, 3, bins, sN.t, sN.t_off, repeats=8, wait_s=1, settle=0, aux_ch=2)
+for _c, _scale in ((1, 0.5), (3, 0.5), (2, 0.2)):
+    _o = _fds.offsets[_c][:-1]
+    assert len(_o) == 8 and len(set(_o)) == 8, (_c, _o)
+    assert abs(np.ptp(_o) - 3 * ilc_gui.ADC_CODE_PER_VDIV * _scale * 7 / 8) < 2e-5, (_c, np.ptp(_o))
+assert float(_fds.settings[":CHANnel3:OFFSet"]) == 0.0 and float(_fds.settings[":CHANnel2:OFFSet"]) == 0.1   # restored (written as :.6g)
+_shot["i"] = 0
+_H0, _c0 = app._frf_capture(_FrfScope(), 1, 3, bins, sN.t, sN.t_off, repeats=8, wait_s=1, settle=0)["mon"]
+assert np.allclose(np.abs(_rd["mon"][0]), np.abs(_H0), rtol=1e-6), "dither changed H"
+_fds2 = _FrfDitherScope(); _shot["i"] = 0
+app._frf_capture(_fds2, 1, 3, bins, sN.t, sN.t_off, repeats=4, wait_s=1, settle=0, dither=False)
+assert not any(_fds2.offsets.values()), "dither=False touched an offset"
+print("[47b] Measure FRF dither: drive, monitor and aux stepped over 3 codes and restored; H unchanged; off when asked")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the
