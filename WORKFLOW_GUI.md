@@ -219,6 +219,16 @@ The **Model** combobox selects what the update divides the error by:
   parameters are **not unique** once ζ > 1 (three real poles split between
   the section and τ several ways), so compare fits by the residual and the
   boundary, not by the fₙ/ζ/τ triple.
+- Every bench capture **dithers the scope offset**: the monitor (and any aux)
+  channel's offset is stepped across one ADC code over the shots and put
+  back afterwards. The MSO-X's 8-bit converter carries a fixed ~3.4 mV
+  pk-pk error pattern per 40.25 mV code at 1 V/div; a ramp sweeps it at
+  slope ÷ code into 15–100 kHz "error" that averaging keeps exactly (it is a
+  function of voltage), and the loop then corrects it into real ripple at
+  the EOM — P92PX1B/C's "Trek oscillation" of 2 Sep, ~1 V rms at the
+  corners the flat shot never had. With every shot at a different code
+  phase the mean takes the pattern's mean. The log names the code size; a
+  warning appears if the scope rounds the offset coarser than a code.
 - Every measurement logs a **noise floor** line: the error spectrum against
   the standard error of the shot average, in 5 kHz bands up to the band
   edge (`f_cut`, or the taper's end on the FRF rung). *"Nothing left to

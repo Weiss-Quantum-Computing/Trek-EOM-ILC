@@ -1293,6 +1293,48 @@ assert np.allclose(y_plain, y_mon, atol=1e-12), \
 print(f"[45] _bench_capture aux: CH2 stack {capA['CH2'].shape} filled, "
       f"keep='both' carries grid+raw, monitor return bit-identical")
 
+# [45b] offset dither: a scope that reports scale/offset gets its monitor
+# offset stepped across exactly one ADC code (ADC_CODE_PER_VDIV x V/div) over
+# the shots -- every shot at a distinct phase, centred on the original -- and
+# put back afterwards, including when the capture dies mid-way. The plain
+# fake (no try_get) is left alone: no dither, no complaint.
+class _DitherScope(_MultiScope):
+    def __init__(self):
+        self.settings = {":CHANnel3:SCALe": "1.0", ":CHANnel3:OFFSet": "2.56",
+                         ":CHANnel2:SCALe": "0.5", ":CHANnel2:OFFSet": "0.1"}
+        self.offsets = {2: [], 3: []}
+        self.boom_at = None
+    def try_get(self, q, timeout_ms=2000): return self.settings.get(q)
+    def put(self, k, v):
+        self.settings[k] = v
+        for c in (2, 3):
+            if k == f":CHANnel{c}:OFFSet": self.offsets[c].append(float(v))
+    def single(self, wait_s=None):
+        if self.boom_at is not None and len(self.offsets[3]) > self.boom_at:
+            raise RuntimeError("scope died mid-capture")
+        return True
+_ds = _DitherScope()
+_y = app._bench_capture(_ds, 3, sN.t, sN.t_off, repeats=8, wait_s=1, settle=0, aux=(2,))
+_o3 = _ds.offsets[3][:-1]                          # the 8 dithered, then the restore
+assert len(_o3) == 8 and len(set(_o3)) == 8, _o3
+# offsets are written with :.6g -- 10 uV at 2.5 V -- so compare to that, not to 1e-9
+assert abs(np.ptp(_o3) - ilc_gui.ADC_CODE_PER_VDIV * 1.0 * 7 / 8) < 2e-5, np.ptp(_o3)
+assert abs(np.mean(_o3) - 2.56) < 2e-5 and _ds.offsets[3][-1] == 2.56, _ds.offsets[3]
+assert abs(np.ptp(_ds.offsets[2][:-1]) - ilc_gui.ADC_CODE_PER_VDIV * 0.5 * 7 / 8) < 2e-5
+assert _ds.settings[":CHANnel3:OFFSet"] == "2.56" and _ds.settings[":CHANnel2:OFFSet"] == "0.1"
+_ds2 = _DitherScope(); _ds2.boom_at = 3
+try:
+    app._bench_capture(_ds2, 3, sN.t, sN.t_off, repeats=8, wait_s=1, settle=0)
+    raise AssertionError("the fake was meant to die")
+except RuntimeError:
+    pass
+assert _ds2.settings[":CHANnel3:OFFSet"] == "2.56", "offset not restored after a failed capture"
+_yoff = app._bench_capture(_ds, 3, sN.t, sN.t_off, repeats=4, wait_s=1, settle=0, dither=False)
+assert len(_ds.offsets[3]) == 9, "dither=False must not touch the offset"
+app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=4, wait_s=1, settle=0)   # no try_get: silent skip
+print(f"[45b] dither: 8 shots at 8 distinct offsets spanning 7/8 of a {ilc_gui.ADC_CODE_PER_VDIV*1e3:.2f} mV code, "
+      f"centred and restored; restored after a mid-capture death; off when asked; plain fake untouched")
+
 # ---- the raw view must preserve the ADC word lattice ------------------------
 # resample interpolates between scope samples and boxcars when decimating, and
 # either invents values that were never digitised. Measured on the bench, a

@@ -117,6 +117,12 @@ PRED_COLOUR = "#8a8a8a"
 # purple and cyan sit last because they can pass for viridis endpoints
 CMP_COLOURS = ["#ff7f0e", "#e377c2", "#8c564b", "#9467bd", "#17becf",
                "#7f7f7f"]
+
+# The MSO-X 2014A's 8-bit converter carries a fixed error pattern per code:
+# ~3.4 mV pk-pk over the 40.25 mV code at 1 V/div, measured 2 Sep 2026 (fold
+# the flat shot's residual on monitor voltage: one sharp period at 40.25 mV,
+# flat at 31.25/25/15.6/62.5). The code scales with V/div; this is the ratio.
+ADC_CODE_PER_VDIV = 0.04025
 # The Compare box's grammar, shown where the status line would be once
 # something is loaded -- the hint is only wanted while the box is empty.
 CMP_HINT = ("nothing loaded -- stems in this run folder, e.g. "
@@ -3225,9 +3231,16 @@ class App:
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
                        settle=0.5, native_path=None, aux=(), aux_store=None,
-                       keep="grid"):
+                       keep="grid", dither=True):
         """ilc_bench.capture with a progress bar and a stop check between
         shots. The settle wait happens once, after the new upload.
+
+        dither: step every read channel's offset across one ADC code over
+        the shots (see ADC_CODE_PER_VDIV and the note in the body), so the
+        converter's per-code error pattern averages out of the mean instead
+        of being learned into the drive. On by default; the offsets go back
+        on exit. It also makes the pattern non-repeatable across shots, so
+        the noise-floor readout sees it as the noise it is.
 
         native_path: also save the repeat average at the SCOPE's own sample
         rate (npz, t = waveform time, y = monitor V) -- the boxcar
@@ -3270,63 +3283,118 @@ class App:
         # average deserves the full readout depth
         pts = (SCOPE_PTS[-1] if native_path is not None
                else scope_points_for(2.2 * len(t_grid)))
-        self.msgs.put(("progress", 0, repeats))
-        for i in range(repeats):
-            if self.stop_evt.is_set():
-                raise RuntimeError("stopped mid-capture; this iteration is "
-                                   "discarded (state untouched)")
-            got = scope.single(wait_s=wait_s)
-            if got is not True:
-                raise RuntimeError(f"no trigger within {wait_s:g} s on repeat "
-                                   f"{i+1} -- is the burst running?")
-            ts, vs = scope.waveform(ch, points=pts)
-            extra = [(c, *scope.waveform(c, points=pts)) for c in aux]
-            scope.run()
-            y_mon = scopeio.resample(ts, vs, t_grid, t_offset=t_off)
-            traces.append(y_mon)
-            if want:
-                shot = [(f"CH{ch}", ts, vs)] + [(f"CH{c}", ta, va)
-                                                for c, ta, va in extra]
-                for col, tc, vc in shot:
-                    if g is not None:
-                        g[col].append(y_mon if col == f"CH{ch}" else
-                                      scopeio.resample(tc, vc, t_grid,
-                                                       t_offset=t_off))
-                    if r is not None:
-                        v = np.asarray(vc, float)
-                        if t_raw is None:
-                            t_raw = np.asarray(tc, float) - t_off
-                        elif v.size != t_raw.size:
-                            raise RuntimeError(
-                                f"{col} returned {v.size} raw samples on "
-                                f"repeat {i+1} against {t_raw.size} on the "
-                                f"first -- the scope changed setup mid-run.")
-                        r[col].append(v)
-            if native_path is not None:
-                if t_nat is None:            # repeats share the scope
-                    t_nat = np.asarray(ts, float)   # config; align a stray
-                    y_nat = np.asarray(vs, float)   # one instead of dying
-                else:
-                    y_nat = y_nat + np.interp(t_nat, ts, vs)
-            self.msgs.put(("progress", i + 1, repeats))
-        self.msgs.put(("progress", 0, 1))
-        if native_path is not None and t_nat is not None:
-            np.savez(native_path, t=t_nat - t_off, y=y_nat / repeats)
-            print(f"  native-rate average kept: {os.path.basename(native_path)}"
-                  f" ({len(t_nat)} pts, dt "
-                  f"{np.median(np.diff(t_nat))*1e9:.0f} ns)")
-        if want and aux_store is not None:
-            aux_store["capture"] = ilc_bench.Capture(
-                channels=tuple(cols), n_shots=int(repeats),
-                grid={c: np.asarray(v, float) for c, v in g.items()}
-                if g is not None else None,
-                raw={c: np.asarray(v, float) for c, v in r.items()}
-                if r is not None else None,
-                t_grid=t_grid if g is not None else None, t_raw=t_raw)
-            if aux:
-                print(f"  kept {repeats} shots on {', '.join(cols)} "
-                      f"({keep}) for the ensemble split")
-        return ilc.averaged(traces)
+        # Offset dither. The converter's per-code error pattern (see
+        # ADC_CODE_PER_VDIV) is a function of VOLTAGE, so a ramp sweeps it
+        # into 15-100 kHz "error" -- slope / code -- that the shot average
+        # keeps exactly, the SEM test calls repeatable, and the loop then
+        # corrects into real ripple at the EOM (P92PX1B/C, 2 Sep 2026: 1 V
+        # rms at the corners that the flat shot never had). Stepping the
+        # channel offset across one code over the shots puts every shot at a
+        # different code phase, so the average takes the pattern's mean; the
+        # preamble's yorigin already returns true volts, so nothing
+        # downstream changes. Restored on the way out, however the capture
+        # ends. Skipped, and said so, on a scope that cannot report its
+        # scale and offset.
+        plan, restore = None, []
+        if dither and repeats > 1 and getattr(scope, "try_get", None):
+            plan = []
+            for c in (ch,) + aux:
+                sc = scope.try_get(f":CHANnel{c}:SCALe")
+                off = scope.try_get(f":CHANnel{c}:OFFSet")
+                if sc is None or off is None:
+                    plan = None
+                    break
+                plan.append((c, float(off), ADC_CODE_PER_VDIV * float(sc)))
+            if plan:
+                restore = [(c, off0) for c, off0, _ in plan]
+                print("  dither: " + ", ".join(
+                    f"CH{c} offset stepped over one {code*1e3:.1f} mV code"
+                    for c, _, code in plan)
+                    + f" across {repeats} shots -- the ADC's per-code pattern "
+                      f"averages out; restored after")
+            else:
+                print("  dither: skipped -- the scope did not report scale/offset")
+        try:
+            self.msgs.put(("progress", 0, repeats))
+            for i in range(repeats):
+                if self.stop_evt.is_set():
+                    raise RuntimeError("stopped mid-capture; this iteration is "
+                                       "discarded (state untouched)")
+                if plan:
+                    for c, off0, code in plan:
+                        scope.put(f":CHANnel{c}:OFFSet",
+                                  f"{off0 + code * ((i + 0.5) / repeats - 0.5):.6g}")
+                    if i == 0:
+                        # the whole point is sub-code steps: say so if the scope
+                        # rounds the offset to something coarser than a code
+                        for c, off0, code in plan:
+                            rb = scope.try_get(f":CHANnel{c}:OFFSet")
+                            want = off0 + code * (0.5 / repeats - 0.5)
+                            if rb is not None and abs(float(rb) - want) > 0.25 * code:
+                                print(f"  dither: WARNING CH{c} offset read back "
+                                      f"{float(rb):+.5g} V for {want:+.5g} V asked "
+                                      f"-- the scope quantises its offset coarser "
+                                      f"than a code, so the dither cannot reach "
+                                      f"sub-code phases here")
+                got = scope.single(wait_s=wait_s)
+                if got is not True:
+                    raise RuntimeError(f"no trigger within {wait_s:g} s on repeat "
+                                       f"{i+1} -- is the burst running?")
+                ts, vs = scope.waveform(ch, points=pts)
+                extra = [(c, *scope.waveform(c, points=pts)) for c in aux]
+                scope.run()
+                y_mon = scopeio.resample(ts, vs, t_grid, t_offset=t_off)
+                traces.append(y_mon)
+                if want:
+                    shot = [(f"CH{ch}", ts, vs)] + [(f"CH{c}", ta, va)
+                                                    for c, ta, va in extra]
+                    for col, tc, vc in shot:
+                        if g is not None:
+                            g[col].append(y_mon if col == f"CH{ch}" else
+                                          scopeio.resample(tc, vc, t_grid,
+                                                           t_offset=t_off))
+                        if r is not None:
+                            v = np.asarray(vc, float)
+                            if t_raw is None:
+                                t_raw = np.asarray(tc, float) - t_off
+                            elif v.size != t_raw.size:
+                                raise RuntimeError(
+                                    f"{col} returned {v.size} raw samples on "
+                                    f"repeat {i+1} against {t_raw.size} on the "
+                                    f"first -- the scope changed setup mid-run.")
+                            r[col].append(v)
+                if native_path is not None:
+                    if t_nat is None:            # repeats share the scope
+                        t_nat = np.asarray(ts, float)   # config; align a stray
+                        y_nat = np.asarray(vs, float)   # one instead of dying
+                    else:
+                        y_nat = y_nat + np.interp(t_nat, ts, vs)
+                self.msgs.put(("progress", i + 1, repeats))
+            self.msgs.put(("progress", 0, 1))
+            if native_path is not None and t_nat is not None:
+                np.savez(native_path, t=t_nat - t_off, y=y_nat / repeats)
+                print(f"  native-rate average kept: {os.path.basename(native_path)}"
+                      f" ({len(t_nat)} pts, dt "
+                      f"{np.median(np.diff(t_nat))*1e9:.0f} ns)")
+            if want and aux_store is not None:
+                aux_store["capture"] = ilc_bench.Capture(
+                    channels=tuple(cols), n_shots=int(repeats),
+                    grid={c: np.asarray(v, float) for c, v in g.items()}
+                    if g is not None else None,
+                    raw={c: np.asarray(v, float) for c, v in r.items()}
+                    if r is not None else None,
+                    t_grid=t_grid if g is not None else None, t_raw=t_raw)
+                if aux:
+                    print(f"  kept {repeats} shots on {', '.join(cols)} "
+                          f"({keep}) for the ensemble split")
+            return ilc.averaged(traces)
+        finally:
+            for c, off0 in restore:
+                try:
+                    scope.put(f":CHANnel{c}:OFFSet", f"{off0:.6g}")
+                except Exception as e:
+                    print(f"  dither: could not restore CH{c} offset "
+                          f"{off0:+.5g} V: {e}")
 
     # ---------------------------------------------------------------- plots
     def _colour(self):
