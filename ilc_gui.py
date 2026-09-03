@@ -2240,6 +2240,57 @@ class App:
                   f"to ~{ff/1e3:.0f} kHz, or stop")
         return dict(f_floor=ff, noise_ratio_top=float(r))
 
+    def _model_check_line(self, it, u_now, y_now):
+        """After a measurement of iteration `it`: did the chain answer the
+        update that made this drive the way the model predicted? Needs the
+        previous base measurement and its drive; silent without them.
+        Returns the numbers for the metrics dict."""
+        s = self.session
+        prev = next((sn for sn in reversed(s.snapshots)
+                     if sn.get("run") is None and sn["it"] == it - 1
+                     and sn.get("u") is not None), None)
+        if prev is None or len(prev["u"]) != len(u_now):
+            return {}
+        f_top = s.loop.frf.f_max if s.loop.frf is not None else s.loop.f_cut
+        if s.loop.frf is not None:
+            fwd = lambda du: s.loop.frf.forward(du, s.loop.dt)
+        else:
+            fwd = lambda du: s.loop.plant.forward(du) - s.loop.plant.offset
+        try:
+            rows = ilc.model_check(np.asarray(u_now) - prev["u"],
+                                   np.asarray(y_now) - prev["y"], fwd,
+                                   s.loop.dt, f_top, s.loop.gamma)
+        except ValueError as e:
+            print(f"         model check: not done -- {e}")
+            return {}
+        live = [r for r in rows if r["verdict"] != "quiet"]
+        if not live:
+            return {}
+        print("         model check: the chain answered the last update at "
+              + ", ".join(f"{r['ratio_local']:.1f}x ({r['lo']/1e3:.0f}-{r['hi']/1e3:.0f} kHz, "
+                          f"corr {r['corr']:+.2f})" for r in live)
+              + " where it acted")
+        bad = [r for r in live if r["verdict"] != "ok"]
+        worst = max(live, key=lambda r: abs(np.log(max(r["ratio_local"], 1e-9))))
+        if bad:
+            lo = min(r["lo"] for r in bad)
+            unresp = [r for r in bad if r["verdict"] == "unresponsive"]
+            nocon = [r for r in bad if r["verdict"] == "no contraction"]
+            if nocon:
+                print(f"         -> from {lo/1e3:.0f} kHz the update does not contract "
+                      f"(|1 - gamma x response| = "
+                      f"{max(r['lam'] for r in nocon):.1f}): the model is "
+                      f"{'low' if worst['ratio_local'] > 1 else 'high'} there and the "
+                      f"correction {'overshoots' if worst['ratio_local'] > 1 else 'falls short'}. "
+                      f"Refit the model in that band, or bring the band edge under "
+                      f"{lo/1e3:.0f} kHz")
+            if unresp:
+                print(f"         -> {', '.join(f'{r[chr(108)+chr(111)]/1e3:.0f}-{r[chr(104)+chr(105)]/1e3:.0f}' for r in unresp)} kHz: "
+                      f"the monitor's change has nothing to do with what was pushed "
+                      f"(corr < 0.3) -- noise, or something the drive cannot reach")
+        return dict(model_ratio_worst=float(worst["ratio_local"]),
+                    model_band_worst=float(worst["lo"]))
+
     def _plateau_line(self):
         """When the history says the loop is re-learning noise, say so --
         and name the best iteration, whose drive is on disk. Silent
@@ -2317,6 +2368,7 @@ class App:
         print(f"iteration {it}: error peak {m['peak_err_hv']:7.1f} V   "
               f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
         m.update(self._noise_floor(stk["stack"]))
+        m.update(self._model_check_line(it, s.u, y))
         if refit:
             fit_key = cfg["mode"] if cfg["mode"] != "frf" else "resonant"
             p2, info = plantmod.identify(s.u, y, s.loop.dt, model=fit_key)
@@ -2950,6 +3002,7 @@ class App:
                       f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
                 m.update(self._noise_floor(
                     stk["capture"].grid[f"CH{scope_ch}"]))
+                m.update(self._model_check_line(k, u, y))
                 s.snapshots.append(dict(it=k, y=y, m=m, u=u, t_wall=time.time()))
                 u_now = u
                 self.msgs.put(("call",
@@ -3442,16 +3495,20 @@ class App:
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
                        settle=0.5, native_path=None, aux=(), aux_store=None,
-                       keep="grid", dither=True):
+                       keep="grid", dither=True, dither_codes=3):
         """ilc_bench.capture with a progress bar and a stop check between
         shots. The settle wait happens once, after the new upload.
 
-        dither: step every read channel's offset across one ADC code over
-        the shots (see ADC_CODE_PER_VDIV and the note in the body), so the
-        converter's per-code error pattern averages out of the mean instead
-        of being learned into the drive. On by default; the offsets go back
-        on exit. It also makes the pattern non-repeatable across shots, so
-        the noise-floor readout sees it as the noise it is.
+        dither: step every read channel's offset across `dither_codes` ADC
+        codes over the shots (see ADC_CODE_PER_VDIV and the note in the
+        body), so the converter's per-code error pattern averages out of the
+        mean instead of being learned into the drive. On by default; the
+        offsets go back on exit. It also makes the pattern non-repeatable
+        across shots, so the noise-floor readout sees it as the noise it is.
+        Three codes rather than one, so code-to-code variation (the part a
+        one-code sweep cannot touch) is averaged as well: 64 shots over 3
+        codes is still 21 phases per code, and +/-60 mV at 1 V/div is 0.06
+        of a division.
 
         native_path: also save the repeat average at the SCOPE's own sample
         rate (npz, t = waveform time, y = monitor V) -- the boxcar
@@ -3515,14 +3572,16 @@ class App:
                 if sc is None or off is None:
                     plan = None
                     break
-                plan.append((c, float(off), ADC_CODE_PER_VDIV * float(sc)))
+                plan.append((c, float(off),
+                             ADC_CODE_PER_VDIV * float(sc) * max(int(dither_codes), 1)))
             if plan:
                 restore = [(c, off0) for c, off0, _ in plan]
+                nc = max(int(dither_codes), 1)
                 print("  dither: " + ", ".join(
-                    f"CH{c} offset stepped over one {code*1e3:.1f} mV code"
-                    for c, _, code in plan)
-                    + f" across {repeats} shots -- the ADC's per-code pattern "
-                      f"averages out; restored after")
+                    f"CH{c} offset stepped over {nc} ADC code{'s' if nc > 1 else ''} "
+                    f"({span*1e3:.0f} mV)" for c, _, span in plan)
+                    + f" across {repeats} shots -- the per-code pattern averages "
+                      f"out; restored after")
             else:
                 print("  dither: skipped -- the scope did not report scale/offset")
         try:
@@ -3541,7 +3600,7 @@ class App:
                         for c, off0, code in plan:
                             rb = scope.try_get(f":CHANnel{c}:OFFSet")
                             want = off0 + code * (0.5 / repeats - 0.5)
-                            if rb is not None and abs(float(rb) - want) > 0.25 * code:
+                            if rb is not None and abs(float(rb) - want) > 0.25 * code / max(int(dither_codes), 1):
                                 print(f"  dither: WARNING CH{c} offset read back "
                                       f"{float(rb):+.5g} V for {want:+.5g} V asked "
                                       f"-- the scope quantises its offset coarser "

@@ -312,6 +312,31 @@ class FRF:
         ph = np.interp(lf, src, self.phase)
         return mag * np.exp(1j * ph)
 
+    def forward(self, u, dt):
+        """The measured chain applied to a drive: IFFT(U * H), zero-padded so
+        the convolution is linear.  The forward counterpart of `lead`, for
+        predicting what an update will do to the monitor (`model_check`).
+
+        Below the first tone |H| is held flat and the phase taken linearly
+        to zero at DC -- a pure delay, which is what a chain does down
+        there; holding the first tone's phase flat instead puts a fixed
+        time shift on the whole ramp, and that is not a chain anyone has.
+        Past the top tone H is rolled off with a Gaussian, so a drive's
+        out-of-band content is not fed through at the last measured gain.
+        """
+        u = np.asarray(u, float)
+        n = len(u)
+        m = n + self.N_PAD
+        f = np.fft.rfftfreq(m, dt)
+        H = self.interp(np.where(f > 0, f, self.f[0]))
+        low = f < self.f[0]
+        ph0 = float(np.angle(self.interp(np.array([self.f[0]])))[0])
+        H[low] = np.abs(H[low]) * np.exp(1j * ph0 * f[low] / self.f[0])
+        top = float(self.f[-1])
+        hi = f > top
+        H[hi] = H[hi] * np.exp(-((f[hi] - top) / (0.25 * top)) ** 2)
+        return np.fft.irfft(np.fft.rfft(u, m) * H, n=m)[:n]
+
     # 1/H is ACAUSAL: the chain delays, so its inverse pre-acts.  In an
     # unpadded FFT that pre-action wraps circularly onto the far END of the
     # record, where _limit_ends then clamps it away -- the correction the
@@ -497,3 +522,88 @@ def plateau(history: list, n: int = 5, tol: float = 0.15):
                 best_before=best_before, upd_recent=upd_recent,
                 upd_before=upd_before, best_it=int(np.argmin(peaks)),
                 best=float(min(peaks)))
+
+
+def _bandpass(x, lo, hi, dt):
+    from scipy.signal import butter, sosfiltfilt
+    nyq = 0.5 / dt
+    if lo <= 0:
+        sos = butter(4, min(hi / nyq, 0.99), btype="low", output="sos")
+    else:
+        sos = butter(4, [lo / nyq, min(hi / nyq, 0.99)], btype="band",
+                     output="sos")
+    return sosfiltfilt(sos, np.asarray(x, float))
+
+
+def model_bands(f_top):
+    """The octave-ish bands `model_check` reports, clipped to the band edge."""
+    edges = (0.0, 5e3, 10e3, 20e3, 40e3, 80e3, 160e3, 320e3)
+    out = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        if lo >= f_top:
+            break
+        out.append((lo, min(hi, f_top)))
+    return out
+
+
+def model_check(du, dy, forward, dt: float, f_top: float, gamma: float = 0.6,
+                bands=None, min_update: float = 1e-4) -> list:
+    """Did the chain answer the last update the way the model said it would?
+
+    `du` is the update that was applied (u_k - u_{k-1}), `dy` the monitor
+    change it produced (y_k - y_{k-1}), and `forward` the model's own
+    forward operator (Plant.forward less its offset, or FRF.forward).  Per
+    band up to `f_top`, the achieved change is compared with the predicted
+    one: `ratio` is achieved/predicted rms over the record, `corr` their
+    correlation, and `ratio_local` the same ratio inside the stretch of
+    record where the update's content in that band is strongest -- the
+    corners, when that is where the loop acted -- because a whole-record
+    ratio dilutes a corner that answered 4x by everything else that
+    answered 1x.  `lam` = |1 - gamma * ratio_local| is the contraction the
+    loop actually has there; at or above 1 the next update overshoots.
+
+    Verdicts: "quiet" (the update put less than `min_update` V rms in the
+    band -- nothing to check), "unresponsive" (corr < 0.3: the monitor's
+    change has nothing to do with what was pushed -- noise, or an artefact
+    the drive cannot reach), "no contraction" (lam >= 1), else "ok".
+
+    P92PX1D, iteration 1 (2 Sep 2026): 20-40 kHz answered at 4.4x, corr
+    0.86 -- a real 0.25 mV feature at the corners, over-corrected threefold
+    by a small-signal model, which is the ripple that campaign built.
+    """
+    du = np.asarray(du, float)
+    dy = np.asarray(dy, float)
+    if du.shape != dy.shape or du.ndim != 1:
+        raise ValueError("du and dy must be the same 1-d record")
+    pred = np.asarray(forward(du), float)
+    if pred.shape != du.shape:
+        raise ValueError("forward(du) must return a record of du's length")
+    n_env = max(int(round(200e-6 / dt)), 3)          # a 0.2 ms rms window
+    out = []
+    for lo, hi in (bands or model_bands(f_top)):
+        d = _bandpass(du, lo, hi, dt)
+        a = _bandpass(dy, lo, hi, dt)
+        p = _bandpass(pred, lo, hi, dt)
+        rms = lambda x: float(np.sqrt(np.mean(x * x)))
+        row = dict(lo=float(lo), hi=float(hi), update_rms=rms(d))
+        if rms(d) < min_update or rms(p) <= 0:
+            row.update(verdict="quiet", ratio=None, corr=None,
+                       ratio_local=None, lam=None)
+            out.append(row)
+            continue
+        env = np.sqrt(np.convolve(d * d, np.ones(n_env) / n_env, mode="same"))
+        mask = env >= 0.5 * env.max()
+        ratio = rms(a) / rms(p)
+        corr = float(np.corrcoef(a, p)[0, 1]) if a.std() > 0 and p.std() > 0 else 0.0
+        ratio_local = rms(a[mask]) / max(rms(p[mask]), 1e-15)
+        lam = abs(1.0 - gamma * ratio_local)
+        if corr < 0.3:
+            verdict = "unresponsive"
+        elif lam >= 1.0:
+            verdict = "no contraction"
+        else:
+            verdict = "ok"
+        row.update(verdict=verdict, ratio=ratio, corr=corr,
+                   ratio_local=ratio_local, lam=lam)
+        out.append(row)
+    return out

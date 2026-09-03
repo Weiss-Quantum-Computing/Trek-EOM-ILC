@@ -134,6 +134,27 @@ assert ilc_gui.ilc.plateau(_hist([100, 50, 25, 12, 6, 4, 3.8])) is None  # no up
 print(f"[2c] plateau: converging history quiet; flat history fires naming "
       f"iteration {_p['best_it']} ({_p['best']:.1f} V); short and pre-detector "
       f"histories return None")
+
+# [2d] model_check: a chain that answers a gain-only model at 1x below 15 kHz
+# and 4x above it -- the update in the top band then does not contract
+# (|1 - 0.6 x 4| = 1.4); a monitor change unrelated to the push is
+# 'unresponsive'; a band the update never touched is 'quiet'.
+_tt = np.arange(5501) * 2e-6
+_du = (0.02 * np.sin(2 * np.pi * 3e3 * _tt)
+       + 0.01 * np.sin(2 * np.pi * 25e3 * _tt) * np.exp(-((_tt - 2e-3) / 0.3e-3) ** 2))
+from scipy.signal import butter, sosfiltfilt
+_lp = sosfiltfilt(butter(4, 15e3 / 250e3, output="sos"), _du)
+_dy = 0.05 * (_lp + 4.0 * (_du - _lp))
+_rows = ilc_gui.ilc.model_check(_du, _dy, lambda d: 0.05 * d, 2e-6, 40e3, 0.6)
+_by = {(r["lo"], r["hi"]): r for r in _rows}
+assert abs(_by[(0.0, 5e3)]["ratio_local"] - 1.0) < 0.1 and _by[(0.0, 5e3)]["verdict"] == "ok", _by[(0.0, 5e3)]
+assert 3.5 < _by[(20e3, 40e3)]["ratio_local"] < 4.5 and _by[(20e3, 40e3)]["verdict"] == "no contraction", _by[(20e3, 40e3)]
+assert _by[(20e3, 40e3)]["lam"] > 1.0 and _by[(20e3, 40e3)]["corr"] > 0.9
+assert _by[(10e3, 20e3)]["verdict"] == "quiet", _by[(10e3, 20e3)]
+_rnd = ilc_gui.ilc.model_check(_du, np.random.default_rng(1).normal(0, 1e-3, _tt.size),
+                                lambda d: 0.05 * d, 2e-6, 40e3, 0.6)
+assert all(r["verdict"] == "unresponsive" for r in _rnd if r["verdict"] != "quiet"), _rnd
+print("[2d] model_check: 1x band ok, 4x band 'no contraction' (lam 1.4, corr > 0.9), untouched band quiet, noise unresponsive")
 assert np.abs(y2 - y).max() < 1e-9
 
 # span guard must refuse a zoomed capture
@@ -681,6 +702,30 @@ app._show_held(_hit)                                            # already visibl
 assert app.log_text.get("1.0", "end").count("so the held runs of iteration") == 1
 app.itersel_var.set(""); app.showruns_var.set(True); app._redraw_iterations(); root.update()
 print(f"[27c] show_held: '{_lab}' hidden by selection 99 + runs off -> ticked runs, box '{app.itersel_var.get() or _hit}', drawn, logged once")
+
+# [27d] the model-check log line, from the panel, on two snapshots built
+# here so the answer is known: iteration 91's drive differs from 90's by a
+# 3 kHz + 25 kHz update, and the monitor answers at exactly 2x the model in
+# every band (contracts at gamma 0.6: lam 0.2, no flag) or at 4x (lam 1.4:
+# 'does not contract ... overshoots'). Restored afterwards.
+import io, contextlib
+_ms = app.session; _g_keep = _ms.loop.gamma; _ms.loop.gamma = 0.6; _keep = list(_ms.snapshots)
+_tt = _ms.t; _du = (0.02 * np.sin(2 * np.pi * 3e3 * _tt)
+                    + 0.01 * np.sin(2 * np.pi * 25e3 * _tt) * np.exp(-((_tt - _tt[len(_tt)//3]) / 0.3e-3) ** 2))
+_fwd = lambda d: _ms.loop.plant.forward(d) - _ms.loop.plant.offset
+_u90 = np.zeros_like(_tt); _y90 = np.zeros_like(_tt)
+_ms.snapshots.append(dict(it=90, y=_y90, m={}, u=_u90, t_wall=0.0))
+for _k, _flag in ((2.0, False), (4.0, True)):
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        _mc = app._model_check_line(91, _u90 + _du, _y90 + _k * _fwd(_du))
+    _out = _buf.getvalue()
+    assert "model check: the chain answered the last update" in _out, _out
+    assert abs(_mc["model_ratio_worst"] - _k) < 0.15 * _k, (_k, _mc)
+    assert ("does not contract" in _out and "overshoots" in _out) == _flag, (_k, _out)
+assert app._model_check_line(90, _u90, _y90) == {}                 # nothing before it
+_ms.snapshots[:] = _keep; _ms.loop.gamma = _g_keep
+print("[27d] model-check line: a 2x chain reported (lam 0.2, no flag), a 4x chain flagged 'does not contract ... overshoots'; nothing before the first snapshot")
 
 # Fit must recover the true gain from the snapshot's own played (u, y) pair
 app.do_fit(); pump_until_idle(); root.update()
@@ -1407,7 +1452,8 @@ class _DitherScope(_MultiScope):
             raise RuntimeError("scope died mid-capture")
         return True
 _ds = _DitherScope()
-_y = app._bench_capture(_ds, 3, sN.t, sN.t_off, repeats=8, wait_s=1, settle=0, aux=(2,))
+_y = app._bench_capture(_ds, 3, sN.t, sN.t_off, repeats=8, wait_s=1, settle=0, aux=(2,),
+                        dither_codes=1)
 _o3 = _ds.offsets[3][:-1]                          # the 8 dithered, then the restore
 assert len(_o3) == 8 and len(set(_o3)) == 8, _o3
 # offsets are written with :.6g -- 10 uV at 2.5 V -- so compare to that, not to 1e-9
@@ -1422,11 +1468,16 @@ try:
 except RuntimeError:
     pass
 assert _ds2.settings[":CHANnel3:OFFSet"] == "2.56", "offset not restored after a failed capture"
+_d3 = _DitherScope()
+app._bench_capture(_d3, 3, sN.t, sN.t_off, repeats=8, wait_s=1, settle=0)     # the default: 3 codes
+assert abs(np.ptp(_d3.offsets[3][:-1]) - 3 * ilc_gui.ADC_CODE_PER_VDIV * 1.0 * 7 / 8) < 2e-5, np.ptp(_d3.offsets[3][:-1])
+assert _d3.settings[":CHANnel3:OFFSet"] == "2.56"
 _yoff = app._bench_capture(_ds, 3, sN.t, sN.t_off, repeats=4, wait_s=1, settle=0, dither=False)
 assert len(_ds.offsets[3]) == 9, "dither=False must not touch the offset"
 app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=4, wait_s=1, settle=0)   # no try_get: silent skip
-print(f"[45b] dither: 8 shots at 8 distinct offsets spanning 7/8 of a {ilc_gui.ADC_CODE_PER_VDIV*1e3:.2f} mV code, "
-      f"centred and restored; restored after a mid-capture death; off when asked; plain fake untouched")
+print(f"[45b] dither: 8 shots at 8 distinct offsets spanning 7/8 of a {ilc_gui.ADC_CODE_PER_VDIV*1e3:.2f} mV code "
+      f"(dither_codes=1), 3 codes by default, centred and restored; restored after a mid-capture death; "
+      f"off when asked; plain fake untouched")
 
 # [45c] the readout retry: the MSO-X sometimes answers :WAVeform:DATA? with an
 # empty block (pyvisa: "invalid literal for int() with base 10: b''"), which

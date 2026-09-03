@@ -233,8 +233,9 @@ The **Model** combobox selects what the update divides the error by:
   over-correct there. Compare a ramped FRF at the ramp's own level against
   `frf_*` taken around zero to see it.
 - Every bench capture **dithers the scope offset**: the monitor (and any aux)
-  channel's offset is stepped across one ADC code over the shots and put
-  back afterwards. The MSO-X's 8-bit converter carries a fixed ~3.4 mV
+  channel's offset is stepped across three ADC codes over the shots and put
+  back afterwards (one code averages the pattern within a code; three also
+  average the code-to-code variation, at 21 phases per code for 64 shots). The MSO-X's 8-bit converter carries a fixed ~3.4 mV
   pk-pk error pattern per 40.25 mV code at 1 V/div; a ramp sweeps it at
   slope ÷ code into 15–100 kHz "error" that averaging keeps exactly (it is a
   function of voltage), and the loop then corrects it into real ripple at
@@ -242,6 +243,18 @@ The **Model** combobox selects what the update divides the error by:
   corners the flat shot never had. With every shot at a different code
   phase the mean takes the pattern's mean. The log names the code size; a
   warning appears if the scope rounds the offset coarser than a code.
+- Every measurement after the first also logs a **model check**: the update
+  that made this drive, pushed through the model's own forward operator, against
+  the monitor change it actually produced — per band, in the stretch of record
+  where that band's update was strongest (the corners, when that is where the
+  loop acted). *"answered the last update at 1.1x (0-5 kHz, corr +0.97), 4.4x
+  (20-40 kHz, corr +0.86)"* — and when |1 − γ × response| reaches 1 in a band,
+  *"the update does not contract there; refit the model in that band, or bring
+  the band edge under 20 kHz"*. A correlation under 0.3 is reported as the
+  monitor not responding to what was pushed at all. This is the line that would
+  have fired at iteration 1 of P92PX1D: a real 0.25 mV feature at the corners,
+  answered at four times the small-signal model and therefore over-corrected
+  into the ripple that campaign built.
 - Every measurement logs a **noise floor** line: the error spectrum against
   the standard error of the shot average, in 5 kHz bands up to the band
   edge (`f_cut`, or the taper's end on the FRF rung). *"Nothing left to
