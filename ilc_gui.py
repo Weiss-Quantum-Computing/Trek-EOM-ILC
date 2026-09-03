@@ -1669,7 +1669,7 @@ class App:
 
     def _after_fit(self, p, u_fit, y, it):
         self._set_param_entries(p)
-        self._plot_waveforms(u_fit, y, p.forward(u_fit), it)
+        self._plot_waveforms_pinned(u_fit, y, p.forward(u_fit), it)
         self.nb.select(0)
 
     def _browse_target(self):
@@ -4242,32 +4242,130 @@ class App:
         self._plot_ddelta(snaps, cmp)
         self._plot_convergence(cmp)
         self._fill_table(cmp)
-        if self._wave_redraw is not None:
+        if self._wave_redraw is not None:     # a pinned view (fit, target preview)
             self._wave_redraw()
+        else:
+            self._plot_waveforms(snaps, cmp)
         self._refresh_compare_status()
         self._describe_compare()
 
     def _show_session(self, select_tab=False):
         """Everything drawable from a freshly loaded/inited session: target,
         drive, model prediction, plus any recalled measurements."""
-        s = self.session
-        snap = s.snapshots[-1] if s.snapshots else None
-        pred = None if snap else s.loop.plant.forward(s.u)
-        self._plot_waveforms(s.u, snap["y"] if snap else None, pred,
-                             snap["it"] if snap else None)
+        self._wave_redraw = None            # back onto the selection
         self._redraw_iterations()
         if select_tab:
             self.nb.select(0)
 
     def _show_iteration(self, u, y, m, it):
-        self._plot_waveforms(u, y, None, it)
+        self._wave_redraw = None            # back onto the selection
         self._redraw_iterations()
 
-    def _plot_waveforms(self, u, y, pred, it):
-        # remember this draw so Redraw (dot spacing etc.) can replay it --
-        # the tab otherwise only refreshes when a step or load provides data
+    def _plot_waveforms(self, snaps, cmp=()):
+        """The Waveforms tab from the SELECTION, like every other tab: the
+        target, every selected measurement (hold runs dashed) and every
+        selected iteration's drive, with the compare stems' selected ones
+        alongside. It used to draw one measurement -- whatever the last
+        step or load handed it -- and replay that on Redraw, so the
+        Iterations box did nothing here and Compare showed one trace per
+        stem. The session's CURRENT drive is always in the drive pane, bold,
+        because it is what plays next; a fresh session with no measurement
+        shows the model's predicted output instead."""
+        s, c = self.session, self._colour()
+        sc = self._out_scale()
+        tms = s.t * 1e3
+        n = len(snaps)
+
+        ax = self.ax_out
+        ax.clear()
+        ax.plot(tms, s.loop.target * sc, color=TARGET_COLOUR, lw=1.0,
+                label="target", **self._dot_kw(len(tms)))
+        if not s.snapshots:
+            # model output, not data -- dashed and dotless on purpose
+            ax.plot(tms, s.loop.plant.forward(s.u) * sc, color=PRED_COLOUR,
+                    lw=0.9, ls="--", label="model-predicted output")
+        for idx, sn in enumerate(snaps):
+            ax.plot(tms, sn["y"] * sc, color=self._iter_colour(idx, n),
+                    lw=1.1 if idx == n - 1 else 0.8,
+                    ls="--" if sn.get("run") is not None else "-",
+                    label="measured " + self._snap_label(sn),
+                    **self._dot_kw(len(tms)))
+        total = n
+        for stem, cs, csnaps, col in cmp:
+            csc = cs.loop.channel.mon_scale
+            ctms = cs.t * 1e3
+            if csnaps and not (len(cs.t) == len(s.t) and
+                               np.array_equal(cs.loop.target * csc,
+                                              s.loop.target * sc)):
+                ax.plot(ctms, cs.loop.target * csc, color=col, lw=0.7,
+                        ls=":", alpha=0.8, label=f"{stem} target")
+            k = len(csnaps)
+            for idx, sn in enumerate(csnaps):
+                ax.plot(ctms, sn["y"] * csc, color=self._cmp_colour(col, idx, k),
+                        lw=1.1 if idx == k - 1 else 0.8,
+                        ls="--" if sn.get("run") is not None else "-",
+                        label=f"{stem} measured iter {sn['it']}"
+                              + (f" r{sn['run']}" if sn.get("run") is not None else ""),
+                        **self._dot_kw(len(ctms)))
+            total += k
+        ax.set_ylabel(f"{self._out_name()} voltage (V)")
+        ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
+        ax.set_title(f"{s.channel} '{s.stem}' -- output vs target")
+        ax.grid(True, alpha=0.3)
+
+        ax = self.ax_drv
+        ax.clear()
+        u = s.u
+        shown_current = False
+        for idx, sn in enumerate(snaps):
+            if sn.get("run") is not None or sn.get("u") is None \
+                    or len(sn["u"]) != len(s.t):
+                continue
+            same = len(sn["u"]) == len(u) and np.array_equal(sn["u"], u)
+            shown_current = shown_current or same
+            ax.plot(tms, sn["u"], color=self._iter_colour(idx, n),
+                    lw=1.1 if same else 0.8,
+                    label=f"iter {sn['it']} drive"
+                          + (f" (= current, iteration {s.iteration})" if same else ""),
+                    **self._dot_kw(len(tms)))
+        if not shown_current:
+            ax.plot(tms, u, color=c, lw=1.2,
+                    label=f"drive u (iteration {s.iteration}, next to play)",
+                    **self._dot_kw(len(tms)))
+        for stem, cs, csnaps, col in cmp:
+            k = len(csnaps)
+            for idx, sn in enumerate(csnaps):
+                if sn.get("run") is not None or sn.get("u") is None \
+                        or len(sn["u"]) != len(cs.t):
+                    continue
+                ax.plot(cs.t * 1e3, sn["u"], color=self._cmp_colour(col, idx, k),
+                        lw=0.8, label=f"{stem} iter {sn['it']} drive",
+                        **self._dot_kw(len(cs.t)))
+        fs = s.full_scale
+        ax.axhline(fs, color="#c62828", lw=0.8, ls="--")
+        ax.axhline(-fs, color="#c62828", lw=0.8, ls="--",
+                   label=f"+/-{fs:g} V full scale (AMP {2*fs:g} Vpp, OFST 0)")
+        cap = s.loop.limits.idle_awg
+        ax.axhline(cap, color="#c62828", lw=0.6, ls=":")
+        ax.axhline(-cap, color="#c62828", lw=0.6, ls=":")
+        ax.plot([tms[0], tms[-1]], [u[0], u[-1]], "o", color=c, ms=4, mfc="none")
+        pk = float(np.abs(u).max())
+        ax.set_title(f"current drive peak {pk:.3f} V = {100*pk/fs:.1f}% of DAC "
+                     f"range,  idle {u[0]*1e3:+.1f}/{u[-1]*1e3:+.1f} mV of "
+                     f"{cap*1e3:.0f} mV cap", fontsize=8)
+        ax.set_xlabel("time (ms)")
+        ax.set_ylabel("AWG drive (V)")
+        ax.legend(loc="best", fontsize=7, ncols=2 if n + len(cmp) > 6 else 1)
+        ax.grid(True, alpha=0.3)
+        self._finish_time_axis(self.ax_out)
+        self.fig_wave._canvas.draw_idle()
+
+    def _plot_waveforms_pinned(self, u, y, pred, it):
+        """One drive/measurement pair with a model prediction over it -- the
+        view a fit wants, pinned to the tab (Redraw replays it) until the
+        next iteration or load puts the tab back onto the selection."""
         self._wave_redraw = (lambda u=u, y=y, pred=pred, it=it:
-                             self._plot_waveforms(u, y, pred, it))
+                             self._plot_waveforms_pinned(u, y, pred, it))
         s, c = self.session, self._colour()
         sc = self._out_scale()
         tms = s.t * 1e3

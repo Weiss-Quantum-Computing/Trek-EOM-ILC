@@ -400,6 +400,23 @@ app._redraw_iterations(); root.update()
 print(f"[24] dot density: 1 -> every sample, blank -> auto (every "
       f"{auto_ev}th), junk -> auto; Waveforms tab follows Redraw")
 
+# [24b] the Waveforms tab follows the Iterations box like the other tabs:
+# 'all' draws every stored measurement and every stored drive, a single
+# iteration draws one of each, and the current drive is always in the drive
+# pane. It used to draw the last measurement it was handed, whatever the box.
+_avail = sorted({sn["it"] for sn in app.session.snapshots if sn.get("run") is None})
+app.itersel_var.set("all"); app._redraw_iterations(); root.update()
+_meas = [l for l in app.ax_out.get_lines() if l.get_label().startswith("measured iter")]
+assert len(_meas) == len(_avail), (len(_meas), _avail)
+_drv = [l for l in app.ax_drv.get_lines() if "drive" in l.get_label()]
+assert any(l.get_label().startswith("drive u (iteration") or "= current" in l.get_label() for l in _drv), [l.get_label() for l in _drv]
+app.itersel_var.set(str(_avail[0])); app._redraw_iterations(); root.update()
+_meas1 = [l for l in app.ax_out.get_lines() if l.get_label().startswith("measured iter")]
+assert len(_meas1) == 1 and _meas1[0].get_label() == f"measured iter {_avail[0]}", [l.get_label() for l in _meas1]
+app.itersel_var.set(""); app._redraw_iterations(); root.update()
+print(f"[24b] Waveforms follows the selection: 'all' -> {len(_meas)} measured traces, "
+      f"'{_avail[0]}' -> one; the current drive is always drawn")
+
 # linked time axes: a zoom on one time plot drives them all and survives
 # a redraw; unlinking stops the propagation
 app.tlink_var.set(True)
