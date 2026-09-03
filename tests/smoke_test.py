@@ -1383,6 +1383,25 @@ assert app.model_var.get() == "measured FRF (nonparametric)", \
     app.model_var.get()
 assert app.frf_var.get() == fpath and app.fuse_var.get() == "100000"
 assert app.session.loop.frf is not None, "loop resumed without its inverse"
+# [42c] Load restores the Target box to the state's own target: the path
+# Init recorded, or -- for a state from before the path was recorded --
+# the CSV in waveforms\ / run\ whose content matches the state's target.
+_tgt = os.path.join(REPO, "waveforms", "target_MKJX1.csv")
+assert os.path.normcase(app.target_var.get()) == os.path.normcase(_tgt), app.target_var.get()
+assert str(st_rec["target_path"] if "target_path" in st_rec else
+           ilc_gui.run_ilc.load_state(app.state_var.get())["target_path"]).endswith("target_MKJX1.csv")
+app.target_var.set("")
+app.do_load(); root.update()
+assert os.path.normcase(app.target_var.get()) == os.path.normcase(_tgt), "recorded path not restored"
+_old = dict(np.load(app.state_var.get(), allow_pickle=True))
+_old.pop("target_path")
+np.savez(app.state_var.get(), **_old)
+app.target_var.set("")
+app.do_load(); root.update()
+assert os.path.normcase(app.target_var.get()) == os.path.normcase(_tgt), \
+    f"content match failed: {app.target_var.get()!r}"
+assert app.session.target_path and os.path.normcase(app.session.target_path) == os.path.normcase(_tgt)
+print("[42c] Load restores the Target box: from the recorded path, and by content for an older state")
 assert str(app._fcut_entry.cget("state")) == "disabled"  # fields followed
 # a parametric init records its rung too
 app.model_var.set("gain only (0th order)"); app._update_model_fields()

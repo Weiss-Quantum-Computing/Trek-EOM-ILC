@@ -872,6 +872,7 @@ def main():
                  else a.t_offset * 1e-6)
         state_path = a.resume
         seed_path = str(st["seed_path"]) if "seed_path" in st else ""
+        target_path = str(st["target_path"]) if "target_path" in st else ""
         print(f"resuming {ch.name} at iteration {k0}, f_cut {loop.f_cut/1e3:g} kHz")
     else:
         if not (a.channel and a.target and a.t_offset is not None):
@@ -900,6 +901,7 @@ def main():
         t_off = a.t_offset * 1e-6
         state_path = os.path.join(a.outdir, f"drive_{stem}.state.npz")
         seed_path = ""
+        target_path = os.path.abspath(a.target)
         if os.path.exists(state_path) and not a.overwrite_state:
             sys.exit(f"{state_path} already exists. A fresh run would destroy it "
                      f"- it did once, taking a four-iteration manual state with "
@@ -927,7 +929,7 @@ def main():
                  full_scale=full_scale, name=stem, gamma=loop.gamma,
                  f_cut=loop.f_cut, iteration=iteration, t_offset=t_off,
                  history=np.array(loop.history, dtype=object),
-                 seed_path=seed_path)
+                 seed_path=seed_path, target_path=target_path)
 
     # ---- instruments
     awg = make_awg(_AWGMOD)

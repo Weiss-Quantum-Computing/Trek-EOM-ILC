@@ -172,7 +172,7 @@ def cmd_init(a):
                full_scale=a.full_scale, name=(a.name or ch.name),
                gamma=a.gamma, f_cut=a.f_cut, iteration=0,
                t_offset=a.t_offset * 1e-6, history=np.array([], dtype=object),
-               seed_path=seed_path)
+               seed_path=seed_path, target_path=os.path.abspath(a.target))
     print(f"\nwrote {out}\n      {gui}  (GUI-ready, normalised)\nstate {st}")
 
 
@@ -255,7 +255,8 @@ def cmd_step(a):
                gamma=loop.gamma, f_cut=loop.f_cut,
                iteration=it + 1, t_offset=t_off,
                history=np.array(loop.history, dtype=object),
-               seed_path=str(st["seed_path"]) if "seed_path" in st else "")
+               seed_path=str(st["seed_path"]) if "seed_path" in st else "",
+               target_path=str(st["target_path"]) if "target_path" in st else "")
     print(f"\n{loop.report()}\n\nwrote {out}\n      {gui}  (GUI-ready, normalised)")
 
 

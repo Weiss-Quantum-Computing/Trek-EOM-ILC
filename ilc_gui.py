@@ -206,6 +206,8 @@ class Session:
         self.frf_error = ""          # why the recorded FRF would not load
         self.seed_path = ""          # the drive Init played as iteration 0,
                                      # when it was not the flat conversion
+        self.target_path = ""        # the target CSV Init read, so Load can
+                                     # put it back in the Target box
 
     @property
     def channel(self):
@@ -225,6 +227,7 @@ def load_session(path) -> Session:
     s.frf_use = float(st["frf_use"]) if "frf_use" in st else 0.0
     s.frf_max = float(st["frf_max"]) if "frf_max" in st else 0.0
     s.seed_path = str(st["seed_path"]) if "seed_path" in st else ""
+    s.target_path = str(st["target_path"]) if "target_path" in st else ""
     if s.model_key == "frf" and s.frf_path and os.path.exists(s.frf_path):
         try:                       # the loop resumes with its recorded inverse
             loop.frf = ilc.FRF(s.frf_path, f_use=s.frf_use, f_max=s.frf_max)
@@ -247,7 +250,29 @@ def save_session(s: Session):
              gamma=lp.gamma, f_cut=lp.f_cut, iteration=s.iteration,
              t_offset=s.t_off, history=np.array(lp.history, dtype=object),
              model=s.model_key, frf_path=s.frf_path,
-             frf_use=s.frf_use, frf_max=s.frf_max, seed_path=s.seed_path)
+             frf_use=s.frf_use, frf_max=s.frf_max, seed_path=s.seed_path,
+             target_path=s.target_path)
+
+
+def find_target_file(target, mon_scale, dirs):
+    """The target CSV whose content is `target` (a state's target vector, in
+    monitor volts), searched by NAME in `dirs` -- for states from before the
+    path was recorded. Same length and the same values, or nothing."""
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if not name.lower().endswith(".csv"):
+                continue
+            p = os.path.join(d, name)
+            try:
+                _, v = run_ilc.load_target(p, mon_scale)
+            except Exception:
+                continue
+            if len(v) == len(target) and np.allclose(v, target, rtol=1e-6,
+                                                     atol=1e-9):
+                return p
+    return ""
 
 
 def avg_spectrum(e, dt, k=1):
@@ -1975,6 +2000,34 @@ class App:
                              f"so the loop is resuming without it:\n"
                              f"      {s.frf_error}")
         self._mem_channel, self._mem_model = s.channel, self._model_key()
+        # The Target box follows the state: the file its iterations were
+        # measured against, not whatever the box happened to hold. A state
+        # from before the path was recorded is matched by content against
+        # the target folders; a target that is nowhere leaves the box alone
+        # and says so -- the box is what Init and the preview read.
+        tp = s.target_path
+        how = "recorded in the state"
+        if not (tp and os.path.exists(tp)):
+            found = find_target_file(
+                s.loop.target, s.loop.channel.mon_scale,
+                (os.path.join(HERE, "waveforms"), RUN_DIR,
+                 os.path.dirname(os.path.abspath(path))))
+            how = ("matched by content -- the state predates the recorded "
+                   "path" if not tp else
+                   f"matched by content -- the recorded {tp} is missing")
+            tp = found
+        if tp:
+            if os.path.normcase(os.path.abspath(tp)) != os.path.normcase(
+                    os.path.abspath(self.target_var.get().strip() or "?")):
+                self.log(f"  target box -> {tp} ({how})")
+            self.target_var.set(tp)
+            if not s.target_path or s.target_path != tp:
+                s.target_path = tp          # written back on the next save
+        else:
+            self.log(f"  NOTE: the state's target file is not known "
+                     f"({'recorded ' + s.target_path + ' is missing' if s.target_path else 'no path recorded'}) "
+                     f"and no CSV in waveforms\\ or run\\ matches its "
+                     f"content -- the Target box is left as it was")
         self.log(f"loaded {path}")
         self.log(f"  {s.channel} iteration {s.iteration}, stem {s.stem}, "
                  f"gamma {s.loop.gamma:g}, f_cut {s.loop.f_cut/1e3:g} kHz, "
@@ -2130,6 +2183,7 @@ class App:
         s.model_key = mode
         s.frf_path, s.frf_use, s.frf_max = frf_rec
         s.seed_path = seed
+        s.target_path = os.path.abspath(target)
         save_session(s)
         self.session = s
         self.state_var.set(state_path)
