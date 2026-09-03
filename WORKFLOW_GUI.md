@@ -220,6 +220,18 @@ The **Model** combobox selects what the update divides the error by:
   parameters are **not unique** once ζ > 1 (three real poles split between
   the section and τ several ways), so compare fits by the residual and the
   boundary, not by the fₙ/ζ/τ triple.
+- **Measure FRF...** has a **ramped** option: instead of a multitone around
+  zero, the record ramps to *hold V*, holds it for *hold ms* with the tones
+  on top, and comes back — all inside the burst, so the EOMs are never
+  parked at a standing kV. It uses the session's own record, so FRQ, the
+  burst and the scope window are untouched. Tones sit on integer bins of the
+  **hold**, not the record, so resolution is 1/hold and `f hi` is capped by
+  the session grid; the analysis window is the hold alone. This is the
+  measurement for the corners: the EOM capacitance is voltage dependent, and
+  at the ramp corners this chain answers a drive ripple with several times
+  what the zero-centred FRF predicts — which is what makes the loop
+  over-correct there. Compare a ramped FRF at the ramp's own level against
+  `frf_*` taken around zero to see it.
 - Every bench capture **dithers the scope offset**: the monitor (and any aux)
   channel's offset is stepped across one ADC code over the shots and put
   back afterwards. The MSO-X's 8-bit converter carries a fixed ~3.4 mV

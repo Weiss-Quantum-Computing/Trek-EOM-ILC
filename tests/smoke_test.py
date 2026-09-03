@@ -1135,6 +1135,57 @@ print(f"[38] FRF maths: one-pole plant recovered exactly on the session "
       f"grid AND at {bins_d[-1]/recD/1e3:.0f} kHz on the shortened fine "
       f"grid; coarse scope record refused; CSV loads as an ilc.FRF")
 
+# [38b] the ramped probe: a multitone riding a held level, tones on integer
+# bins of the HOLD, analysed over the hold alone. The record must be the
+# session's own (so nothing on the bench is retuned), start and end at zero,
+# hold what was asked, and -- the point of it -- recover a plant that is only
+# correct over the hold, which a whole-record analysis would smear.
+_nS, _dtS = len(sN.t), float(sN.loop.dt)
+_u_r, _bins_r, _win = ilc_gui.build_ramped_probe(_nS, _dtS, 0.5, 8.0, 4.0,
+                                                 2e3, 60e3, 48, awg_rail=10.0)
+_i0, _i1 = _win
+_recR = (_i1 - _i0) * _dtS
+assert len(_u_r) == _nS, (len(_u_r), _nS)
+assert abs(_u_r[0]) < 0.1 and abs(_u_r[-1]) < 0.1, "record must idle at zero"
+assert abs(np.median(_u_r[_i0:_i1]) - 8.0) < 1e-3, np.median(_u_r[_i0:_i1])
+assert np.abs(_u_r).max() <= 8.5 + 1e-9, np.abs(_u_r).max()
+assert len(_bins_r) >= 8 and _bins_r[-1] / _recR <= 60e3 + 1
+# a plant that acts ONLY during the hold: outside it the trace is the drive
+# itself, so a whole-record analysis would read H ~ 1 and the windowed one
+# must not
+_tau_r = 20e-6
+_frR = np.fft.rfftfreq(_nS, _dtS)
+_y_full = np.fft.irfft(np.fft.rfft(_u_r) / (1 + 2j * np.pi * _frR * _tau_r), n=_nS)
+_y_r = _u_r.copy(); _y_r[_i0:_i1] = _y_full[_i0:_i1]
+
+class _RampScope:
+    def single(self, wait_s=None): return True
+    def waveform(self, ch, **kw): return (sN.t + sN.t_off, _u_r if ch == 1 else _y_r)
+    def run(self): pass
+
+_Hr = app._frf_capture(_RampScope(), 1, 3, _bins_r, sN.t, sN.t_off, repeats=2,
+                       wait_s=1, settle=0, window=_win)["mon"][0]
+_Htrue_r = 1.0 / (1.0 + 2j * np.pi * (_bins_r / _recR) * _tau_r)
+_err = np.abs(_Hr - _Htrue_r).max()
+assert _err < 0.05, f"windowed H off by {_err:.3f}"
+_Hw = app._frf_capture(_RampScope(), 1, 3, _bins_r, sN.t, sN.t_off, repeats=2,
+                       wait_s=1, settle=0)["mon"][0]          # no window
+assert np.abs(_Hw - _Htrue_r).max() > 3 * _err, \
+    "the whole-record analysis should NOT match a hold-only plant"
+for _bad, _why in (((0.5, 9.9, 4.0, 2e3, 60e3, 48), "v_dc + peak past the rail"),
+                   ((0.5, 5.0, 0.2, 2e3, 60e3, 48), "hold shorter than the taper"),
+                   ((0.5, 5.0, 4.0, 2e3, 200e3, 48), "f hi past the session grid"),
+                   ((0.5, 5.0, 4.0, 50.0, 60e3, 48), "f lo under the hold's 2nd bin")):
+    try:
+        ilc_gui.build_ramped_probe(_nS, _dtS, *_bad, awg_rail=10.0)
+        raise AssertionError(f"not refused: {_why}")
+    except (RuntimeError, ValueError):
+        pass
+print(f"[38b] ramped probe: {len(_bins_r)} tones on a {_recR*1e3:.2f} ms hold "
+      f"at 8.0 V within the session's {_nS}-point record (ends at zero); "
+      f"windowed H matches a hold-only plant to {_err:.3f}, whole-record does "
+      f"not; four bad shapes refused")
+
 # FRF overlay: ';'-separated paths (or globs) draw together for the
 # amplitude-family comparison; the measured-FRF MODEL refuses a list
 app.frf_var.set(FRF + ";" + fpath)
@@ -1376,6 +1427,40 @@ assert len(_ds.offsets[3]) == 9, "dither=False must not touch the offset"
 app._bench_capture(_MultiScope(), 3, sN.t, sN.t_off, repeats=4, wait_s=1, settle=0)   # no try_get: silent skip
 print(f"[45b] dither: 8 shots at 8 distinct offsets spanning 7/8 of a {ilc_gui.ADC_CODE_PER_VDIV*1e3:.2f} mV code, "
       f"centred and restored; restored after a mid-capture death; off when asked; plain fake untouched")
+
+# [45c] the readout retry: the MSO-X sometimes answers :WAVeform:DATA? with an
+# empty block (pyvisa: "invalid literal for int() with base 10: b''"), which
+# killed a 19-iteration run. The acquisition is frozen between single() and
+# run(), so re-reading returns the same record; a persistent failure still
+# raises rather than inventing data.
+class _FlakyScope(_MultiScope):
+    def __init__(self, fails):
+        self.fails, self.calls, self.cleared = fails, 0, 0
+        class _I:
+            def clear(_s): self.cleared += 1
+        self.inst = _I()
+    def waveform(self, ch, **kw):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise ValueError("invalid literal for int() with base 10: b''")
+        return _MultiScope.waveform(self, ch, **kw)
+_fs = _FlakyScope(fails=2)
+_t_r, _v_r = app._read_waveform(_fs, 3, 2000)
+assert _fs.calls == 3 and _fs.cleared == 2, (_fs.calls, _fs.cleared)
+assert len(_v_r) and len(_t_r) == len(_v_r)
+_fs2 = _FlakyScope(fails=99)
+try:
+    app._read_waveform(_fs2, 3, 2000)
+    raise AssertionError("a scope that never answers must raise")
+except ValueError:
+    pass
+assert _fs2.calls == 3, _fs2.calls
+_y_ok = app._bench_capture(_FlakyScope(fails=1), 3, sN.t, sN.t_off, repeats=2,
+                           wait_s=1, settle=0, dither=False)
+assert len(_y_ok) == len(sN.t)
+print("[45c] readout retry: two empty blocks re-read the same frozen "
+      "acquisition (link cleared each time), a dead link still raises after "
+      "3 tries, and a capture survives one bad read")
 
 # ---- the raw view must preserve the ADC word lattice ------------------------
 # resample interpolates between scope samples and boxcars when decimating, and

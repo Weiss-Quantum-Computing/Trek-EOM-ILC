@@ -397,6 +397,62 @@ def build_frf_probe(n, dt, peak, f_lo, f_hi, n_tones):
     return sysid_make.multitone(peak, bins, n=n, dt=dt), bins
 
 
+def build_ramped_probe(n_total, dt, peak, v_dc, hold_ms, f_lo, f_hi,
+                       n_tones, awg_rail=10.0):
+    """A multitone riding on a held level, on the session's own record.
+
+    The flat probe sits around zero, so it measures the chain small-signal
+    about 0 V. The ramps do not live there: the EOM capacitance is voltage
+    dependent, and at the corners this chain answers a drive ripple with
+    ~4x what the zero-centred FRF predicts (P92PX1D, 2 Sep) -- which is
+    what makes the loop over-correct there. This shape reaches an
+    operating point within the burst, holds it, probes, and comes back,
+    so the EOMs are never parked at a standing kV.
+
+    Layout (tools.sysid_make.ramped_multitone): edge, settle, HOLD+tones,
+    settle, edge -- sized to the session's own record, so FRQ, the burst
+    and the scope window are exactly the ramp campaign's and nothing has
+    to be retuned. The tones are integer bins of the HOLD, not of the
+    record, which is what keeps the analysis leak-free; resolution is
+    1/hold, and only the hold excites anything.
+
+    Returns (u, bins, (i0, i1)) with the window on the record's index base.
+    """
+    from tools import sysid_make
+    if not (0 < f_lo < f_hi):
+        raise RuntimeError("need 0 < f lo < f hi")
+    nyq = 0.5 / dt
+    if f_hi > PROBE_NYQ_MARGIN * nyq:
+        raise RuntimeError(
+            f"f hi {f_hi/1e3:g} kHz is past {PROBE_NYQ_MARGIN:g} of this "
+            f"grid's Nyquist ({PROBE_NYQ_MARGIN*nyq/1e3:.0f} kHz). The ramped "
+            f"probe stays on the session's record so the burst and the scope "
+            f"window are untouched, so the grid is the ceiling.")
+    n_hold = int(round(hold_ms * 1e-3 / dt))
+    r = n_total - n_hold
+    if n_hold < 300 or r < 8:
+        raise RuntimeError(
+            f"a {hold_ms:g} ms hold is {n_hold} of the record's {n_total} "
+            f"samples; it needs at least 300 (the tone taper) and has to "
+            f"leave room for two edges and two settles")
+    n_edge = n_settle = r // 4
+    n_hold = n_total - 2 * (n_edge + n_settle)   # rounding goes to the hold
+    rec = n_hold * dt
+    if f_lo < 2 / rec:
+        raise RuntimeError(
+            f"f lo {f_lo:g} Hz is below the hold's second bin (~{2/rec:.0f} "
+            f"Hz) -- lengthen the hold or raise f lo")
+    bins = sysid_make.hold_tone_bins(f_lo, f_hi, int(n_tones), n_hold, dt)
+    if len(bins) < 8:
+        raise RuntimeError(f"only {len(bins)} distinct tone bins over a "
+                           f"{rec*1e3:.2f} ms hold -- widen the band, "
+                           f"lengthen the hold, or ask for fewer tones")
+    u, win = sysid_make.ramped_multitone(peak, v_dc, bins, n_hold, dt=dt,
+                                         n_edge=n_edge, n_settle=n_settle,
+                                         awg_rail=awg_rail)
+    return u, bins, win
+
+
 def write_frf_csv(path, f_hz, H, coh):
     """The four columns ilc.FRF and Show FRF consume; sysid_fit.py stays
     the tool for the full diagnostic (model columns + png)."""
@@ -2196,8 +2252,8 @@ class App:
         print(f"         PLATEAU: peak error flat for {p['n']} iterations "
               f"(best {p['best_recent']:.1f} V, before that "
               f"{p['best_before']:.1f} V) while the update is not shrinking "
-              f"({p['upd_recent']*1e3:.0f} mV rms, was "
-              f"{p['upd_before']*1e3:.0f}) -- the loop is re-learning noise. "
+              f"({p['upd_recent']*1e3:.3g} mV rms, was "
+              f"{p['upd_before']*1e3:.3g}) -- the loop is re-learning noise. "
               f"Stop, or lower the band edge. Best so far: iteration "
               f"{p['best_it']} at {p['best']:.1f} V, "
               f"drive_{s.stem}_i{p['best_it']:02d}.csv")
@@ -2949,7 +3005,9 @@ class App:
                   ("f lo Hz", "400"),
                   ("f hi Hz", "100e3"),
                   ("tones", "72"),
-                  ("name", f"AUTO{suffix}"))
+                  ("name", f"AUTO{suffix}"),
+                  ("hold V (ramped only)", "0.0"),
+                  ("hold ms (ramped only)", "4.0"))
         fvars = {}
         for i, (lab, dv) in enumerate(fields):
             ttk.Label(fr, text=lab).grid(row=i, column=0, sticky="w")
@@ -2968,6 +3026,24 @@ class App:
             f"Writes run\\frf_<name>.csv and points the FRF field at it.")
             ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
+        ramp_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(fr, variable=ramp_var, text=(
+            "ramped: hold at an operating point and probe THERE, not around "
+            "zero")).grid(row=len(fields), column=0, columnspan=2, sticky="w",
+                          pady=(6, 0))
+        ttk.Label(fr, foreground="#666666", justify="left", text=(
+            "The chain is not the same at 5 kV as at 0 V -- the EOM "
+            "capacitance is voltage dependent, and at the ramp corners it\n"
+            "answers a drive ripple with several times what the zero-centred "
+            "FRF predicts, which is what makes the loop over-correct\n"
+            "there. The record ramps to 'hold V', holds it for 'hold ms' "
+            "with the tones on top, and comes back, all within the\n"
+            "burst -- the EOMs are never parked at a standing kV, and the "
+            "session's own record, FRQ and scope window are kept.\n"
+            "Tones sit on integer bins of the HOLD, so resolution is 1/hold "
+            "and f hi is capped by the session grid.")
+            ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w")
+
         def ok():
             try:
                 peak = float(fvars["probe peak V (at the AWG)"].get())
@@ -2980,9 +3056,17 @@ class App:
                 if peak <= 0 or peak > s.full_scale:
                     raise RuntimeError(f"probe peak must be 0 < peak <= "
                                        f"full scale ({s.full_scale:g} V)")
-                mode, n_p, dt_p = plan_frf_grid(len(s.t), s.loop.dt, f_hi)
-                u, bins = build_frf_probe(n_p, dt_p, peak, f_lo, f_hi, tones)
                 lim = s.loop.limits          # this channel's, not the Trek's
+                if ramp_var.get():
+                    mode, n_p, dt_p = "session", len(s.t), s.loop.dt
+                    u, bins, window = build_ramped_probe(
+                        n_p, dt_p, peak, float(fvars["hold V (ramped only)"].get()),
+                        float(fvars["hold ms (ramped only)"].get()),
+                        f_lo, f_hi, tones, awg_rail=lim.awg_rail)
+                else:
+                    mode, n_p, dt_p = plan_frf_grid(len(s.t), s.loop.dt, f_hi)
+                    u, bins = build_frf_probe(n_p, dt_p, peak, f_lo, f_hi, tones)
+                    window = None
                 slew, i_pk, hv_pk = probe_demand(u, dt_p, s.loop.plant.gain,
                                                  s.loop.channel, lim)
                 if hv_pk > lim.hv_max:
@@ -3021,7 +3105,7 @@ class App:
                                                int(f["awg_ch"]),
                                                int(f["scope_ch"]),
                                                int(f["repeats"]), f["wait"],
-                                               fmax_now, mode, dt_p),
+                                               fmax_now, mode, dt_p, window),
                 "measuring FRF...")
 
         bb = ttk.Frame(fr)
@@ -3032,11 +3116,16 @@ class App:
             side="left", expand=True, fill="x")
 
     def _measure_frf_work(self, u, bins, name, awg_ch, scope_ch, repeats,
-                          wait_s, fmax_now, mode="session", dt_p=None):
+                          wait_s, fmax_now, mode="session", dt_p=None,
+                          window=None):
         s = self.session
         dt_p = dt_p or s.loop.dt
         n_p = len(u)
         rec = n_p * dt_p                     # the PROBE's record
+        # The tones are integer bins of whatever is ANALYSED: the whole
+        # record for a flat probe, the hold for a ramped one. Every
+        # frequency below comes from that, not from the record.
+        rec_a = (window[1] - window[0]) * dt_p if window else rec
         t_sess = len(s.t) * s.loop.dt        # the session's record
         t_grid = np.arange(n_p) * dt_p
         _, awgmod = self._bench_modules()
@@ -3093,9 +3182,16 @@ class App:
                      mode == "dense" else
                      f"; record shortened from {t_sess*1e3:.3f} ms, "
                      f"frequency bins coarsen to {1/rec:.0f} Hz") + ")")
-            print(f"  {len(bins)} tones {bins[0]/rec:.0f} Hz - "
-                  f"{bins[-1]/rec/1e3:.1f} kHz, peak {np.abs(u).max():.3f} V "
+            print(f"  {len(bins)} tones {bins[0]/rec_a:.0f} Hz - "
+                  f"{bins[-1]/rec_a/1e3:.1f} kHz, peak {np.abs(u).max():.3f} V "
                   f"({100*frac:.1f}% of DAC range)")
+            if window:
+                print(f"  ramped probe: tones ride a hold of "
+                      f"{rec_a*1e3:.3f} ms ({window[0]*dt_p*1e3:.3f}-"
+                      f"{window[1]*dt_p*1e3:.3f} ms into the record), analysed "
+                      f"over the hold alone -- bins are {1/rec_a:.0f} Hz apart "
+                      f"and H is the chain AT that operating point, not "
+                      f"around zero")
             if mode == "short":
                 # FRQ while the output is still off (checked above), in the
                 # ordering apply_channel honours; scope window to match
@@ -3134,9 +3230,10 @@ class App:
             pd_ch = pd_channel(self.cfg)
             res = self._frf_capture(scope, awg_ch, scope_ch, bins,
                                     t_grid, s.t_off, repeats, wait_s,
-                                    f_top=bins[-1] / rec, aux_ch=pd_ch)
+                                    f_top=bins[-1] / rec_a, aux_ch=pd_ch,
+                                    window=window)
             H, coh = res["mon"]
-            f_hz = bins / rec
+            f_hz = bins / rec_a
             path = os.path.join(RUN_DIR, f"frf_{name}.csv")
             write_frf_csv(path, f_hz, H, coh)
             good = int((coh >= 0.9).sum())
@@ -3203,6 +3300,32 @@ class App:
             scope.close()
             print("instruments closed")
 
+    def _read_waveform(self, scope, ch, points, tries=3):
+        """scope.waveform with a retry.
+
+        The MSO-X occasionally answers :WAVeform:DATA? with an empty block;
+        pyvisa reports it as "invalid literal for int() with base 10: b''"
+        and it killed a 19-iteration run at the readout (2 Sep 2026). The
+        acquisition is stopped between single() and run(), so re-reading
+        returns the SAME frozen record -- a retry is not a second
+        measurement, and nothing is averaged twice. Clear the link first to
+        drop whatever partial reply is still in flight.
+        """
+        for k in range(tries):
+            try:
+                return scope.waveform(ch, points=points)
+            except Exception as e:
+                if k == tries - 1:
+                    raise
+                print(f"  CH{ch} readout failed ({type(e).__name__}: {e}) -- "
+                      f"clearing the link and re-reading the same frozen "
+                      f"acquisition, attempt {k + 2} of {tries}")
+                try:
+                    scope.inst.clear()
+                except Exception:
+                    pass
+                time.sleep(0.2)
+
     def _frf_capture(self, scope, drive_ch, mon_ch, bins, t_grid, t_off,
                      repeats, wait_s, settle=0.5, f_top=None,
                      aux_ch=None, window=None):
@@ -3248,9 +3371,9 @@ class App:
             if got is not True:
                 raise RuntimeError(f"no trigger within {wait_s:g} s on "
                                    f"repeat {i+1} -- is the burst running?")
-            tu, vu = scope.waveform(drive_ch, points=pts)
-            ty, vy = scope.waveform(mon_ch, points=pts)
-            ta, va = (scope.waveform(aux_ch, points=pts)
+            tu, vu = self._read_waveform(scope, drive_ch, pts)
+            ty, vy = self._read_waveform(scope, mon_ch, pts)
+            ta, va = (self._read_waveform(scope, aux_ch, pts)
                       if aux_ch is not None else (None, None))
             scope.run()
             if i == 0 and f_top is not None:
@@ -3428,8 +3551,8 @@ class App:
                 if got is not True:
                     raise RuntimeError(f"no trigger within {wait_s:g} s on repeat "
                                        f"{i+1} -- is the burst running?")
-                ts, vs = scope.waveform(ch, points=pts)
-                extra = [(c, *scope.waveform(c, points=pts)) for c in aux]
+                ts, vs = self._read_waveform(scope, ch, pts)
+                extra = [(c, *self._read_waveform(scope, c, pts)) for c in aux]
                 scope.run()
                 y_mon = scopeio.resample(ts, vs, t_grid, t_offset=t_off)
                 traces.append(y_mon)
