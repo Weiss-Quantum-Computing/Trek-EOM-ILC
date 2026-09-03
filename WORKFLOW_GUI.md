@@ -177,7 +177,8 @@ the parametric model from each iteration's own data as it steps.
    run that actually played something ends — finished, stopped, or died —
    the driven channel's **output switches OFF** automatically; a run
    refused at the setup checks leaves the bench exactly as it found it.
-7. **Hold** re-measures the *current* drive `runs` times with `gap s`
+7. **Hold** re-measures a drive — the *current* one, or any stored
+   iteration typed in the **iter** box — `runs` times with `gap between runs s`
    between measurements, **without ever updating** — for thermalisation
    studies: how does one fixed drive's error evolve over minutes? Each
    measurement is a **run** (`iter k r1, r2, …`, saved as
@@ -483,7 +484,7 @@ and it behaves like any entry again.
 | **scope ch** | Scope channel carrying the **monitor** for this chain: 3 for EO1, 4 for EO2. |
 | **iterations** *(config)* | Number of updates to run. The loop measures `iterations + 1` times — the last measurement documents the final drive without updating past it. |
 | **repeats** *(config)* | HRES single shots averaged in software per iteration. 64 is the campaign standard (~25 s at the 20 Hz trigger, dithers the scope's 2.5 mV word lattice to its 0.16 mV floor); 16 is a usable quick check; below 16 is refused. |
-| **wait s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
+| **trigger timeout s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
 | **skip setup checks** *(panel)* | Uploads without verifying AMP/OFST/clock/acquisition mode. A mismatch silently rescales the drive, which is the one error the loop cannot see. Don't. |
 | **keep native-rate avg** *(config)* | Bench loop and Hold also save each iteration's repeat average at the scope's own sample rate — `meas_<stem>_iNN[_rMM]_native.npz` (`t` = waveform time, `y` = monitor V) beside the usual decimated `.npy`. Costs ~0.5–1 MB per iteration and nothing else; point the Captures glob at these files to run *Native spectrum* on a bench campaign after the fact. |
 | **keep verticals** *(config)* | Auto-set leaves the scope's V/div and offset as they are (it still sets FRQ, AMP, OFST, load, burst, timebase and HRES, and prints the verticals it found). Tick it for a session whose target span differs from the campaign it is compared against — an edited endpoint, say — so the 8-bit lattice stays the same; untick and Auto-set re-ranges both channels from the session's own spans. |
@@ -491,7 +492,7 @@ and it behaves like any entry again.
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
 | **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |
 
-| **Hold (runs / gap s)** | Re-measures the current drive `runs` times, `gap s` apart, with **no update and no state change** — the thermalisation probe. Runs are tagged `iter k rN`, saved as `meas_<stem>_iNN_rMM.npy`, and numbered on from any earlier holds of the same iteration. Same setup checks, output confirmation and output-off-at-end as the bench loop; Stop works between shots and during the gap. |
+| **Hold (runs / gap between runs s / iter)** | Re-measures the current drive `runs` times, `gap between runs s` apart, with **no update and no state change** — the thermalisation probe. Runs are tagged `iter k rN`, saved as `meas_<stem>_iNN_rMM.npy`, and numbered on from any earlier holds of the same iteration. Same setup checks, output confirmation and output-off-at-end as the bench loop; Stop works between shots and during the gap. The **iter** box picks which stored iteration to hold: blank is the current drive; a number loads that iteration's `drive_<stem>_iNN.csv` from beside the state, uploads it under its own name and tags the runs to it (`iter 9 r1…`), so an earlier drive can be re-measured without Init — which would restart the campaign at i00 under the same names. When a run lands, the panel ticks **runs** and adds the held iteration to the **Iterations** box if either would have hidden it, and says so in the log. |
 
 ### Plot bar
 

@@ -856,7 +856,7 @@ class App:
                             ("scope ch", self.scopech_var, 3),
                             ("iterations", self.iters_var, 3),
                             ("repeats", self.repeats_var, 4),
-                            ("wait s", self.wait_var, 4)):
+                            ("trigger timeout s", self.wait_var, 4)):
             ttk.Label(r0, text=lab).pack(side="left", padx=(0, 2))
             ttk.Entry(r0, textvariable=var, width=w).pack(side="left", padx=(0, 6))
         self.skip_var = tk.BooleanVar(value=False)
@@ -898,12 +898,21 @@ class App:
                                                                 "5")))
         ttk.Entry(r3, textvariable=self.holdruns_var, width=4).pack(
             side="left", padx=(2, 6))
-        ttk.Label(r3, text="gap s").pack(side="left")
+        ttk.Label(r3, text="gap between runs s").pack(side="left")
         self.holdgap_var = tk.StringVar(value=str(self.cfg.get("hold_gap",
                                                                "30")))
         ttk.Entry(r3, textvariable=self.holdgap_var, width=6).pack(
             side="left", padx=(2, 6))
-        b = ttk.Button(r3, text="Hold  (re-measure this drive, no update)",
+        # Which stored iteration to hold: blank = the current drive. Any
+        # earlier drive_<stem>_iNN.csv of the loaded campaign can be
+        # re-measured without Init (which would restart the campaign at
+        # i00 under the same names) -- the runs are tagged to THAT
+        # iteration, so 'iter 9 r1' sits beside iteration 9's own point.
+        ttk.Label(r3, text="iter").pack(side="left")
+        self.holditer_var = tk.StringVar(value="")
+        ttk.Entry(r3, textvariable=self.holditer_var, width=4).pack(
+            side="left", padx=(2, 6))
+        b = ttk.Button(r3, text="Hold  (re-measure, no update)",
                        command=self.do_hold)
         b.pack(side="left", fill="x", expand=True)
         self._actions.append(b)
@@ -2563,16 +2572,94 @@ class App:
             return messagebox.showerror("Hold", str(e))
         if f["runs"] < 1:
             return messagebox.showerror("Hold", "runs must be at least 1")
+        try:
+            it_hold, u_hold, src = self._hold_drive(self.holditer_var.get())
+        except RuntimeError as e:
+            return messagebox.showerror("Hold", str(e))
         self.run_worker(lambda: self._hold_work(int(f["runs"]), f["gap_s"],
                                                 int(f["awg_ch"]),
                                                 int(f["scope_ch"]),
                                                 int(f["repeats"]), f["wait"],
-                                                self.keepnative_var.get()),
+                                                self.keepnative_var.get(),
+                                                it_hold, u_hold, src),
                         "hold: re-measuring...")
 
-    def _hold_work(self, runs, gap_s, awg_ch, scope_ch, repeats,
-               wait_s, keep_native=False):
+    def _hold_drive(self, spec):
+        """The 'iter' box -> (iteration, drive, source). Blank means the
+        session's current drive (None, None, ...). A number means that
+        iteration's stored drive_<stem>_iNN.csv beside the state -- the
+        file the loop actually wrote and played -- so an earlier drive can
+        be re-measured without Init, which would restart the campaign at
+        i00 under the same names and discard the loop's memory."""
+        spec = spec.strip()
         s = self.session
+        if not spec:
+            return None, None, "the current drive"
+        try:
+            it = int(spec)
+        except ValueError:
+            raise RuntimeError(f"'iter' must be an iteration number, not "
+                               f"{spec!r} (blank = the current drive)")
+        run_dir = os.path.dirname(s.state_path)
+        path = os.path.join(run_dir, f"drive_{s.stem}_i{it:02d}.csv")
+        if it == 0 and not os.path.exists(path):
+            legacy = os.path.join(run_dir, f"drive_{s.stem}_iter0.csv")
+            if os.path.exists(legacy):
+                path = legacy
+        if not os.path.exists(path):
+            have = sorted(int(m.group(1)) for p in glob.glob(
+                os.path.join(run_dir, f"drive_{s.stem}_i[0-9]*.csv"))
+                if (m := re.search(r"_i(\d+)\.csv$", p)))
+            raise RuntimeError(
+                f"no stored drive for iteration {it} of {s.stem}: "
+                f"{os.path.basename(path)} is not beside the state. "
+                f"Stored: {', '.join(map(str, have)) or 'none'}.")
+        u = pd.read_csv(path, comment="#").iloc[:, 1].to_numpy(float)
+        if len(u) != len(s.t):
+            raise RuntimeError(f"{os.path.basename(path)} has {len(u)} "
+                               f"points; this session's grid has {len(s.t)}")
+        return it, u, os.path.basename(path)
+
+    def _show_held(self, it):
+        """Main thread, after a hold run: make the held iteration visible.
+
+        The plots draw hold runs only for iterations the Iterations box
+        selects, and only with 'runs' ticked. Holding the CURRENT iteration
+        always fell inside the default selection (the last two); holding an
+        earlier one does not, and its runs were stored, listed in the Table,
+        and never drawn. So: tick 'runs' if it is off, add the iteration to
+        the box if it is not selected, say what changed, then redraw."""
+        s = self.session
+        changed = []
+        if not self.showruns_var.get():
+            self.showruns_var.set(True)
+            changed.append("ticked 'runs'")
+        avail = sorted({sn["it"] for sn in s.snapshots})
+        spec = self.itersel_var.get().strip()
+        picked = self._pick_iters(spec, avail, 2, lambda m: None)
+        if it not in picked:
+            if spec.lower() in ("all", "*"):
+                pass                      # cannot happen: 'all' picks it
+            elif spec:
+                spec = f"{spec},{it}"
+            else:                         # blank = the last two; keep those
+                spec = ",".join(str(k) for k in avail[-2:] if k != it) + f",{it}"
+            self.itersel_var.set(spec.strip(","))
+            changed.append(f"Iterations box -> '{self.itersel_var.get()}'")
+        if changed:
+            self.log(f"hold: {' and '.join(changed)} so the held runs of "
+                     f"iteration {it} draw alongside the rest -- change it "
+                     f"back when done")
+        self._redraw_iterations()
+
+    def _hold_work(self, runs, gap_s, awg_ch, scope_ch, repeats,
+               wait_s, keep_native=False, it_hold=None, u_hold=None,
+               src="the current drive"):
+        s = self.session
+        # the drive to play and the iteration its runs are tagged to: the
+        # session's current one, or an earlier stored one (see _hold_drive)
+        it = s.iteration if it_hold is None else int(it_hold)
+        u = s.u if u_hold is None else np.asarray(u_hold, float)
         awg, scope = self._connect_pair()
         played = False
         switched_on = False
@@ -2595,7 +2682,7 @@ class App:
             # The same guard the bench loop runs before every upload. Hold
             # used to skip it, and with seed drives Hold is the path that
             # plays hand-edited samples (1 Sep 2026).
-            rep = s.loop.check(s.u)
+            rep = s.loop.check(u)
             print("       limit check:", rep)
             if not rep:
                 print("REFUSING to play this drive: it fails the limit check "
@@ -2603,13 +2690,14 @@ class App:
                       "the file and Init again.")
                 return
 
-            it = s.iteration
             wname = f"{s.stem}_i{it:02d}"
-            n, frac = ilc_bench.upload_drive(awg, awg_ch, wname, s.u,
+            n, frac = ilc_bench.upload_drive(awg, awg_ch, wname, u,
                                              s.full_scale)
             played = True
             print(f"hold: uploaded {wname} ({n} pts, {100*frac:.1f}% of DAC "
-                  f"range) -- this drive will NOT be updated")
+                  f"range) from {src} -- this drive will NOT be updated"
+                  + (f"; the session stays at iteration {s.iteration}"
+                     if it != s.iteration else ""))
             ok, switched_on = self._ensure_output_on(awg, awg_ch)
             if not ok:
                 return
@@ -2637,14 +2725,14 @@ class App:
                                      f"meas_{s.stem}_i{it:02d}_r{r:02d}.npy"),
                         y)
                 m = s.loop.metrics(y)
-                sn = dict(it=it, y=y, m=m, u=s.u, run=r, t_wall=time.time())
+                sn = dict(it=it, y=y, m=m, u=u, run=r, t_wall=time.time())
                 s.snapshots.append(sn)
                 print(f"  r{r} (+{fmt_span(time.time() - t_start)}): error "
                       f"peak {m['peak_err_hv']:7.1f} V   "
                       f"rms {m['rms_err_hv']:6.2f} V")
                 m.update(self._noise_floor(
                     stk["capture"].grid[f"CH{scope_ch}"]))
-                self.msgs.put(("call", self._redraw_iterations))
+                self.msgs.put(("call", lambda it=it: self._show_held(it)))
                 if j < runs - 1 and gap_s > 0:
                     # sleep in slices so Stop stays responsive
                     t_end = time.time() + gap_s

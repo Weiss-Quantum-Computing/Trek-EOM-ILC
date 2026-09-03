@@ -30,6 +30,7 @@ against is the committed fixture set in tests/data/ (plus the tracked
 run/frf_WIDE_X1.csv), so a fresh clone can run the whole suite.
 """
 import os, shutil, sys, glob, tempfile, traceback
+import re
 import numpy as np
 import pandas as pd
 
@@ -639,6 +640,47 @@ rsnaps = [sn for sn in app.session.snapshots if sn.get("run") is not None]
 assert any(sn["it"] == 1 and sn["run"] == 3 and sn.get("t_wall")
            for sn in rsnaps), rsnaps
 print("[27] recalled meas_GENX_i01_r03.npy as iter 1 r3 with a timestamp")
+
+# [27b] Hold of an EARLIER iteration: the 'iter' box resolves to that
+# iteration's stored drive beside the state (so a past drive can be
+# re-measured without Init restarting the campaign), blank means the
+# current drive, and a missing iteration or a non-number is refused.
+_hs = app.session; _hd = os.path.dirname(_hs.state_path)
+_stored = sorted(int(mm.group(1)) for pth in glob.glob(os.path.join(_hd, f"drive_{_hs.stem}_i[0-9]*.csv"))
+                 if (mm := re.search(r"_i(\d+)\.csv$", pth)))
+assert _stored, f"no stored drives for {_hs.stem} in {_hd}"
+_k = _stored[0]
+_it, _u, _src = app._hold_drive(str(_k))
+assert _it == _k and len(_u) == len(_hs.t) and _src == f"drive_{_hs.stem}_i{_k:02d}.csv", (_it, _src)
+assert np.allclose(_u, pd.read_csv(os.path.join(_hd, _src), comment="#").iloc[:, 1].to_numpy(float))
+assert app._hold_drive("") == (None, None, "the current drive")
+for bad in ("99", "x"):
+    try:
+        app._hold_drive(bad); raise AssertionError(f"{bad!r} must be refused")
+    except RuntimeError:
+        pass
+print(f"[27b] hold iter: '{_k}' -> {_src} ({len(_u)} pts) tagged to iteration {_it}; blank -> current; 99 and 'x' refused")
+
+# [27c] a hold of an iteration outside the selection, or with 'runs' off,
+# was stored and listed but never drawn. _show_held ticks runs, adds the
+# iteration to the box, logs it, and redraws -- the recalled GENX iter-1
+# hold run has to be on the Error tab afterwards.
+_hs = app.session
+_hr = [sn for sn in _hs.snapshots if sn.get("run") is not None]
+assert _hr, "this session has no hold runs to test with"
+_hit = _hr[-1]["it"]; _lab = f"iter {_hit} r{_hr[-1]['run']}"
+app.showruns_var.set(False); app.itersel_var.set("99")
+app._redraw_iterations(); root.update()
+assert not any(l.get_label() == _lab for l in app.ax_err.get_lines()), "run drawn while hidden?"
+_before = app.log_text.get("1.0", "end")
+app._show_held(_hit); root.update()
+assert app.showruns_var.get() and str(_hit) in app.itersel_var.get(), (app.showruns_var.get(), app.itersel_var.get())
+assert any(l.get_label() == _lab for l in app.ax_err.get_lines()), [l.get_label() for l in app.ax_err.get_lines()]
+assert "so the held runs of iteration" in app.log_text.get("1.0", "end")[len(_before):]
+app._show_held(_hit)                                            # already visible: nothing to say
+assert app.log_text.get("1.0", "end").count("so the held runs of iteration") == 1
+app.itersel_var.set(""); app.showruns_var.set(True); app._redraw_iterations(); root.update()
+print(f"[27c] show_held: '{_lab}' hidden by selection 99 + runs off -> ticked runs, box '{app.itersel_var.get() or _hit}', drawn, logged once")
 
 # Fit must recover the true gain from the snapshot's own played (u, y) pair
 app.do_fit(); pump_until_idle(); root.update()
