@@ -122,6 +122,10 @@ PRED_COLOUR = "#8a8a8a"
 # purple and cyan sit last because they can pass for viridis endpoints
 CMP_COLOURS = ["#ff7f0e", "#e377c2", "#8c564b", "#9467bd", "#17becf",
                "#7f7f7f"]
+# Compare-stem traces sit UNDER the session's own: they are drawn after the
+# session's in every tab, so at the default z-order (2 for a line) they
+# painted over the running state's newest points. Above the grid (1.5).
+CMP_ZORDER = 1.8
 
 # The MSO-X 2014A's 8-bit converter carries a fixed error pattern per code:
 # ~3.4 mV pk-pk over the 40.25 mV code at 1 V/div, measured 2 Sep 2026 (fold
@@ -4503,7 +4507,7 @@ class App:
                                np.array_equal(cs.loop.target * csc,
                                               s.loop.target * sc)):
                 ax.plot(ctms, cs.loop.target * csc, color=col, lw=0.7,
-                        ls=":", alpha=0.8, label=f"{stem} target")
+                        ls=":", alpha=0.8, label=f"{stem} target", zorder=CMP_ZORDER)
             k = len(csnaps)
             for idx, sn in enumerate(csnaps):
                 ax.plot(ctms, sn["y"] * csc, color=self._cmp_colour(col, idx, k),
@@ -4511,7 +4515,7 @@ class App:
                         ls="--" if sn.get("run") is not None else "-",
                         label=f"{stem} measured iter {sn['it']}"
                               + (f" r{sn['run']}" if sn.get("run") is not None else ""),
-                        **self._dot_kw(len(ctms)))
+                        **self._dot_kw(len(ctms)), zorder=CMP_ZORDER)
             total += k
         ax.set_ylabel(f"{self._out_name()} voltage (V)")
         ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
@@ -4545,7 +4549,7 @@ class App:
                     continue
                 ax.plot(cs.t * 1e3, sn["u"], color=self._cmp_colour(col, idx, k),
                         lw=0.8, label=f"{stem} iter {sn['it']} drive",
-                        **self._dot_kw(len(cs.t)))
+                        **self._dot_kw(len(cs.t)), zorder=CMP_ZORDER)
         fs = s.full_scale
         ax.axhline(fs, color="#c62828", lw=0.8, ls="--")
         ax.axhline(-fs, color="#c62828", lw=0.8, ls="--",
@@ -4663,7 +4667,7 @@ class App:
                         lw=1.1 if idx == k - 1 else 0.8,
                         ls="--" if sn.get("run") is not None else "-",
                         label=self._cmp_label(stem, sn),
-                        **self._dot_kw(len(ctms), ms=2.6))
+                        **self._dot_kw(len(ctms), ms=2.6), zorder=CMP_ZORDER)
             total += k
         if n:
             m = snaps[-1]["m"]
@@ -4726,7 +4730,7 @@ class App:
                           lw=1.0 if idx == k - 1 else 0.7,
                           ls="--" if sn.get("run") is not None else "-",
                           label=self._cmp_label(stem, sn),
-                          **self._dot_kw(len(fe), ms=2.2))
+                          **self._dot_kw(len(fe), ms=2.2), zorder=CMP_ZORDER)
             total += k
         if s.loop.frf is not None:
             ax.axvspan(s.loop.frf.f_use, s.loop.frf.f_max, color="#c68000",
@@ -4804,7 +4808,7 @@ class App:
                         color=self._cmp_colour(col, idx, k),
                         lw=1.1 if idx == k - 1 else 0.8,
                         label=self._cmp_label(stem, sn),
-                        **self._dot_kw(len(ctms), ms=2.6))
+                        **self._dot_kw(len(ctms), ms=2.6), zorder=CMP_ZORDER)
                 cshown += 1
         if shown + cshown:
             ax.legend(loc="best", fontsize=7,
@@ -4870,7 +4874,7 @@ class App:
                 ax.loglog(fe, ae, color=self._cmp_colour(col, idx, k),
                           lw=1.0 if idx == k - 1 else 0.7,
                           label=self._cmp_label(stem, sn),
-                          **self._dot_kw(len(fe), ms=2.2))
+                          **self._dot_kw(len(fe), ms=2.2), zorder=CMP_ZORDER)
                 shown += 1
         if s.loop.frf is not None:
             ax.axvspan(s.loop.frf.f_use, s.loop.frf.f_max, color="#c68000",
@@ -5014,7 +5018,7 @@ class App:
                         lw=1.1 if idx == k - 1 else 0.8,
                         label=f"{self._cmp_label(stem, sn)} "
                               f"- iter {sn['it'] - 1}",
-                        **self._dot_kw(len(ctms), ms=2.6))
+                        **self._dot_kw(len(ctms), ms=2.6), zorder=CMP_ZORDER)
                 shown += 1
         if shown:
             ax.legend(loc="best", fontsize=7, ncols=2 if shown > 6 else 1)
@@ -5078,10 +5082,10 @@ class App:
                 continue
             kk = np.arange(len(chist))
             ax.semilogy(kk, [m["peak_err_hv"] for m in chist], "o-",
-                        color=col, lw=0.9, ms=3, label=f"{stem} peak error")
+                        color=col, lw=0.9, ms=3, label=f"{stem} peak error", zorder=CMP_ZORDER)
             ax.semilogy(kk, [m["rms_err_hv"] for m in chist], "s--",
                         color=col, lw=0.7, ms=2.5, alpha=0.6,
-                        label=f"{stem} rms error")
+                        label=f"{stem} rms error", zorder=CMP_ZORDER)
             n_it = max(n_it, len(chist))
         if n_it:
             ax.set_xticks(np.arange(n_it))

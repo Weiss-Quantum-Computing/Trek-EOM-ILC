@@ -930,6 +930,21 @@ app._redraw_iterations(); root.update()
 glabs = [l.get_label() for l in app.ax_err.get_lines()
          if l.get_label().startswith("GENX iter") and " r" not in l.get_label()]
 assert glabs == ["GENX iter 1"], glabs
+# [31b] compare traces sit UNDER the session's own on every axis: they are
+# drawn later, and at the default z-order they covered the running state's
+# newest points
+app.cmpsel_var.set("GENX:all TSTX1:all"); app._redraw_iterations(); root.update()
+_axes = [a for nm in dir(app) if nm.startswith("fig_") for a in getattr(app, nm).axes]
+_nc = _ns = 0
+for _ax in _axes:
+    _cmpz = [l.get_zorder() for l in _ax.get_lines() if l.get_label().split(" ")[0] in ("GENX", "TSTX1")]
+    _ownz = [l.get_zorder() for l in _ax.get_lines() if l.get_label().split(" ")[0] not in ("GENX", "TSTX1") and not l.get_label().startswith("_")]
+    if _cmpz and _ownz:
+        assert max(_cmpz) < min(_ownz), (_ax.get_title(), max(_cmpz), min(_ownz))
+        _nc += len(_cmpz); _ns += len(_ownz)
+assert _nc and _ns, (_nc, _ns)
+print(f"[31b] compare traces under the session's own: {_nc} compare lines below {_ns} session lines across the tabs")
+app.cmpsel_var.set("GENX")
 app.cmpsel_var.set("GENX:0")
 app._redraw_iterations(); root.update()
 glabs = [l.get_label() for l in app.ax_err.get_lines()
