@@ -1395,6 +1395,45 @@ assert "gain only" in app.summary.cget("text")
 print("[42] model record: init writes model+FRF+taper into the state, the "
       "summary names it, Load restores panel, fields and loop.frf")
 
+# [42b] the panel's numbers are remembered per channel (first-shot gain,
+# seed drive, FRF) and per channel+model (parameter boxes): switching away
+# and back brings them back; a channel never used starts blank (the
+# prior-leak guard); a model never used on this channel keeps the current
+# numbers as a start. Both go through the same path the comboboxes use.
+app._field_mem.clear()
+app.channel_var.set("EO1"); app._on_channel_change()
+app._mem_channel = "EO1"        # the panel was moved by hand above; pin it
+app.model_var.set("gain only (0th order)"); app._on_model_change()
+app.shotgain_var.set("0.81"); app.pgain_var.set("0.561"); app.seed_var.set("")
+app.model_var.set("one pole (1st order)"); app._on_model_change()
+assert app.pgain_var.get() == "0.561", "a new model on this channel lost the gain start"
+app.pgain_var.set("0.60"); app.ptau_var.set("3.1")
+app.channel_var.set("EO2"); app._on_channel_change()
+assert app.shotgain_var.get() == "" and app.pgain_var.get() == "" and app.ptau_var.get() == "", \
+    "EO1's numbers leaked into a never-used EO2"
+app.shotgain_var.set("1.9"); app.pgain_var.set("0.70")
+app.channel_var.set("EO1"); app._on_channel_change()
+assert (app.shotgain_var.get(), app.pgain_var.get(), app.ptau_var.get()) == ("0.81", "0.60", "3.1"), \
+    (app.shotgain_var.get(), app.pgain_var.get(), app.ptau_var.get())
+assert app.model_var.get() == "one pole (1st order)"
+app.model_var.set("gain only (0th order)"); app._on_model_change()
+assert app.pgain_var.get() == "0.561" and app.ptau_var.get() == "", (app.pgain_var.get(), app.ptau_var.get())
+app.channel_var.set("EO2"); app._on_channel_change()
+assert app.shotgain_var.get() == "1.9" and app.pgain_var.get() == "", \
+    "EO2/static was never set: gain must be blank, the shot gain is EO2's"
+app.model_var.set("one pole (1st order)"); app._on_model_change()
+assert app.pgain_var.get() == "0.70", app.pgain_var.get()
+# the memory rides along in the config
+app._save_config()
+assert app._field_mem["EO1"]["models"]["one_pole"] == {"gain": "0.60", "tau": "3.1", "fn": "", "zeta": ""}
+assert app._field_mem["EO2"]["shot_gain"] == "1.9"
+# back to where the checks below expect the panel
+app.channel_var.set("EO1"); app._on_channel_change()
+app.model_var.set("gain only (0th order)"); app._on_model_change()
+app.shotgain_var.set("0.8"); app.pgain_var.set("0.56")
+print("[42b] field memory: first-shot gain / seed / FRF per channel, parameter boxes per channel+model; "
+      "a fresh channel starts blank, a fresh model keeps the current start; saved with the config")
+
 # the FRF edge guard: sized from the taper's ring time (PRFRX1B lesson --
 # the 0.5 ms first cut blocked the loop from the chain's real settling
 # transient, 52 V at the last sample vs the one-pole's 0.8 V), fades the

@@ -654,8 +654,10 @@ class App:
             return {}
 
     def _save_config(self):
+        self._remember_fields()
         c = dict(self.cfg)
-        c.update(geometry=self.root.winfo_geometry(),
+        c.update(field_memory=self._field_mem,
+                 geometry=self.root.winfo_geometry(),
                  state=self.state_var.get(), target=self.target_var.get(),
                  measured=self.meas_var.get(), frf=self.frf_var.get(),
                  f_use=self.fuse_var.get(), f_max=self.fmax_var.get(),
@@ -796,7 +798,7 @@ class App:
         mc = ttk.Combobox(r0, textvariable=self.model_var, state="readonly",
                           width=30, values=[l for l, _ in MODEL_LABELS])
         mc.pack(side="left", padx=(2, 0))
-        mc.bind("<<ComboboxSelected>>", lambda e: self._update_model_fields())
+        mc.bind("<<ComboboxSelected>>", lambda e: self._on_model_change())
 
         r1 = ttk.Frame(vf); r1.grid(row=1, column=0, columnspan=4,
                                     sticky="ew", pady=1)
@@ -860,6 +862,12 @@ class App:
         self._actions.append(b)
         vf.columnconfigure(1, weight=1)
         self._update_model_fields()
+        # What the panel shows belongs to THIS channel and model; the memory
+        # is what every other (channel, model) pair last had. Read once here,
+        # kept current at every switch and on save.
+        self._field_mem = dict(self.cfg.get("field_memory") or {})
+        self._mem_channel = self.channel_var.get()
+        self._mem_model = self._model_key()
 
         # ---- capture post-processing ---------------------------------
         # Settings that shape how a MEASUREMENT is turned into an error --
@@ -1329,11 +1337,66 @@ class App:
         return out
 
     # -------------------------------------------------------- session setup
+    # -- per-channel, per-model memory of the panel's numbers --------------
+    #
+    # Switching channel means switching system: the previous channel's
+    # numbers do not follow -- they are the previous chain's, and inheriting
+    # them silently is exactly the prior-knowledge leak the GEN channel
+    # exists to prevent. But they are not thrown away either: each channel
+    # keeps its own first-shot gain, seed drive and browsed FRF, and each
+    # (channel, model) pair keeps its own parameter boxes, so flipping
+    # EO1 -> EO2 -> EO1, or one pole -> resonant -> one pole, brings back
+    # what was there. Remembered across launches with the rest of the config.
+
+    _MEM_KEYS = ("gain", "tau", "fn", "zeta")
+
+    def _remember_fields(self):
+        """Store what the panel shows under the channel and model it belongs
+        to (the ones last recalled -- not the boxes' current selection,
+        which may already have moved on)."""
+        ch = getattr(self, "_mem_channel", None)
+        if ch is None:
+            return
+        m = self._field_mem.setdefault(ch, {})
+        m["shot_gain"] = self.shotgain_var.get().strip()
+        m["seed_drive"] = self.seed_var.get().strip()
+        m["frf"] = self.frf_var.get().strip()
+        m.setdefault("models", {})[self._mem_model] = {
+            k: self._param_vars[k].get().strip() for k in self._MEM_KEYS}
+
+    def _recall_params(self, ch, key, blank_if_new):
+        """The parameter boxes for (ch, key). A pair never seen before keeps
+        the current numbers on a MODEL switch (a starting point, as before)
+        and blanks them on a CHANNEL switch (the prior-leak guard)."""
+        got = (self._field_mem.get(ch) or {}).get("models", {}).get(key)
+        if got is None:
+            if blank_if_new:
+                for v in self._param_vars.values():
+                    v.set("")
+            return False
+        for k in self._MEM_KEYS:
+            self._param_vars[k].set(got.get(k, ""))
+        return True
+
+    def _on_model_change(self):
+        key = self._model_key()
+        if key != self._mem_model:
+            self._remember_fields()
+            had = self._recall_params(self._mem_channel, key, blank_if_new=False)
+            self._mem_model = key
+            if had:
+                shown = ", ".join(f"{k} {self._param_vars[k].get()}"
+                                  for k in PARAMS_FOR[key]
+                                  if self._param_vars[k].get().strip())
+                self.log(f"{KEY2LABEL[key]}: recalled {shown or 'blank boxes'}")
+        self._update_model_fields()
+
     def _on_channel_change(self):
-        """Switching channel means switching system: model parameters from
-        the previous channel do not follow -- they are the previous chain's
-        numbers, and inheriting them silently is exactly the prior-knowledge
-        leak the GEN channel exists to prevent."""
+        ch = self.channel_var.get()
+        if ch == self._mem_channel:
+            return
+        self._remember_fields()
+        old = self._mem_channel
         for v in self._param_vars.values():
             v.set("")
         self.shotgain_var.set("")
@@ -1344,16 +1407,39 @@ class App:
         # worst case is GEN, whose whole point is that nothing measured on
         # the Trek chains applies until it is loaded on purpose. Blanking it
         # first lets _apply_channel_defaults re-point at the NEW channel's
-        # default (nothing, for GEN).
+        # default (nothing, for GEN), and the memory then brings back the
+        # one this channel had browsed to, if it still exists.
         old_frf = self.frf_var.get().strip()
         self.frf_var.set("")
         self._apply_channel_defaults()
+        m = self._field_mem.get(ch) or {}
+        self.shotgain_var.set(m.get("shot_gain", ""))
+        self.seed_var.set(m.get("seed_drive", ""))
+        if m.get("frf") and os.path.exists(m["frf"]):
+            self.frf_var.set(m["frf"])
+        self._recall_params(ch, self._mem_model, blank_if_new=True)
+        self._mem_channel = ch
+        back = [f"first-shot gain {self.shotgain_var.get()}"
+                if self.shotgain_var.get().strip() else ""]
+        back += [f"{k} {self._param_vars[k].get()}"
+                 for k in PARAMS_FOR[self._mem_model]
+                 if self._param_vars[k].get().strip()]
+        if self.seed_var.get().strip():
+            back.append(f"seed {os.path.basename(self.seed_var.get())}")
+        back = [b for b in back if b]
+        if m:
+            self.log(f"channel {old} -> {ch}: recalled "
+                     + (", ".join(back) if back else "blank boxes")
+                     + f" ({KEY2LABEL[self._mem_model]})")
+        else:
+            self.log(f"channel {old} -> {ch}: nothing remembered for {ch} "
+                     f"yet -- boxes blank; {old}'s numbers are kept for "
+                     f"when you switch back")
         if old_frf and os.path.basename(old_frf) != os.path.basename(
                 self.frf_var.get()):
-            self.log(f"channel changed -- dropped the FRF "
-                     f"{os.path.basename(old_frf)}; it was measured on the "
-                     f"other chain. Browse to this channel's own, or measure "
-                     f"one.")
+            self.log(f"  dropped the FRF {os.path.basename(old_frf)}; it was "
+                     f"measured on the other chain. Browse to this "
+                     f"channel's own, or measure one.")
         if os.path.exists(self.target_var.get().strip()):
             self.do_preview_target(quiet=True)
 
@@ -1864,6 +1950,7 @@ class App:
         except Exception as e:
             return messagebox.showerror("Load state", str(e))
         self.session = s
+        self._remember_fields()     # the panel's numbers, before the state's
         self.channel_var.set(s.channel)
         self.stem_var.set(s.stem)
         self.gamma_var.set(f"{s.loop.gamma:g}")
@@ -1887,6 +1974,7 @@ class App:
                     self.log(f"NOTE: the state's recorded FRF did NOT load, "
                              f"so the loop is resuming without it:\n"
                              f"      {s.frf_error}")
+        self._mem_channel, self._mem_model = s.channel, self._model_key()
         self.log(f"loaded {path}")
         self.log(f"  {s.channel} iteration {s.iteration}, stem {s.stem}, "
                  f"gamma {s.loop.gamma:g}, f_cut {s.loop.f_cut/1e3:g} kHz, "
