@@ -1161,7 +1161,7 @@ class App:
         # their own Home button would silently do nothing (measured).
         for fig in (self.fig_wave, self.fig_err, self.fig_dcor,
                     self.fig_ddel):
-            fig._toolbar.home = self._wrap_home(fig._toolbar)
+            self._wrap_home(fig._toolbar)
 
         # the wiring fields (monitor col, AWG/scope channels, FRF autopoint)
         # follow the remembered channel -- they were built with EO1's values
@@ -4366,11 +4366,25 @@ class App:
         ax.callbacks.connect("xlim_changed", self._on_xlim_changed)
 
     def _wrap_home(self, tb):
+        """Home on this pane homes every linked time axis as well.
+
+        Rebinds the BUTTON, not just the attribute. NavigationToolbar2Tk wires
+        each button with command=getattr(self, callback) at construction, so it
+        holds the original bound method and replacing tb.home afterwards leaves
+        the button calling that - the wrap never fired. Measured on matplotlib
+        3.10 (this panel's Anaconda build) and 3.11: with the attribute alone
+        replaced, clicking Home ran the original and nothing else.
+        """
         orig = tb.home
 
         def home(*args, **kw):
             orig(*args, **kw)          # this pane's own y-reset still works
             self._home_all_time_axes()
+
+        tb.home = home
+        button = getattr(tb, "_buttons", {}).get("Home")
+        if button is not None:
+            button.configure(command=home)
         return home
 
     def _home_all_time_axes(self):
