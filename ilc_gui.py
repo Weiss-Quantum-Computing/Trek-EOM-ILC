@@ -107,7 +107,12 @@ CH_DEFAULTS = {
     # GEN is the blank channel for any other system: unity scale, no
     # calibration tables, and deliberately NO auto-pointed FRF -- nothing
     # measured on the Trek chains applies until it is loaded on purpose.
-    "GEN": dict(mon_col="CH1", awg_ch=1, scope_ch=1,
+    # Monitor on CH2, not CH1: the bench reads the DRIVE from scope channel
+    # <awg_ch> (Auto-set sets its verticals from the drive, the alignment
+    # check cross-correlates it against the record, Measure FRF divides the
+    # monitor by it). With both on CH1 the alignment check was correlating
+    # the monitor against the drive, and an FRF would have been Y/Y = 1.
+    "GEN": dict(mon_col="CH2", awg_ch=1, scope_ch=2,
                 frf=None, colour="#2e7d32"),
 }
 TARGET_COLOUR = "#222222"
@@ -122,7 +127,10 @@ CMP_COLOURS = ["#ff7f0e", "#e377c2", "#8c564b", "#9467bd", "#17becf",
 # ~3.4 mV pk-pk over the 40.25 mV code at 1 V/div, measured 2 Sep 2026 (fold
 # the flat shot's residual on monitor voltage: one sharp period at 40.25 mV,
 # flat at 31.25/25/15.6/62.5). The code scales with V/div; this is the ratio.
-ADC_CODE_PER_VDIV = 0.04025
+ADC_CODE_PER_VDIV = float(os.environ.get("EOMILC_ADC_CODE_PER_VDIV", 0.04025))
+# Another scope has another code: set EOMILC_ADC_CODE_PER_VDIV to its
+# code-per-V/div ratio (fold a flat shot's residual on monitor voltage to
+# find it), or 0 to switch the dither off.
 # The Compare box's grammar, shown where the status line would be once
 # something is loaded -- the hint is only wanted while the box is empty.
 CMP_HINT = ("nothing loaded -- stems in this run folder, e.g. "
@@ -619,6 +627,7 @@ class App:
         self._closing = False         # set by on_close; ask_user watches it
         self.busy = False
         self.session: Session | None = None
+        self._run_id = None           # the bench run in progress (its start time)
         self._modules = None          # (scope_grab, awg_gui) once bench-loaded
         self._wave_redraw = None      # replays the Waveforms tab's last draw
         self._t_range = None          # linked time window across time plots
@@ -2251,6 +2260,13 @@ class App:
                      and sn.get("u") is not None), None)
         if prev is None or len(prev["u"]) != len(u_now):
             return {}
+        if prev.get("run_id") != self._run_id:
+            print(f"         model check: first measurement of this run -- the "
+                  f"change since iteration {it - 1} includes whatever the chain "
+                  f"did while the output was off, so it is not the chain's "
+                  f"answer to the update; skipped (compare from the next "
+                  f"iteration)")
+            return {}
         f_top = s.loop.frf.f_max if s.loop.frf is not None else s.loop.f_cut
         if s.loop.frf is not None:
             fwd = lambda du: s.loop.frf.forward(du, s.loop.dt)
@@ -2297,7 +2313,7 @@ class App:
         otherwise: the noise-floor line is already there every time, and a
         second every-iteration line would bury both."""
         s = self.session
-        p = ilc.plateau(s.loop.history)
+        p = ilc.plateau(s.loop.history, run_id=self._run_id)
         if not p or not p["flat"]:
             return
         print(f"         PLATEAU: peak error flat for {p['n']} iterations "
@@ -2368,6 +2384,7 @@ class App:
         print(f"iteration {it}: error peak {m['peak_err_hv']:7.1f} V   "
               f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
         m.update(self._noise_floor(stk["stack"]))
+        self._run_id = None                  # a Step from files is not a bench run
         m.update(self._model_check_line(it, s.u, y))
         if refit:
             fit_key = cfg["mode"] if cfg["mode"] != "frf" else "resonant"
@@ -2380,6 +2397,7 @@ class App:
         u_next = s.loop.update(s.u, y)
         s.loop.history[-1]["model"] = cfg["desc"]
         s.loop.history[-1]["update_rms"] = ilc.update_rms(u_prev, u_next)
+        s.loop.history[-1]["run_id"] = None
         rep = s.loop.check(u_next)
         print(f"limit check: {rep}")
         if not rep and not force:
@@ -2486,6 +2504,8 @@ class App:
             f = self._floats(awg_ch=self.awgch_var, scope_ch=self.scopech_var)
         except RuntimeError as e:
             return messagebox.showerror("Auto-set", str(e))
+        if not self._wiring_ok(f["awg_ch"], f["scope_ch"], "Auto-set"):
+            return
         period = float(s.t[-1]) + float(s.loop.dt)
         u, v = s.u, s.loop.target
         wname = f"{s.stem}_i{s.iteration:02d}"
@@ -2680,6 +2700,8 @@ class App:
             return messagebox.showerror("Hold", str(e))
         if f["runs"] < 1:
             return messagebox.showerror("Hold", "runs must be at least 1")
+        if not self._wiring_ok(f["awg_ch"], f["scope_ch"], "Hold"):
+            return
         try:
             it_hold, u_hold, src = self._hold_drive(self.holditer_var.get())
         except RuntimeError as e:
@@ -2871,6 +2893,8 @@ class App:
             cfg = self._gather_settings()
         except RuntimeError as e:
             return messagebox.showerror("Bench", str(e))
+        if not self._wiring_ok(f["awg_ch"], f["scope_ch"], "Bench"):
+            return
         self.run_worker(lambda: self._bench_work(cfg, int(f["awg_ch"]),
                                                  int(f["scope_ch"]),
                                                  int(f["iterations"]),
@@ -2895,6 +2919,22 @@ class App:
                              ilc_bench.load_module(ag, "bk4063b_awg_gui"))
         ilc_bench._AWGMOD = self._modules[1]
         return self._modules
+
+    def _wiring_ok(self, awg_ch, scope_ch, what):
+        """The bench reads the DRIVE from scope channel <awg_ch> and the
+        monitor from <scope_ch>: Auto-set sets both verticals, the alignment
+        check correlates the drive channel against the record, Measure FRF
+        divides monitor by drive. The same channel for both is not a
+        configuration, so refuse it with the reason rather than let the
+        alignment check pass on a monitor or an FRF come out as Y/Y."""
+        if int(awg_ch) == int(scope_ch):
+            messagebox.showerror(what, (
+                f"scope ch {scope_ch} is also the drive's channel: the bench "
+                f"reads the AWG's output back from scope CH{awg_ch} (same "
+                f"number as the AWG channel). Put the monitor on another "
+                f"channel and type it in 'scope ch'."))
+            return False
+        return True
 
     def _connect_pair(self):
         """Open both instruments, or neither.
@@ -2928,6 +2968,11 @@ class App:
         s = self.session
         self._apply_settings(cfg)
         _, awgmod = self._bench_modules()
+        # One id per bench run. The first measurement of a run differs from
+        # the last one of the previous run by whatever the chain did while
+        # the output was off -- the model check must not read that as the
+        # chain's answer to an update, nor the plateau as the loop's doing.
+        self._run_id = time.time()
 
         limit = getattr(awgmod, "MAX_ARB_NAME", NAME_LIMIT)
         if len(s.stem) + 4 > limit:
@@ -3003,7 +3048,8 @@ class App:
                 m.update(self._noise_floor(
                     stk["capture"].grid[f"CH{scope_ch}"]))
                 m.update(self._model_check_line(k, u, y))
-                s.snapshots.append(dict(it=k, y=y, m=m, u=u, t_wall=time.time()))
+                s.snapshots.append(dict(it=k, y=y, m=m, u=u, t_wall=time.time(),
+                                        run_id=self._run_id))
                 u_now = u
                 self.msgs.put(("call",
                                lambda u=u_now, y=y, m=m, k=k:
@@ -3013,6 +3059,7 @@ class App:
                     u_new = s.loop.update(u, y)
                     s.loop.history[-1]["model"] = cfg["desc"]
                     s.loop.history[-1]["update_rms"] = ilc.update_rms(u, u_new)
+                    s.loop.history[-1]["run_id"] = self._run_id
                     self._plateau_line()
                     u = u_new
                     s.u = u
@@ -3077,13 +3124,18 @@ class App:
             f"5 MHz. Uses the bench\npanel's channels/repeats/wait; "
             f"output-on asks first, off at the end.\n"
             f"Writes run\\frf_<name>.csv and points the FRF field at it.")
-            ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+            # BELOW the fields, not at a fixed row: this note sat at row 5
+            # from the days of five fields, and when the two ramped ones were
+            # added at rows 5 and 6 it landed on top of them -- the operating
+            # point and its hold time were there, and invisible.
+            ).grid(row=len(fields), column=0, columnspan=2, sticky="w",
+                   pady=(4, 0))
 
         ramp_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(fr, variable=ramp_var, text=(
             "ramped: hold at an operating point and probe THERE, not around "
-            "zero")).grid(row=len(fields), column=0, columnspan=2, sticky="w",
-                          pady=(6, 0))
+            "zero")).grid(row=len(fields) + 1, column=0, columnspan=2,
+                          sticky="w", pady=(6, 0))
         ttk.Label(fr, foreground="#666666", justify="left", text=(
             "The chain is not the same at 5 kV as at 0 V -- the EOM "
             "capacitance is voltage dependent, and at the ramp corners it\n"
@@ -3095,7 +3147,7 @@ class App:
             "session's own record, FRQ and scope window are kept.\n"
             "Tones sit on integer bins of the HOLD, so resolution is 1/hold "
             "and f hi is capped by the session grid.")
-            ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w")
+            ).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w")
 
         def ok():
             try:
@@ -3162,7 +3214,8 @@ class App:
                 "measuring FRF...")
 
         bb = ttk.Frame(fr)
-        bb.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        bb.grid(row=len(fields) + 3, column=0, columnspan=2, sticky="ew",
+                pady=(6, 0))
         ttk.Button(bb, text="Measure", command=ok).pack(side="left",
                                                         expand=True, fill="x")
         ttk.Button(bb, text="Cancel", command=dlg.destroy).pack(
@@ -3564,7 +3617,8 @@ class App:
         # ends. Skipped, and said so, on a scope that cannot report its
         # scale and offset.
         plan, restore = None, []
-        if dither and repeats > 1 and getattr(scope, "try_get", None):
+        if (dither and ADC_CODE_PER_VDIV > 0 and repeats > 1
+                and getattr(scope, "try_get", None)):
             plan = []
             for c in (ch,) + aux:
                 sc = scope.try_get(f":CHANnel{c}:SCALe")

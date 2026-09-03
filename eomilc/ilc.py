@@ -483,7 +483,7 @@ def update_rms(u_prev, u_next) -> float:
     return float(np.sqrt(np.mean(d * d)))
 
 
-def plateau(history: list, n: int = 5, tol: float = 0.15):
+def plateau(history: list, n: int = 5, tol: float = 0.15, run_id=None):
     """Is the loop re-learning noise?
 
     `learnable_band` catches error that has fallen under the measurement's
@@ -497,6 +497,9 @@ def plateau(history: list, n: int = 5, tol: float = 0.15):
     update held near 30 mV rms -- fifteen iterations that put 1.4 V rms of
     50-70 kHz ripple onto the EOM.
 
+    `run_id`, when given, restricts the history to that bench run's entries
+    (plus any without an id), so a restart's jump is not read as a plateau.
+
     Over the last `n` entries: flat when the best peak error there is not
     below the best of everything before it by more than `tol`, AND the
     median update over those `n` is not below the median of the `n` before
@@ -504,8 +507,17 @@ def plateau(history: list, n: int = 5, tol: float = 0.15):
     None before that.  Otherwise a dict with `flat`, the two bests, the two
     update medians, `best_it` (which iteration's drive was best) and `n`.
     """
-    peaks = [h.get("peak_err_hv") for h in history if isinstance(h, dict)]
-    upds = [h.get("update_rms") for h in history if isinstance(h, dict)]
+    history = [h for h in history if isinstance(h, dict)]
+    if run_id is not None:
+        # Only this bench run's entries: the first measurement after a
+        # restart differs from the last of the previous run by the chain's
+        # drift while the output was off, and a window straddling that
+        # reads the jump as the loop's doing. Entries without a run id
+        # (states from before 3 Sep 2026, manual steps) stay in.
+        history = [h for h in history
+                   if h.get("run_id") in (run_id, None)]
+    peaks = [h.get("peak_err_hv") for h in history]
+    upds = [h.get("update_rms") for h in history]
     k = len(upds)                                  # trailing run that has it
     while k > 0 and upds[k - 1] is not None:
         k -= 1

@@ -242,7 +242,10 @@ The **Model** combobox selects what the update divides the error by:
   the EOM — P92PX1B/C's "Trek oscillation" of 2 Sep, ~1 V rms at the
   corners the flat shot never had. With every shot at a different code
   phase the mean takes the pattern's mean. The log names the code size; a
-  warning appears if the scope rounds the offset coarser than a code.
+  warning appears if the scope rounds the offset coarser than a code. Another
+  scope has another code size: set `EOMILC_ADC_CODE_PER_VDIV` to its code as a
+  fraction of the V/div setting (fold a flat shot's residual on monitor voltage
+  to find it), or to 0 to switch the dither off.
 - Every measurement after the first also logs a **model check**: the update
   that made this drive, pushed through the model's own forward operator, against
   the monitor change it actually produced — per band, in the stretch of record
@@ -265,6 +268,11 @@ The **Model** combobox selects what the update divides the error by:
   edge to that frequency, or stop. P92PX1B (2 Sep): the peak error stopped
   falling at iteration 5; iterations 6–20 put 26 mV rms of 50–70 kHz into
   the drive and 1.4 V rms of ripple onto the EOM the flat shot never had.
+- Both the model check and the plateau know about **restarts**: every bench run
+  stamps its measurements, the first measurement of a run is not compared
+  with the last of the previous one (the change includes whatever the chain
+  did while the output was off), and the plateau only reads the current run.
+  A manual Step counts as its own run.
 - The noise-floor line cannot see one thing: ripple the loop *created* from
   amplified scatter is repeatable, so it reads as genuine error and the loop
   keeps "correcting" it while injecting fresh scatter at the same gain. That
@@ -459,7 +467,7 @@ and it behaves like any entry again.
 | **Target** *(config)* | CSV of the desired waveform: first column time (`time_us` or `time_s`), second column value in **output units** (EOM volts on EO1/EO2, measured volts on GEN — divided by the channel's `mon_scale` on load). Comment lines start with `#`. Auto-plots on selection. |
 | **Build…** | Generates a target from scratch. Dialog fields: *shape* (cosine-edged ramp up-hold-return, or half-sine pulse), *peak* in output units, *lead / rise / hold / fall / tail* in ms (lead and tail are flat zero — the level the AWG idles on), *dt* in µs (the loop grid; 2 µs is the campaign standard). |
 | **Plot** | Re-draws the target preview on demand: file contents on top, the predicted AWG output of the flat first shot below, against the ±full-scale rails. Sends nothing. |
-| **Channel** | Which chain this campaign runs on. Sets the output scale (`mon_scale`: ×1000 on EO1/EO2, ×1 on GEN), the divider and the limit set used by the limit guard (`Channel.limits`: the Trek numbers on EO1/EO2, open apart from the ±10 V rail on GEN), the bench wiring defaults (AWG ch / scope ch / monitor col), and the auto-pointed FRF (none on GEN). **Switching clears the gains, the model parameters and the FRF file** — numbers never follow you between systems, and on the measured-FRF rung the FRF *is* the model, so a browsed one is dropped too (logged when it happens) and the new channel's default takes its place: nothing on GEN. The last choice is remembered between launches, and the wiring fields follow it at startup. *(state + config)* |
+| **Channel** | Which chain this campaign runs on. GEN's wiring defaults put the monitor on scope CH2, because the bench always reads the *drive* back from the scope channel with the AWG's number (Auto-set, the alignment check and Measure FRF all rely on it) — and every bench action refuses a monitor on that same channel. Sets the output scale (`mon_scale`: ×1000 on EO1/EO2, ×1 on GEN), the divider and the limit set used by the limit guard (`Channel.limits`: the Trek numbers on EO1/EO2, open apart from the ±10 V rail on GEN), the bench wiring defaults (AWG ch / scope ch / monitor col), and the auto-pointed FRF (none on GEN). **Switching clears the gains, the model parameters and the FRF file** — numbers never follow you between systems, and on the measured-FRF rung the FRF *is* the model, so a browsed one is dropped too (logged when it happens) and the new channel's default takes its place: nothing on GEN. The last choice is remembered between launches, and the wiring fields follow it at startup. *(state + config)* |
 | **Name stem** *(state + config)* | ≤ 7 characters. Uploads are named `<stem>_iNN`; the generator stores `<name>.bin` and wedges its front panel past 15 stored characters, so the cap is enforced, not advisory. Restored by Load state, and the last typed value is remembered between launches. |
 | **first-shot gain** *(config)* | The conversion gain for the flat first shot **only**: `u₀ = target / gain`. Deliberately separate from the model gain — tuning or refitting the correction model never rescales what iteration 0 plays. Blank = falls back to the model gain (logged). Remembered between launches (it belongs to the remembered channel), but still **cleared when the channel is switched** — the prior-leak guard. |
 | **full scale V** *(state)* | AWG volts at record value 1.0 — the fixed DAC mapping every drive file assumes. Default 10, which requires **AMP 20 Vpp, OFST 0** on the generator (bench mode verifies and refuses on mismatch). Also draws the preview rails and scales the `_awg.csv` copies. |

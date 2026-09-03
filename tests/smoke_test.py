@@ -601,6 +601,7 @@ print(f"[16] GEN init from scratch: {s.loop.plant}, "
 cap1 = os.path.join(SCRATCH, "genx_cap1_001.csv")
 pd.DataFrame({"Time (s)": s.t, "CH1": 0.4 * s.u}).to_csv(cap1, index=False)
 app.meas_var.set(os.path.join(SCRATCH, "genx_cap1*.csv"))
+app.moncol_var.set("CH1")      # these fakes carry the monitor in CH1; GEN's default is CH2 now (the drive's channel is CH<awg_ch>)
 app.do_step(); pump_until_idle()
 m1 = s.snapshots[-1]["m"]
 assert 0.2 < m1["peak_err_hv"] < 0.6, \
@@ -726,6 +727,42 @@ for _k, _flag in ((2.0, False), (4.0, True)):
 assert app._model_check_line(90, _u90, _y90) == {}                 # nothing before it
 _ms.snapshots[:] = _keep; _ms.loop.gamma = _g_keep
 print("[27d] model-check line: a 2x chain reported (lam 0.2, no flag), a 4x chain flagged 'does not contract ... overshoots'; nothing before the first snapshot")
+
+# [27e] restart awareness. A bench run stamps its measurements and history
+# with a run id; the model check declines to compare across runs (the change
+# then includes the chain's drift while the output was off) and the plateau
+# only looks at the current run's entries. The wiring guard refuses a monitor
+# on the drive's scope channel, and GEN's defaults no longer collide.
+_ms = app.session; _keep = list(_ms.snapshots); _hk = list(_ms.loop.history); _g_keep = _ms.loop.gamma
+_u90 = np.zeros_like(_ms.t); _y90 = np.zeros_like(_ms.t)
+_ms.snapshots.append(dict(it=90, y=_y90, m={}, u=_u90, t_wall=0.0, run_id=111.0))
+app._run_id = 222.0                                         # a new run since
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _mc = app._model_check_line(91, _u90 + _du, _y90 + 2 * _fwd(_du))
+assert _mc == {} and "first measurement of this run" in _buf.getvalue(), _buf.getvalue()
+app._run_id = 111.0                                         # same run: compared as before
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _mc = app._model_check_line(91, _u90 + _du, _y90 + 2 * _fwd(_du))
+assert "model_ratio_worst" in _mc and abs(_mc["model_ratio_worst"] - 2) < 0.3, _mc
+_flatA = _hist([100, 50, 25, 12, 6, 4], [.040, .020, .010, .006, .003, .002])   # run A converging
+for _h in _flatA: _h["run_id"] = 111.0
+_flatB = _hist([30, 3.5, 3.4, 3.6, 3.5, 3.4, 3.5], [.030, .030, .029, .031, .030, .030, .029])   # run B after a restart: flat
+for _h in _flatB: _h["run_id"] = 222.0
+assert ilc_gui.ilc.plateau(_flatA + _flatB, run_id=222.0)["flat"] is True
+assert ilc_gui.ilc.plateau(_flatA + _flatB[:3], run_id=222.0) is None       # too few in this run
+assert ilc_gui.ilc.plateau(_flatA + _flatB, run_id=111.0)["flat"] is False  # run A alone: converging
+_ms.snapshots[:] = _keep; _ms.loop.history[:] = _hk; _ms.loop.gamma = _g_keep; app._run_id = None
+assert ilc_gui.CH_DEFAULTS["GEN"]["scope_ch"] != ilc_gui.CH_DEFAULTS["GEN"]["awg_ch"]
+assert ilc_gui.CH_DEFAULTS["GEN"]["mon_col"] == f"CH{ilc_gui.CH_DEFAULTS['GEN']['scope_ch']}"
+import tkinter.messagebox as _mb
+_said = []; _orig = _mb.showerror; _mb.showerror = lambda t, m, **k: _said.append(m)
+assert app._wiring_ok(1, 1, "Bench") is False and "also the drive's channel" in _said[-1]
+assert app._wiring_ok(1, 3, "Bench") is True and len(_said) == 1
+_mb.showerror = _orig
+print("[27e] restart-aware: model check skips the first measurement of a run and compares within it; "
+      "plateau sees one run at a time; GEN monitor on its own channel; same-channel wiring refused")
 
 # Fit must recover the true gain from the snapshot's own played (u, y) pair
 app.do_fit(); pump_until_idle(); root.update()
@@ -1285,6 +1322,23 @@ except RuntimeError as e:
 app.fuse_var.set("100e3"); app.fmax_var.set("150e3")
 app.model_var.set(cur_model); app._update_model_fields()
 print("[41] zero-width/inverted tapers refused with the 0.9x guidance")
+
+# [41b] the Measure FRF dialog: seven fields on their own rows, the notes and
+# the buttons below them. The note used to be gridded at row 5, on top of the
+# ramped probe's 'hold V' and 'hold ms' -- the operating point was there and
+# could not be seen.
+_before = set(root.winfo_children())
+app.do_measure_frf(); root.update()
+_dlg = next(w for w in root.winfo_children() if w not in _before); _fr = _dlg.winfo_children()[0]
+_rows = {}
+for _w in _fr.winfo_children():
+    _gi = _w.grid_info(); _rows.setdefault(int(_gi["row"]), []).append(int(_gi.get("columnspan", 1)))
+_labels = [w.cget("text") for w in _fr.winfo_children() if w.winfo_class() == "TLabel"]
+assert "hold V (ramped only)" in _labels and "hold ms (ramped only)" in _labels
+_clash = [r for r, spans in _rows.items() if 2 in spans and len(spans) > 1]
+assert not _clash, f"a spanning note shares a row with a field: {_clash}"
+_dlg.destroy(); root.update()
+print(f"[41b] Measure FRF dialog: {len(_rows)} rows, hold V / hold ms visible, no note on top of a field")
 
 # the state records which inverse drives the campaign, the summary shows
 # it, and Load restores the panel to it
