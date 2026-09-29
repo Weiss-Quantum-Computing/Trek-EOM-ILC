@@ -68,6 +68,7 @@ from matplotlib.figure import Figure
 from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
 from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
 import ilc_bench            # the debugged bench helpers; main() is guarded
+import ilc_batch            # batch runs: X1 + X2 together, a list of targets
 import run_ilc              # load_target and the state-file conventions
 
 # Remembered between sessions, kept out of the repo so a git pull cannot
@@ -647,6 +648,383 @@ class _QueueWriter(io.TextIOBase):
             self.buf = ""
 
 
+# ------------------------------------------------------------------ batch
+class BatchWindow:
+    """The Batch window: build, check, simulate and run an ilc_batch plan --
+    a list of target pairs trained X1 and X2 together, one after another.
+    Every run goes through App.run_worker, so the panel's busy state and its
+    Stop apply; the window only displays and collects settings, and can be
+    closed and reopened while a batch runs."""
+
+    COLS = (("stem", "campaign", 72), ("pts", "points", 52),
+            ("ms", "record ms", 72), ("est", "~min", 46),
+            ("status", "status", 88), ("X1", "X1", 150), ("X2", "X2", 150),
+            ("note", "note", 280))
+    LOOP = (("max iterations", "max_iterations", 4, int),
+            ("min", "min_iterations", 3, int),
+            ("stop at rms V", "stop_rms_v", 5, float),
+            ("shots", "repeats", 4, int))
+
+    def __init__(self, app):
+        self.app = app
+        self.plan = None
+        self.view_sim = False        # the table shows the run/sim manifest
+        self.est = {}                # stem -> estimated seconds (Check plan)
+        w = self.win = tk.Toplevel(app.root)
+        w.title("EOM-ILC -- batch (X1 and X2 together)")
+        w.geometry(app.cfg.get("batch_geometry", "960x540"))
+        w.protocol("WM_DELETE_WINDOW", self.close)
+        top = ttk.Frame(w, padding=4)
+        top.pack(fill="both", expand=True)
+
+        r = ttk.Frame(top)
+        r.pack(fill="x")
+        ttk.Label(r, text="Plan").pack(side="left")
+        # buttons before the entry: pack order decides who survives (CLAUDE.md)
+        ttk.Button(r, text="New plan...", command=self.new_plan).pack(side="right")
+        ttk.Button(r, text="Reload", command=self.load).pack(side="right", padx=2)
+        ttk.Button(r, text="...", width=3, command=self.browse).pack(side="right")
+        e = ttk.Entry(r, textvariable=app.batchplan_var)
+        e.pack(side="left", fill="x", expand=True, padx=2)
+        app._show_tail(e, app.batchplan_var)
+        e.bind("<Return>", lambda ev: self.load())
+
+        r = ttk.Frame(top)
+        r.pack(fill="x", pady=(3, 0))
+        self.loop_vars = {}
+        for lab, key, width, _ in self.LOOP:
+            ttk.Label(r, text=lab).pack(side="left", padx=(0, 2))
+            v = tk.StringVar()
+            ttk.Entry(r, textvariable=v, width=width).pack(side="left", padx=(0, 8))
+            self.loop_vars[key] = v
+        ttk.Label(r, text="(written into the plan when you run it)",
+                  foreground="#666666").pack(side="left")
+
+        tf = ttk.Frame(top)
+        tf.pack(fill="both", expand=True, pady=3)
+        self.tree = ttk.Treeview(tf, columns=[c[0] for c in self.COLS],
+                                 show="headings", height=12, selectmode="browse")
+        for key, head, width in self.COLS:
+            self.tree.heading(key, text=head)
+            self.tree.column(key, width=width, stretch=(key == "note"),
+                             anchor="w")
+        ysb = ttk.Scrollbar(tf, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=ysb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        ysb.pack(side="left", fill="y")
+        self.tree.bind("<Double-1>", lambda ev: self.open_selected())
+
+        r = ttk.Frame(top)
+        r.pack(fill="x")
+        ttk.Checkbutton(r, text="follow in the plots:",
+                        variable=app.batchfollow_var).pack(side="left")
+        ttk.Combobox(r, textvariable=app.batchfollowch_var, values=("X1", "X2"),
+                     width=4, state="readonly").pack(side="left", padx=(2, 10))
+        ttk.Checkbutton(r, text="also finished campaigns (continue them)",
+                        variable=app.batchredo_var).pack(side="left")
+        ttk.Checkbutton(r, text="every iteration under its own AWG name",
+                        variable=app.batchgui_var).pack(side="left", padx=(10, 0))
+
+        r = ttk.Frame(top)
+        r.pack(fill="x", pady=(3, 0))
+        self.btns = []
+        for text, mode in (("Check plan", "check"), ("Simulate", "sim"),
+                           ("Run on bench", "bench")):
+            b = ttk.Button(r, text=text, command=lambda m=mode: app.do_batch_run(m))
+            b.pack(side="left", padx=(0, 4))
+            self.btns.append(b)
+        self.stop_btn = ttk.Button(r, text="Stop", command=app.stop_evt.set)
+        self.stop_btn.pack(side="left")
+        self.status = ttk.Label(r, text="", font=MONO)
+        self.status.pack(side="left", padx=8)
+        ttk.Label(top, foreground="#666666", justify="left", text=(
+            "AWG CH1/CH2 drive X1/X2; scope CH1/CH2 read the drives, CH3/CH4 the "
+            "monitors. Close the AWG GUI and Scope Grab first.\n"
+            "Set AMP/OFST/load/burst once (Auto-set); the batch only checks them. "
+            "Outputs go ON after one confirmation, OFF between campaigns.\n"
+            "Double-click a campaign to load its state (the followed channel) "
+            "in the panel. Simulate writes to run/sim, never to run.")
+                  ).pack(fill="x")
+        self.set_busy(app.busy)
+        self.load()
+
+    # -- window ---------------------------------------------------------
+    def close(self):
+        self.app.cfg["batch_geometry"] = self.win.winfo_geometry()
+        self.app._batch_win = None
+        self.win.destroy()
+
+    def set_busy(self, busy):
+        for b in self.btns:
+            b.configure(state="disabled" if busy else "normal")
+        self.stop_btn.configure(state="normal" if busy else "disabled")
+
+    def browse(self):
+        p = filedialog.askopenfilename(
+            parent=self.win, title="Batch plan",
+            initialdir=os.path.dirname(self.app.batchplan_var.get()) or RUN_DIR,
+            filetypes=(("Batch plan", "*.json"), ("All files", "*.*")))
+        if p:
+            self.app.batchplan_var.set(p)
+            self.load()
+
+    # -- the plan and its table -------------------------------------------
+    def load(self):
+        self.tree.delete(*self.tree.get_children())
+        self.plan, self.est = None, {}
+        path = self.app.batchplan_var.get().strip()
+        if not path:
+            self.status.configure(text="no plan -- pick one or make one")
+            return
+        try:
+            self.plan = ilc_batch.load_plan(path)
+        except (OSError, ValueError, KeyError, SystemExit) as e:
+            self.status.configure(text=f"cannot read the plan: {e}")
+            return
+        for _, key, _, _ in self.LOOP:
+            self.loop_vars[key].set(f"{self.plan['loop'][key]:g}")
+        for c in self.plan["campaigns"]:
+            self.tree.insert("", "end", iid=c["stem"], values=(c["stem"],))
+        self.view_sim = False
+        self.show_manifest()
+        n = len(self.plan["campaigns"])
+        self.status.configure(text=f"{self.plan.get('name', '')}: {n} campaign(s)"
+                                   f" -- Check plan for points and times")
+
+    def _set(self, stem, **cols):
+        if not self.tree.exists(stem):
+            return
+        vals = dict(zip([c[0] for c in self.COLS], self.tree.item(stem, "values")))
+        vals.update({k: v for k, v in cols.items()})
+        self.tree.item(stem, values=[vals.get(c[0], "") for c in self.COLS])
+
+    def show_manifest(self):
+        if self.plan is None:
+            return
+        man = ilc_batch.read_manifest(self.plan, self.view_sim)
+        tag = " (sim)" if self.view_sim else ""
+        for c in self.plan["campaigns"]:
+            e = man["campaigns"].get(c["stem"])
+            if not e:
+                self._set(c["stem"], status="to do", X1="", X2="", note="")
+                continue
+            self._set(c["stem"], status=e.get("status", "?") + tag,
+                      **self._entry_cols(e))
+
+    @staticmethod
+    def _entry_cols(e):
+        cols, stops = {}, []
+        for key, ch in (e.get("channels") or {}).items():
+            cols[key] = (f"keep i{ch['keeper_iteration']:02d} "
+                         f"{ch['keeper_rms_v']:.2f} V")
+            stops.append(f"{key} {ch['stop']}")
+        note = e.get("error") or ", ".join(stops)
+        if e.get("card"):
+            c = e["card"]
+            note += (f"; card: {len(c.get('files', []))} files, up "
+                     f"{c.get('up_ms', 0):.3f} ms, down {c.get('down_ms', 0):.3f} ms")
+        if e.get("card_error"):
+            note += f"; card NOT written: {e['card_error']}"
+        if e.get("minutes") is not None:
+            note += f"  ({e['minutes']:.0f} min)"
+        cols["note"] = note
+        return cols
+
+    def set_rows(self, rows):
+        """Check plan's result: points, record length, estimate, problems."""
+        self.est = {r["stem"]: r["est_s"] for r in rows}
+        for r in rows:
+            cols = dict(pts=r["n"] or "", ms=f"{r['period_ms']:.3f}" if r["n"] else "",
+                        est=f"{r['est_s']/60:.0f}" if r["n"] else "")
+            if r["error"]:
+                cols.update(status="PROBLEM", note=r["error"])
+            elif any(r.get("start_it", {}).values()):
+                cols["note"] = "resumes at " + ", ".join(
+                    f"{k} i{v:02d}" for k, v in r["start_it"].items())
+            self._set(r["stem"], **cols)
+        bad = sum(not r["ok"] for r in rows)
+        self.status.configure(text=f"~{sum(self.est.values())/3600:.1f} h at the "
+                                   f"iteration cap; {bad} with problems")
+
+    def estimate_s(self, stems):
+        return sum(self.est.get(s, 0.0) for s in stems)
+
+    def loop_overrides(self):
+        out = {}
+        for lab, key, _, kind in self.LOOP:
+            txt = self.loop_vars[key].get().strip()
+            try:
+                v = kind(float(txt)) if kind is int else kind(txt)
+            except ValueError:
+                raise ValueError(f"{lab}: {txt!r} is not a number")
+            if v <= 0:
+                raise ValueError(f"{lab} must be positive")
+            out[key] = v
+        if out["min_iterations"] > out["max_iterations"]:
+            raise ValueError("min iterations is above max iterations")
+        if out["repeats"] < 16:
+            raise ValueError("fewer than 16 shots cannot dither the scope's "
+                             "word lattice (see the bench loop's check)")
+        return out
+
+    def state_paths(self, stem):
+        camp = next(c for c in self.plan["campaigns"] if c["stem"] == stem)
+        d = self.plan["_run_dir"] + (os.sep + "sim" if self.view_sim else "")
+        short = camp.get("awg", stem)
+        return {k: os.path.join(d, f"drive_{short}{k}.state.npz")
+                for k in camp.get("channels", ["X1", "X2"])}
+
+    def open_selected(self):
+        sel = self.tree.selection()
+        if not sel or self.plan is None:
+            return
+        paths = self.state_paths(sel[0])
+        p = paths.get(self.app.batchfollowch_var.get()) or next(iter(paths.values()))
+        if not os.path.exists(p):
+            self.status.configure(text=f"no state yet: {os.path.basename(p)}")
+            return
+        self.app.state_var.set(p)
+        self.app.do_load()
+
+    # -- events from a running batch (main thread) -------------------------
+    def event(self, kind, info):
+        if kind == "batch":
+            self.view_sim = info["simulated"]
+            for stem in info["todo"]:
+                self._set(stem, status="queued" + (" (sim)" if self.view_sim else ""),
+                          X1="", X2="")
+        elif kind == "campaign":
+            self._set(info["stem"], status="running")
+            if self.tree.exists(info["stem"]):
+                self.tree.see(info["stem"])
+        elif kind == "iteration":
+            txt = f"i{info['it']:02d} {info['rms_v']:.2f} V"
+            if info["stop"]:
+                txt += f" ({info['stop']})"
+            self._set(info["stem"], **{info["key"]: txt})
+            self.status.configure(text=f"{info['stem']} {info['key']} {txt}")
+        elif kind == "campaign_end":
+            e = info["entry"]
+            self._set(info["stem"], status=e.get("status", "?")
+                      + (" (sim)" if self.view_sim else ""), **self._entry_cols(e))
+        elif kind == "batch_end":
+            self.show_manifest()
+            self.status.configure(text="batch ended -- see the log")
+
+    # -- new plan -------------------------------------------------------------
+    def new_plan(self):
+        PlanDialog(self)
+
+
+class PlanDialog:
+    """New plan...: target pairs from a folder, in run order, trained with the
+    settings of two existing states (ilc_batch.build_plan)."""
+
+    def __init__(self, bw):
+        self.bw = bw
+        app = bw.app
+        d = self.win = tk.Toplevel(bw.win)
+        d.title("New batch plan")
+        d.transient(bw.win)
+        f = ttk.Frame(d, padding=6)
+        f.pack(fill="both", expand=True)
+        plan = bw.plan or {}
+        st = plan.get("settings", {})
+        self.targets = tk.StringVar(value=plan.get("_targets_dir", ""))
+        self.stems = tk.StringVar()
+        self.x1 = tk.StringVar(value=(st.get("X1") or {}).get("from_state", ""))
+        self.x2 = tk.StringVar(value=(st.get("X2") or {}).get("from_state", ""))
+        self.name = tk.StringVar(value="")
+        self.card = tk.StringVar(value=str((plan.get("card") or {}).get("n", 2500)))
+        rows = (("Targets folder", self.targets, self.pick_folder),
+                ("X1 trained like", self.x1, lambda: self.pick_state(self.x1)),
+                ("X2 trained like", self.x2, lambda: self.pick_state(self.x2)))
+        for i, (lab, var, cmd) in enumerate(rows):
+            ttk.Label(f, text=lab).grid(row=2 * i, column=0, sticky="w")
+            e = ttk.Entry(f, textvariable=var, width=60)
+            e.grid(row=2 * i, column=1, sticky="ew", padx=2)
+            app._show_tail(e, var)
+            ttk.Button(f, text="...", width=3, command=cmd).grid(row=2 * i, column=2)
+            hint = ("folder of target_<stem>X1.csv / X2.csv pairs" if i == 0 else
+                    "a state whose model, gains, notches and FRF to copy "
+                    "(blank = the production FRF defaults)")
+            ttk.Label(f, text=hint, foreground="#666666").grid(
+                row=2 * i + 1, column=1, sticky="w")
+        ttk.Label(f, text="Stems, run order").grid(row=6, column=0, sticky="w")
+        ttk.Entry(f, textvariable=self.stems, width=60).grid(
+            row=6, column=1, columnspan=2, sticky="ew", padx=2)
+        self.found = ttk.Label(f, text="", foreground="#666666", wraplength=520,
+                               justify="left")
+        self.found.grid(row=7, column=1, columnspan=2, sticky="w")
+        r = ttk.Frame(f)
+        r.grid(row=8, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(r, text="Name").pack(side="left")
+        ttk.Entry(r, textvariable=self.name, width=12).pack(side="left", padx=(2, 12))
+        ttk.Label(r, text="card samples").pack(side="left")
+        ttk.Entry(r, textvariable=self.card, width=6).pack(side="left", padx=2)
+        ttk.Label(r, text="(0 = no card files)", foreground="#666666").pack(side="left")
+        r = ttk.Frame(f)
+        r.grid(row=9, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        ttk.Button(r, text="Cancel", command=d.destroy).pack(side="right")
+        ttk.Button(r, text="Save plan as...", command=self.save).pack(
+            side="right", padx=4)
+        f.columnconfigure(1, weight=1)
+        self.targets.trace_add("write", lambda *_: self.refresh())
+        self.refresh()
+
+    def refresh(self):
+        stems = ilc_batch.target_stems(self.targets.get().strip())
+        self.found.configure(text=(f"{len(stems)} pairs found: " + ", ".join(stems))
+                             if stems else "no target pairs in that folder")
+        if stems and not self.stems.get().strip():
+            self.stems.set(", ".join(stems))
+
+    def pick_folder(self):
+        p = filedialog.askdirectory(parent=self.win, title="Targets folder",
+                                    initialdir=self.targets.get() or HERE)
+        if p:
+            self.stems.set("")
+            self.targets.set(p)
+
+    def pick_state(self, var):
+        p = filedialog.askopenfilename(
+            parent=self.win, title="State to copy the settings of",
+            initialdir=RUN_DIR, filetypes=(("State", "*.npz"), ("All files", "*.*")))
+        if p:
+            # inside the repo: stored relative, so the plan works from any clone
+            rel = os.path.relpath(p, HERE)
+            var.set(p if rel.startswith("..") else rel.replace(os.sep, "/"))
+
+    def save(self):
+        name = self.name.get().strip()
+        stems = [x.strip() for x in re.split(r"[,\s]+", self.stems.get()) if x.strip()]
+        try:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                raise ValueError("give the plan a name (letters, digits, - and _)")
+            if not stems:
+                raise ValueError("no stems")
+            card = int(self.card.get().strip() or 0)
+        except ValueError as e:
+            return messagebox.showerror("New plan", str(e), parent=self.win)
+        targets = self.targets.get().strip()
+        out = filedialog.asksaveasfilename(
+            parent=self.win, title="Save plan", defaultextension=".json",
+            initialdir=os.path.dirname(os.path.abspath(targets)) if targets else RUN_DIR,
+            initialfile=f"batch_{name}.json",
+            filetypes=(("Batch plan", "*.json"),))
+        if not out:
+            return
+        try:
+            plan = ilc_batch.build_plan(targets, stems, out, name, self.x1.get().strip(),
+                                        self.x2.get().strip(), card)
+        except (ValueError, OSError) as e:
+            return messagebox.showerror("New plan", str(e), parent=self.win)
+        self.bw.app.log(f"wrote {out}: {len(plan['campaigns'])} campaigns")
+        self.bw.app.batchplan_var.set(out)
+        self.win.destroy()
+        self.bw.load()
+
+
 # -------------------------------------------------------------------- app
 class App:
     def __init__(self, root):
@@ -707,7 +1085,12 @@ class App:
                  keep_native=self.keepnative_var.get(),
                  keep_verticals=self.keepvert_var.get(),
                  seed_drive=self.seed_var.get(),
-                 repeats=self.repeats_var.get(), iterations=self.iters_var.get())
+                 repeats=self.repeats_var.get(), iterations=self.iters_var.get(),
+                 batch_plan=self.batchplan_var.get(),
+                 batch_follow=self.batchfollow_var.get(),
+                 batch_follow_ch=self.batchfollowch_var.get())
+        if self._batch_win is not None:
+            c["batch_geometry"] = self._batch_win.win.winfo_geometry()
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
             with open(CONFIG_PATH, "w") as f:
@@ -1009,9 +1392,22 @@ class App:
         self.bench_btn = ttk.Button(r2, text="Run bench loop", command=self.do_bench)
         self.bench_btn.pack(side="left", fill="x", expand=True)
         self._actions.append(self.bench_btn)
+        # not in _actions: opening the window is harmless mid-run, and it is
+        # how a batch in progress is watched after its window was closed
+        ttk.Button(r2, text="Batch...", command=self.do_batch).pack(
+            side="left", padx=(4, 0))
         self.stop_btn = ttk.Button(r2, text="Stop", command=self.stop_evt.set,
                                    state="disabled")
         self.stop_btn.pack(side="left", padx=(4, 0))
+        # the Batch window's settings live here, so they outlast the window
+        self._batch_win = None
+        self.batchplan_var = tk.StringVar(value=self.cfg.get("batch_plan", ""))
+        self.batchfollow_var = tk.BooleanVar(
+            value=bool(self.cfg.get("batch_follow", True)))
+        self.batchfollowch_var = tk.StringVar(
+            value=self.cfg.get("batch_follow_ch", "X1"))
+        self.batchredo_var = tk.BooleanVar(value=False)
+        self.batchgui_var = tk.BooleanVar(value=False)
         r3 = ttk.Frame(bf); r3.grid(row=4, column=0, sticky="ew", pady=(2, 0))
         ttk.Label(r3, text="runs").pack(side="left")
         self.holdruns_var = tk.StringVar(value=str(self.cfg.get("hold_runs",
@@ -1314,6 +1710,8 @@ class App:
         for b in self._actions:
             b.configure(state=state)
         self.stop_btn.configure(state="normal" if busy else "disabled")
+        if self._batch_win is not None:
+            self._batch_win.set_busy(busy)
         # Clear has a second condition -- there has to be something loaded --
         # so it re-derives its own state rather than taking the blanket one
         self._refresh_compare_status()
@@ -3290,6 +3688,127 @@ class App:
             scope.close()
             print("instruments closed")
         print("\n" + s.loop.report())
+
+    # ---------------------------------------------------------------- batch
+    def do_batch(self):
+        if self._batch_win is None:
+            self._batch_win = BatchWindow(self)
+        else:
+            self._batch_win.win.deiconify()
+            self._batch_win.win.lift()
+
+    def do_batch_run(self, mode):
+        """mode: 'check' (no instruments), 'sim' (eomilc.simbench, files in
+        run/sim), 'bench' (both Treks, after one confirmation)."""
+        if self.busy:
+            return
+        w = self._batch_win
+        path = self.batchplan_var.get().strip()
+        if not path or not os.path.exists(path):
+            return messagebox.showerror("Batch", "pick a plan file first "
+                                        "(or make one with New plan...)",
+                                        parent=w.win)
+        try:
+            over = w.loop_overrides()
+            plan = ilc_batch.load_plan(path)
+        except (ValueError, OSError, SystemExit) as e:
+            return messagebox.showerror("Batch", str(e), parent=w.win)
+        # The plan file is the record of how a batch was trained: numbers
+        # typed in the window are written into it before anything runs.
+        changed = {k: v for k, v in over.items() if plan["loop"].get(k) != v}
+        if changed and mode != "check":
+            with open(path) as f:
+                raw = json.load(f)
+            raw.setdefault("loop", {}).update(changed)
+            with open(path, "w") as f:
+                json.dump(raw, f, indent=1)
+            self.log("plan updated: " + ", ".join(
+                f"{k} {plan['loop'].get(k)} -> {v}" for k, v in changed.items()))
+            plan = ilc_batch.load_plan(path)
+        redo, gui = self.batchredo_var.get(), self.batchgui_var.get()
+        if mode == "bench":
+            man = ilc_batch.read_manifest(plan)
+            todo = [c["stem"] for c in plan["campaigns"] if redo or
+                    man["campaigns"].get(c["stem"], {}).get("status") != "done"]
+            if not todo:
+                return messagebox.showinfo(
+                    "Batch", "every campaign in this plan is done (tick 'also "
+                    "finished campaigns' to continue them)", parent=w.win)
+            est = w.estimate_s(todo)
+            lp = plan["loop"]
+            if not messagebox.askyesno("Run the batch on the bench", (
+                    f"{len(todo)} campaign(s): {', '.join(todo)}\n\n"
+                    f"For each one: both AWG outputs OFF, FRQ set, both drives "
+                    f"uploaded and the channel setup checked (AMP, OFST, load, "
+                    f"burst), then CH1 and CH2 switched ON to drive both Treks, "
+                    f"trained for up to {lp['max_iterations']} iterations, and "
+                    f"switched OFF again before the next.\n\n"
+                    + (f"At most ~{est/3600:.1f} h (from Check plan). " if est else "")
+                    + "Stop ends it at the next shot: outputs off, states "
+                    "kept, and running again resumes.\n\n"
+                    "Switch the outputs ON for this batch?"), parent=w.win):
+                return
+        self.run_worker(lambda: self._batch_work(path, mode, redo, gui, over),
+                        {"check": "checking the plan...",
+                         "sim": "batch running (SIMULATED)...",
+                         "bench": "batch running on the bench..."}[mode])
+
+    def _batch_work(self, path, mode, redo, gui_names, over):
+        import types
+        plan = ilc_batch.load_plan(path)
+        plan["loop"].update(over)       # Check plan: the numbers in the window
+        if mode == "check":
+            rows = ilc_batch.plan_rows(plan)
+            lp = plan["loop"]
+            print(f"plan {plan.get('name', '')}: {len(rows)} campaigns; "
+                  f"{lp['max_iterations']} iterations max (min "
+                  f"{lp['min_iterations']}), stop at {lp['stop_rms_v']} V rms, "
+                  f"{lp['repeats']} shots")
+            for r in rows:
+                if r["error"]:
+                    print(f"  {r['stem']}: {r['error']}")
+            bad = sum(not r["ok"] for r in rows)
+            print(f"  ~{sum(r['est_s'] for r in rows)/3600:.1f} h at the "
+                  f"iteration cap; {bad} campaign(s) with problems")
+            self.msgs.put(("call", lambda: self._batch_win and
+                           self._batch_win.set_rows(rows)))
+            return
+        sim = mode == "sim"
+        bench = None if sim else self._connect_pair()
+        opts = types.SimpleNamespace(simulate=sim, allow_output_on=True,
+                                     redo=redo, gui_names=gui_names)
+        ilc_batch.run_batch(
+            plan, opts, log=print, stop=self.stop_evt, bench=bench,
+            on_event=lambda k, i: self.msgs.put(
+                ("call", lambda: self._batch_event(k, i))))
+
+    def _batch_event(self, kind, info):
+        """Main thread: a batch event, for the window (if open), the progress
+        bar and the plots."""
+        if kind == "campaign":
+            self.progress.configure(maximum=max(info["n"], 1),
+                                    value=info["index"])
+            self.status.configure(text=f"batch: {info['stem']} "
+                                       f"({info['index'] + 1}/{info['n']})")
+        elif kind == "saved" and self.batchfollow_var.get():
+            self._batch_follow(info["states"])
+        if self._batch_win is not None:
+            self._batch_win.event(kind, info)
+
+    def _batch_follow(self, states):
+        path = states.get(self.batchfollowch_var.get()) or next(iter(states.values()))
+        if not os.path.exists(path):
+            return
+        if self.session is not None and _same_file(self.session.state_path, path):
+            # same campaign: only the measurements moved on -- reload quietly
+            s = load_session(path)
+            recall_snapshots(s)
+            self.session = s
+            self._refresh_summary()
+            self._show_session()
+        else:
+            self.state_var.set(path)
+            self.do_load()
 
     def do_measure_frf(self):
         """Automated system ID: build a Schroeder multitone on the session's

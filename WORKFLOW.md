@@ -361,6 +361,107 @@ It deliberately does **not** set amplitude, offset, load, clock or output
 state — set those in the GUI and confirm on the monitor. Before the first
 upload it verifies the channel against the drive file's assumptions and
 refuses on a mismatch (OFST up to ±60 mV is allowed for the idle trim).
+## Batch runs: many targets, X1 and X2 together
+
+`ilc_batch.py` trains a list of target pairs one after another. Each pair
+(`target_<stem>X1.csv`, `target_<stem>X2.csv`) is one campaign: both drives
+play at once, both monitors (CH3, CH4) are read from the same frozen shots,
+and each channel's loop learns from its own monitor. It uses the GUI's
+capture scheme (HRES singles with the 3-code offset dither) and writes the
+GUI's state files, so any campaign can be opened with **Load state**
+afterwards and continued by hand.
+
+**From the GUI:** **Batch...** in the Bench loop box opens the batch window.
+
+- **New plan...** picks a folder of target pairs, the run order, and the two
+  states whose training settings to copy.
+- **Check plan** fills in points, record length and a time estimate, and flags
+  problems, all without instruments.
+- **Simulate** runs the plan on the simulated bench, writing into `run\sim`.
+- **Run on bench** asks once, naming the campaigns, before any output is
+  switched on.
+
+The iteration cap, minimum, stop rms and shot count are editable in the window
+and are written into the plan file when it runs, so the plan stays the record
+of how a batch was trained. While the batch runs, the table shows each
+channel's latest rms and then its keeper. With *follow in the plots* ticked,
+the panel's plots reload the running campaign's X1 or X2 after every iteration.
+The panel's **Stop** (or the window's) ends the batch at the next shot: outputs
+go OFF and the states are kept, so running again resumes. Double-clicking a
+campaign loads its state in the panel. The window can be closed and reopened
+while a batch runs.
+
+From the command line, write a plan, check it, then run it:
+
+```powershell
+C:\ProgramData\anaconda3\python.exe ilc_batch.py make-plan --targets <suite>\targets --stems S47,S25,C25,N175,N15 --x1-from run\drive_P92PX1H.state.npz --x2-from run\drive_P92PX2A.state.npz --name tier1 --card 2500 --out <suite>\batch_tier1.json
+```
+
+```powershell
+C:\ProgramData\anaconda3\python.exe ilc_batch.py run <suite>\batch_tier1.json --dry-run
+```
+
+```powershell
+C:\ProgramData\anaconda3\python.exe ilc_batch.py run <suite>\batch_tier1.json --allow-output-on
+```
+
+`--x1-from`/`--x2-from` copy the training settings (model rung and its
+parameters or measured FRF and taper, gamma, f_cut, notches) from a state
+that trained well; without them the plan uses the measured FRF, 50-75 kHz
+taper. `--dry-run` loads every target, builds every first drive, checks it
+against the limits and prints each campaign's record length, FRQ and a time
+estimate -- run it on the lab PC, where the `run\` states it names exist.
+
+**Before the first run:** Auto-set once (AMP 20 Vpp, OFST 0, DDS, burst on the
+external trigger, HRES) with both outputs OFF; close the GUIs (they hold the
+VISA sessions). The batch then does, per campaign: both outputs OFF → FRQ =
+1/record on both channels → scope window and verticals → upload → channel
+check (refused on any mismatch, as in the GUI) → both outputs ON → alignment
+check on both drive channels (CH1, CH2) → iterate → both outputs OFF. It asks
+once, at the start, for a typed YES before it may switch outputs on; Ctrl-C,
+an error or the end of the plan switches both off.
+
+**Per channel it stops** at the first of: `max_iterations` (20); rms ≤
+`stop_rms_v` (0.8 V) after `min_iterations` (8); a plateau (the loop
+re-learning noise, `ilc.plateau`); nothing left above the noise floor; three
+measurements more than 2× its best rms (it then goes back to its best drive);
+a drive failing the limit check. The channel that stops first keeps playing
+its last drive until the other is done. Change these in the plan's `loop`
+block.
+
+**Generator memory:** uploads alternate between two slots per channel
+(`BX1A`/`BX1B`, `BX2A`/`BX2B`), because the 4063B cannot delete stored
+waveforms remotely. Every iteration is still on disk as
+`run\drive_<stem>X1_iNN.csv`. `--gui-names` uploads under `<stem>X1_iNN`
+instead.
+
+**Output:** per channel `run\drive_<stem>X1.state.npz`, iteration drives and
+measurements; the keeper (lowest rms from `min_iterations` on) in
+`run\keep\drive_<stem>X1_keep.csv`; with a `card` block in the plan, the card's
+up/down files beside the keepers, cut at the target's hold; and
+`run\batch_<name>.json` with every campaign's status, stop reasons and error
+histories. Running the plan again skips finished campaigns (`--redo` repeats
+them) and resumes an interrupted one from its states, earlier
+measurements included, so the keeper is chosen from the whole campaign.
+
+Offline, `--simulate` (or **Simulate**) runs a plan against
+`eomilc/simbench.py` (the measured FRFs with a gain and delay error). It writes
+into `run\sim`, never `run\`, so a simulated state cannot be resumed as if it
+had been measured.
+
+Two tests exercise the simulated bench:
+
+- `tests/test_batch.py <targets>` checks the ordering rules:
+  - FRQ never moves under a live output;
+  - uploads alternate slots;
+  - reruns skip finished campaigns and resume interrupted ones;
+  - Stop ends the batch cleanly;
+  - a mis-set generator is refused with nothing switched on.
+- `tests/test_batch_gui.py <targets>` drives the batch window: plan builder,
+  Check plan, Simulate, Stop, the confirmation, following, reopening.
+
+None of that is evidence about the real chain.
+
 ## Uploading by hand: two traps, one file
 
 `Awg.upload_arb(..., normalize=True)` divides the samples by their own peak.
