@@ -5,6 +5,9 @@ voltage drive. The original library, GUI, drivers and voltage state are
 unchanged. This is a separate application that imports their existing voltage
 plant, measured FRF, guards and polarimetry equations.
 
+For the motivation, measurement model and design choices, read
+[What this folder does, and why](EXPLANATION.md).
+
 On the lab PC, double-click **Start Polarization GUI.bat** inside this folder.
 It starts the separate follow-up panel with Anaconda and sets the working
 directory automatically. The original `ilc_gui.py` and its launcher are not
