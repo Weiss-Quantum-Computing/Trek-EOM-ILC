@@ -67,7 +67,7 @@ def main():
     notebook = ttk.Notebook(body)
     notebook.grid(row=1,column=0,columnspan=3,sticky='ew')
     pages, counts = {}, {}
-    for name in ('1 · ILC results','2 · Hardware & light','3 · Fine-tune','Advanced'):
+    for name in ('1 · ILC results','Mount control','2 · Hardware & light','3 · Fine-tune','Advanced'):
         page = ttk.Frame(notebook,padding=8)
         page.columnconfigure(1,weight=1)
         notebook.add(page,text=name)
@@ -101,6 +101,12 @@ def main():
     log.grid(row=4,column=0,columnspan=3,sticky='ew',pady=8)
     events = queue.Queue()
     controls = []
+    from .mount_panel import MountPanel
+    def mount_busy(busy):
+        for control in controls:
+            control.configure(state='disabled' if busy else 'normal')
+    mount_panel = MountPanel(pages['Mount control'], variables['port'], variables['zero'], on_busy=mount_busy)
+    mount_panel.grid(row=0,column=0,columnspan=3,sticky='ew')
     viewer = None
     result_figure = None
     result_canvas = None
@@ -198,6 +204,12 @@ def main():
 
     def run(action):
         nonlocal viewer
+        if mount_panel.busy:
+            return
+        if action in ('hardware','capture') and mount_panel.mount is not None:
+            messagebox.showinfo('Mount connected','Disconnect in the Mount control tab before starting light acquisition so it can open the serial port.')
+            notebook.select(pages['Mount control'])
+            return
         values = {k:v.get().strip() for k,v in variables.items()}
         args = [sys.executable, '-m', 'eomilc_polarization_finetune', action]
         required = {'init':['voltage_state','cal0','cal45','out_dir'],
@@ -272,6 +284,7 @@ def main():
         PREFS.write_text(json.dumps(values,indent=2)+'\n')
         for control in controls:
             control.configure(state='disabled')
+        mount_panel.set_blocked(True)
         log.insert('end', f'Running {action}…\n')
         def worker():
             try:
@@ -332,6 +345,7 @@ def main():
                 return
             for control in controls:
                 control.configure(state='normal')
+            mount_panel.set_blocked(False)
             log.insert('end',out+err+'\n')
             log.see('end')
             if code:
@@ -378,6 +392,23 @@ def main():
             action_status.set('Last ILC result loaded. Test the light measurement or start a new optical follow-up; Resume can reopen an existing session.')
         except Exception as exc:
             log.insert('end',f'Last ILC result could not be loaded: {exc}\n')
+    def close_window():
+        # Wait for an active command or acquisition to finish before releasing
+        # the serial connection; never close it underneath a motion command.
+        if mount_panel.busy or mount_panel.blocked:
+            root.after(100,close_window)
+            return
+        if mount_panel.mount is not None:
+            mount_panel.run('disconnect')
+            def finish_close():
+                if mount_panel.busy:
+                    root.after(100,finish_close)
+                else:
+                    root.destroy()
+            root.after(100,finish_close)
+        else:
+            root.destroy()
+    root.protocol('WM_DELETE_WINDOW',close_window)
     poll()
     root.mainloop()
 

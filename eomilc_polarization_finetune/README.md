@@ -21,6 +21,18 @@ C:\ProgramData\anaconda3\python.exe -m eomilc_polarization_finetune.gui
 
 The GUI starts **after voltage ILC has finished**:
 
+The separate **Mount control** tab also works before loading any ILC results.
+Enter the ELL14 serial port (or `auto`) and analyzer zero offset, then click
+**Connect** to check the device identity without moving it. Use **Home** after
+power-up, **Move to angle** or the **0° / 45° / 90°** buttons to test rotation,
+and **Read position** / **Read status** to inspect the mount. Moves verify the
+reported landing angle. Commands run in the background, with results and
+errors shown in the panel. No scope or photodiode is needed for these tests.
+The port and zero settings are shared with **Hardware & light**; the zero is
+applied when connecting, and reported angles use that analyzer frame.
+**Disconnect** before capturing light or running the analyzer trace test.
+Closing the GUI releases the connection after any active operation finishes.
+
 1. **Load ILC results…**: choose the completed `drive_<name>.state.npz` from
    the existing ILC GUI. The panel imports the final drive, original target,
    EOM channel, time grid, fixed AWG full scale and recorded plant/FRF. It
