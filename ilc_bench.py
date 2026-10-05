@@ -400,9 +400,86 @@ class Capture:
         return self._view().items()
 
 
+# -- offset dither, shared by every multi-shot capture ---------------------
+#
+# The converter's per-code error pattern (scopeio.ADC_CODE_PER_VDIV) is a
+# function of VOLTAGE, so identical shots carry it identically and their mean
+# keeps it whole -- and because it is the same in every shot, no shot-to-shot
+# statistic can see it. Stepping a channel's offset across a few codes over
+# the shots puts every shot at a different code phase, and the mean takes the
+# pattern's mean. The preamble's yorigin already returns true volts, so
+# nothing downstream changes; the offsets go back on exit.
+
+def dither_plan(scope, channels, repeats, codes):
+    """(plan, restore) for `channels`: plan = [(ch, offset0, span V)],
+    None when there is nothing to do (dither off, one shot, a scope that
+    cannot report its scale and offset) -- and it says so."""
+    code_per_vdiv = scopeio.ADC_CODE_PER_VDIV
+    if not (codes and code_per_vdiv > 0 and repeats > 1
+            and getattr(scope, "try_get", None)):
+        return None, []
+    plan = []
+    for c in channels:
+        sc = scope.try_get(f":CHANnel{c}:SCALe")
+        off = scope.try_get(f":CHANnel{c}:OFFSet")
+        if sc is None or off is None:
+            print("  dither: skipped -- the scope did not report "
+                  "scale/offset")
+            return None, []
+        plan.append((c, float(off),
+                     code_per_vdiv * float(sc) * max(int(codes), 1)))
+    nc = max(int(codes), 1)
+    print("  dither: " + ", ".join(
+        f"CH{c} offset stepped over {nc} ADC code{'s' if nc > 1 else ''} "
+        f"({span*1e3:.0f} mV)" for c, _, span in plan)
+        + f" across {repeats} shots -- the per-code pattern averages "
+          f"out; restored after")
+    return plan, [(c, off0) for c, off0, _ in plan]
+
+
+def dither_step(scope, plan, i, repeats, codes):
+    """Shot i of `repeats`: every channel to its phase, evenly spaced across
+    the span and centred on the original offset. On the first shot the
+    offset is read back, and the scope is called out if it rounds it coarser
+    than a quarter of one code -- the whole point is sub-code steps, and a
+    dither that cannot reach them is not one."""
+    if not plan:
+        return
+    for c, off0, span in plan:
+        scope.put(f":CHANnel{c}:OFFSet",
+                  f"{off0 + span * ((i + 0.5) / repeats - 0.5):.6g}")
+    if i == 0:
+        for c, off0, span in plan:
+            rb = scope.try_get(f":CHANnel{c}:OFFSet")
+            want = off0 + span * (0.5 / repeats - 0.5)
+            code = span / max(int(codes), 1)
+            if rb is not None and abs(float(rb) - want) > 0.25 * code:
+                print(f"  dither: WARNING CH{c} offset read back "
+                      f"{float(rb):+.5g} V for {want:+.5g} V asked "
+                      f"-- the scope quantises its offset coarser "
+                      f"than a code, so the dither cannot reach "
+                      f"sub-code phases here")
+
+
+def dither_restore(scope, restore):
+    for c, off0 in restore:
+        try:
+            scope.put(f":CHANnel{c}:OFFSet", f"{off0:.6g}")
+        except Exception as e:
+            print(f"  dither: could not restore CH{c} offset "
+                  f"{off0:+.5g} V: {e}")
+
+
+def dither_margin_div(codes):
+    """How far, in divisions, a dithered shot's window sits from the
+    restored offset at most: a clipping check against the restored offset
+    must stop this much short of the +/-4 division edge."""
+    return 0.5 * max(int(codes or 0), 0) * scopeio.ADC_CODE_PER_VDIV
+
+
 def capture_all(scope, channels, t_grid=None, t_offset=0.0,
                 repeats=64, wait_s=30.0, points=None, settle=0.5,
-                keep="grid"):
+                keep="grid", dither_codes=0):
     """Take `repeats` single shots and return EVERY channel, un-averaged.
 
     Handing back the stack rather than the mean is what makes the optical
@@ -439,6 +516,14 @@ def capture_all(scope, channels, t_grid=None, t_offset=0.0,
     settle after a new upload, and each shot already waits for its own trigger.
     64 HRES singles at the 3.7 Hz trigger cost ~17 s for two channels, and
     roughly scales with the channel count from there.
+
+    `dither_codes` > 0 steps every read channel's offset across that many ADC
+    codes over the shots (see dither_plan) and restores it after, even on an
+    error. 0 (the default, for the existing callers) leaves the scope alone.
+    Anything that averages a voltage-dependent signal to sub-code precision
+    -- a photodiode hold, say -- wants it: the per-code pattern is identical
+    in every undithered shot, survives the mean, and passes any repeatability
+    gate, because it does not repeat-to-repeat vary.
     """
     if keep not in ("grid", "raw", "both"):
         raise ValueError(f"keep must be 'grid', 'raw' or 'both', got {keep!r}")
@@ -454,7 +539,30 @@ def capture_all(scope, channels, t_grid=None, t_offset=0.0,
     r = {c: [] for c in cols} if want_raw else None
     t_raw = None
 
+    plan, restore = dither_plan(scope, channels, repeats, dither_codes)
+    t_raw_box = [None]
+    try:
+        _shots(scope, channels, repeats, wait_s, points, t_grid, t_offset,
+               want_grid, want_raw, g, r, plan, dither_codes, t_raw_box)
+    finally:
+        dither_restore(scope, restore)
+    t_raw = t_raw_box[0]
+
+    return Capture(channels=tuple(cols), n_shots=int(repeats),
+                   grid={c: np.asarray(v, float) for c, v in g.items()}
+                   if want_grid else None,
+                   raw={c: np.asarray(v, float) for c, v in r.items()}
+                   if want_raw else None,
+                   t_grid=t_grid if want_grid else None, t_raw=t_raw)
+
+
+def _shots(scope, channels, repeats, wait_s, points, t_grid, t_offset,
+           want_grid, want_raw, g, r, plan, dither_codes, t_raw_box):
+    """capture_all's acquisition loop, split out so the dither's restore can
+    wrap it whole. t_raw comes back through the one-element box."""
+    t_raw = None
     for i in range(repeats):
+        dither_step(scope, plan, i, repeats, dither_codes)
         got = scope.single(wait_s=wait_s)
         if got is not True:
             raise RuntimeError(f"no trigger within {wait_s:g} s on repeat {i+1} "
@@ -481,13 +589,7 @@ def capture_all(scope, channels, t_grid=None, t_offset=0.0,
                         f"the raw view cannot be interpolated back into "
                         f"alignment without destroying the word lattice.")
                 r[col].append(v)
-
-    return Capture(channels=tuple(cols), n_shots=int(repeats),
-                   grid={c: np.asarray(v, float) for c, v in g.items()}
-                   if want_grid else None,
-                   raw={c: np.asarray(v, float) for c, v in r.items()}
-                   if want_raw else None,
-                   t_grid=t_grid if want_grid else None, t_raw=t_raw)
+        t_raw_box[0] = t_raw
 
 
 def capture(scope, channels, mon_col, t_grid, t_offset,

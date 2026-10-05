@@ -58,6 +58,15 @@ def _read_header(txt_path: str) -> dict:
     return h
 
 
+# The MSO-X 2014A's 8-bit converter carries a fixed error pattern per code:
+# ~3.4 mV pk-pk over the 40.25 mV code at 1 V/div, measured 2 Sep 2026 (fold
+# a flat shot's residual on monitor voltage: one sharp period at 40.25 mV).
+# The code scales with V/div; this is the ratio. Another scope has another
+# code: set EOMILC_ADC_CODE_PER_VDIV to its ratio, or 0 to switch the offset
+# dither (ilc_bench.dither_plan) off.
+ADC_CODE_PER_VDIV = float(os.environ.get("EOMILC_ADC_CODE_PER_VDIV", 0.04025))
+
+
 NPZ_FORMAT = "scope-grab-npz/1"
 
 

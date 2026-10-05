@@ -3769,70 +3769,18 @@ class App:
             return False, True
         return True, True
 
-    # -- offset dither, shared by every multi-shot capture -----------------
-    #
-    # The converter's per-code error pattern (ADC_CODE_PER_VDIV) is a function
-    # of VOLTAGE, so identical shots carry it identically and their mean keeps
-    # it whole. Stepping a channel's offset across a few codes over the shots
-    # puts every shot at a different code phase, and the mean takes the
-    # pattern's mean. The preamble's yorigin already returns true volts, so
-    # nothing downstream changes; the offsets go back on exit.
+    # -- offset dither: ilc_bench.dither_plan has the why. Thin wrappers so
+    # the bench capture, Measure FRF and the polarization fine-tune share
+    # one implementation (the fine-tune reaches it through capture_all).
 
     def _dither_plan(self, scope, channels, repeats, codes):
-        """(plan, restore) for `channels`: plan = [(ch, offset0, span V)],
-        None when there is nothing to do (dither off, one shot, a scope that
-        cannot report its scale and offset) -- and it says so."""
-        if not (codes and ADC_CODE_PER_VDIV > 0 and repeats > 1
-                and getattr(scope, "try_get", None)):
-            return None, []
-        plan = []
-        for c in channels:
-            sc = scope.try_get(f":CHANnel{c}:SCALe")
-            off = scope.try_get(f":CHANnel{c}:OFFSet")
-            if sc is None or off is None:
-                print("  dither: skipped -- the scope did not report "
-                      "scale/offset")
-                return None, []
-            plan.append((c, float(off),
-                         ADC_CODE_PER_VDIV * float(sc) * max(int(codes), 1)))
-        nc = max(int(codes), 1)
-        print("  dither: " + ", ".join(
-            f"CH{c} offset stepped over {nc} ADC code{'s' if nc > 1 else ''} "
-            f"({span*1e3:.0f} mV)" for c, _, span in plan)
-            + f" across {repeats} shots -- the per-code pattern averages "
-              f"out; restored after")
-        return plan, [(c, off0) for c, off0, _ in plan]
+        return ilc_bench.dither_plan(scope, channels, repeats, codes)
 
     def _dither_step(self, scope, plan, i, repeats, codes):
-        """Shot i of `repeats`: every channel to its phase, evenly spaced
-        across the span and centred on the original offset. On the first
-        shot the offset is read back, and the scope is called out if it
-        rounds it coarser than a quarter of one code -- the whole point is
-        sub-code steps, and a dither that cannot reach them is not one."""
-        if not plan:
-            return
-        for c, off0, span in plan:
-            scope.put(f":CHANnel{c}:OFFSet",
-                      f"{off0 + span * ((i + 0.5) / repeats - 0.5):.6g}")
-        if i == 0:
-            for c, off0, span in plan:
-                rb = scope.try_get(f":CHANnel{c}:OFFSet")
-                want = off0 + span * (0.5 / repeats - 0.5)
-                code = span / max(int(codes), 1)
-                if rb is not None and abs(float(rb) - want) > 0.25 * code:
-                    print(f"  dither: WARNING CH{c} offset read back "
-                          f"{float(rb):+.5g} V for {want:+.5g} V asked "
-                          f"-- the scope quantises its offset coarser "
-                          f"than a code, so the dither cannot reach "
-                          f"sub-code phases here")
+        ilc_bench.dither_step(scope, plan, i, repeats, codes)
 
     def _dither_restore(self, scope, restore):
-        for c, off0 in restore:
-            try:
-                scope.put(f":CHANnel{c}:OFFSet", f"{off0:.6g}")
-            except Exception as e:
-                print(f"  dither: could not restore CH{c} offset "
-                      f"{off0:+.5g} V: {e}")
+        ilc_bench.dither_restore(scope, restore)
 
     def _bench_capture(self, scope, ch, t_grid, t_off, repeats, wait_s,
                        settle=0.5, native_path=None, aux=(), aux_store=None,
