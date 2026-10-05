@@ -90,6 +90,40 @@ optical-session capture. An independently known input polarization is needed
 to check absolute angle accuracy. Agreement with the voltage target alone
 cannot establish measurement accuracy.
 
+## Spin-echo timing and the locked-intensity baseline
+
+Take the start of the first spin-echo leg as **t = 0**. Measure the optical
+baseline at approximately **t = −32 ms**, before that leg begins. The
+intensity lock normally engages at **−40 ms**; its engagement can be moved
+earlier to **−100 ms** if additional settling time is needed.
+
+The purpose of this measurement is to establish the actual baseline of the
+locked intensity for that shot or measurement set. The locked intensity can
+drift for a reason that is not yet established. A baseline taken during an
+older calibration must therefore not be treated as the current locked level.
+
+Record this pre-leg baseline with the analyzer at the same setting used for
+the associated light trace, and repeat it for each selected analyzer setting.
+Keep the baseline's timing and optical state consistent so those readings
+can be compared meaningfully. Account for the detector dark level when
+relating the measured baseline to the optical calibration.
+
+**All optical corrections must be referenced to the contemporaneous measured
+locked-intensity drift.** Use that baseline to adjust the optical reference
+before reconstructing the residual and calculating a correction. A change
+in the locked light level should not be interpreted directly as a polarization
+error and corrected by changing the EOM drive.
+
+This optical intensity baseline is distinct from the fixed, completed voltage
+ILC drive around which the small AWG correction rails are enforced. It also
+does not replace a simultaneous reference-power signal during the spin-echo
+waveform; intensity changes after the pre-leg measurement remain a separate
+measurement limitation.
+
+This is a required bench procedure and a requirement for the drift-compensation
+implementation. The current software does not yet automatically acquire the
+−32 ms pre-leg window or reference its corrections to that measured baseline.
+
 ## How does optical fine-tuning change the drive?
 
 **Start optical follow-up** creates a separate campaign whose baseline is

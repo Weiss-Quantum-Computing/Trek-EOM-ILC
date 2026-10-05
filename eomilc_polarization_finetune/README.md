@@ -112,6 +112,18 @@ the sequential 0°/45° measurements. Repeated-shot averaging suppresses
 random noise but cannot distinguish repeatable power drift from a
 polarization error. Removing the analyzer is not part of each iteration.
 
+**Spin-echo baseline requirement:** with the first leg starting at t = 0,
+measure the locked-intensity baseline at approximately **−32 ms**. The lock
+normally engages at **−40 ms**, or can engage at **−100 ms** if more settling
+time is needed. Repeat the baseline measurement at each analyzer setting for
+the associated shot or measurement set. Locked intensity can drift even with
+the lock engaged, so **all optical corrections must be referenced to that
+measured drift**, rather than a fixed historical light level. This is an
+optical reference measurement; the voltage ILC drive remains the baseline
+for correction-size limits. Automatic acquisition of this pre-leg window and
+drift compensation are not yet implemented. See the
+[timing and baseline notes](EXPLANATION.md#spin-echo-timing-and-the-locked-intensity-baseline).
+
 ## Small correction rails
 
 Defaults, configurable during Init:
