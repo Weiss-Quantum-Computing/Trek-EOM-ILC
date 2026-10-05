@@ -1265,9 +1265,10 @@ class App:
             title="One file of the capture sequence",
             initialdir=os.path.dirname(self.meas_var.get())
             or os.path.join(SIBLINGS, "scope_data"),
-            filetypes=(("Scope CSV", "*.csv"), ("All files", "*.*")))
+            filetypes=(("Scope captures", "*.csv *.npz"),
+                       ("All files", "*.*")))
         if p:
-            g = re.sub(r"_\d+\.csv$", "*.csv", p)
+            g = re.sub(r"_\d+\.(csv|npz)$", r"*.\1", p, flags=re.I)
             self.meas_var.set(g if g != p else p)
 
     # ------------------------------------------------------------- plumbing
@@ -2654,11 +2655,11 @@ class App:
             raise RuntimeError(f"no scope files matched {pattern!r}")
         t0, acc = None, 0.0
         for f in files:
-            if f.lower().endswith(".npz"):
+            if f.lower().endswith(".npz") and not scopeio.is_capture_npz(f):
                 # a bench-kept native average: t is already waveform time
                 d = np.load(f)
                 tt, yy = np.asarray(d["t"], float), np.asarray(d["y"], float)
-            else:                        # a raw Scope Grab CSV
+            else:                        # a raw Scope Grab CSV or NPZ
                 tr = scopeio.load(f)
                 tt, yy = tr.t - s.t_off, tr[mon]
             if tt[0] > s.t[0] + 1e-4 or tt[-1] < s.t[-1] - 1e-4:

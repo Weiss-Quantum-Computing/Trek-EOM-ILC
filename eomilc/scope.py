@@ -1,5 +1,6 @@
-"""Reader for the Agilent MSO-X 2014A CSV + TXT pairs produced by the capture
-script, plus the auto-PSD the wideband noise work needs.
+"""Reader for the Agilent MSO-X 2014A captures -- CSV or compact NPZ, each
+with its TXT sidecar -- produced by the capture script (Scope Grab), plus the
+auto-PSD the wideband noise work needs.
 
 pandas is imported inside `load` rather than at the top, and that is
 load-bearing rather than tidiness. `eomilc/__init__.py` imports this module, so
@@ -57,13 +58,65 @@ def _read_header(txt_path: str) -> dict:
     return h
 
 
+NPZ_FORMAT = "scope-grab-npz/1"
+
+
+def is_capture_npz(path: str) -> bool:
+    """True for a Scope Grab NPZ capture, False for any other .npz -- the
+    bench's own kept averages (keys t, y) share the extension."""
+    if not path.lower().endswith(".npz"):
+        return False
+    with np.load(path, allow_pickle=False) as z:
+        return "format" in z.files
+
+
+def read_npz(path: str):
+    """(columns, data) of a Scope Grab NPZ capture, data[:, 0] = time_s.
+
+    A copy of scope_grab.read_npz, kept here so offline analysis (this
+    package runs on the Mac with no scope_grab beside it) reads the compact
+    format too. The layout is documented in scope_grab.py under 'capture
+    files'; in short: x = [x_inc, x_orig, x_ref] and n, or t outright; per
+    column j, y<j> = codes stored as differences with s<j> = [y_inc, y_ref,
+    y_orig], or y<j> = volts when there is no s<j>."""
+    with np.load(path, allow_pickle=False) as z:
+        tag = str(z["format"]) if "format" in z.files else ""
+        if tag != NPZ_FORMAT:
+            raise ValueError(f"{os.path.basename(path)}: not a {NPZ_FORMAT} "
+                             f"capture (format tag {tag!r})")
+        columns = [str(c) for c in z["columns"]]
+        if "t" in z.files:
+            t = z["t"].astype(np.float64)
+        else:
+            x_inc, x_orig, x_ref = (float(a) for a in z["x"])
+            t = (np.arange(int(z["n"])) - x_ref) * x_inc + x_orig
+        data = np.empty((len(t), len(columns)))
+        data[:, 0] = t
+        for j in range(1, len(columns)):
+            y = z[f"y{j}"]
+            if f"s{j}" in z.files:
+                y_inc, y_ref, y_orig = (float(a) for a in z[f"s{j}"])
+                codes = np.cumsum(y, dtype=y.dtype)
+                data[:, j] = (codes.astype(np.float64) - y_ref) * y_inc + y_orig
+            else:
+                data[:, j] = y
+    return columns, data
+
+
 def load(csv_path: str) -> Trace:
-    """Load a capture. The .txt sidecar is picked up automatically if present."""
+    """Load a capture -- a Scope Grab CSV, or the compact NPZ it can save
+    instead. The .txt sidecar is picked up automatically if present."""
+    stem = os.path.splitext(csv_path)[0]
+    if csv_path.lower().endswith(".npz"):
+        columns, d = read_npz(csv_path)
+        return Trace(t=d[:, 0], data={c: d[:, j] for j, c in
+                                      enumerate(columns) if j},
+                     header=_read_header(stem + ".txt"))
     import pandas as pd                  # see the module docstring
     df = pd.read_csv(csv_path)
     t = df.iloc[:, 0].to_numpy(dtype=float)
     data = {c: df[c].to_numpy(dtype=float) for c in df.columns[1:]}
-    return Trace(t=t, data=data, header=_read_header(os.path.splitext(csv_path)[0] + ".txt"))
+    return Trace(t=t, data=data, header=_read_header(stem + ".txt"))
 
 
 def resample(t_src: np.ndarray, y: np.ndarray, t_dst: np.ndarray,
