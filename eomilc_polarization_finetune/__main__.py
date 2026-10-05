@@ -50,6 +50,8 @@ def main():
     capture.add_argument('--settle', type=float, default=0.2)
     capture.add_argument('--wait', type=float, default=30.)
     capture.add_argument('--home', action='store_true', help='home after power-up; user zero offset remains applied')
+    capture.add_argument('--dither-codes', type=int, default=3,
+                         help='offset dither across this many ADC codes over the shots (0 = off)')
     update = sub.add_parser('step', help='write one bounded correction, with prominent warnings when rails are reached')
     update.add_argument('--session', required=True)
     update.add_argument('--capture', required=True)
@@ -113,15 +115,20 @@ def main():
             ap.error('PD, Trek monitor and drive scope channels must be distinct')
         if args.repeats < 2 or args.wait <= 0 or args.settle < 0:
             ap.error('need repeats >= 2, positive wait, nonnegative settle')
-        scope = bench.make_scope(bench.load_module(bench.find_scope_grab(str(Path.cwd().parent)), 'scope_grab'))
+        # Located from this file, not the working directory: the panel and
+        # the .bat start from the repo root, a shell may not.
+        scope = bench.make_scope(bench.load_module(bench.find_scope_grab(str(Path(__file__).resolve().parents[2])), 'scope_grab'))
         try:
             scope.connect()
             bench.verify_alignment(scope, args.drive_ch, state['current'], state['t'], float(state['t_offset']), args.wait)
             def grab():
+                # Offset-dithered: undithered, the per-code pattern is the
+                # same in every shot, survives the mean and reads as light.
                 cap = bench.capture_all(scope, [args.pd_ch, mon_ch], state['t'],
                                         float(state['t_offset']), repeats=args.repeats,
                                         wait_s=args.wait, settle=0., keep='both',
-                                        points=bench.scopeio.scope_points_for(2.2*len(state['t'])))
+                                        points=bench.scopeio.scope_points_for(2.2*len(state['t'])),
+                                        dither_codes=args.dither_codes)
                 if cap.t_raw[0] > state['t'][0] or cap.t_raw[-1] < state['t'][-1]:
                     raise ValueError('scope record does not cover the full target time grid')
                 for channel in (args.pd_ch, mon_ch):
@@ -130,7 +137,7 @@ def main():
                     if not (scale > 0):
                         raise ValueError('invalid scope vertical scale')
                     raw = cap.raw[f'CH{channel}']
-                    if abs(raw-offset).max() >= 3.95*scale:
+                    if abs(raw-offset).max() >= (3.95 - bench.dither_margin_div(args.dither_codes))*scale:
                         raise ValueError(f'scope CH{channel} is at/outside its acquisition window; fix clipping before fine-tuning')
                 return cap[f'CH{args.pd_ch}'], cap[f'CH{mon_ch}']
             with ELL14(args.port, address=args.addr, zero_offset_deg=args.zero) as rot:
@@ -140,7 +147,10 @@ def main():
                 save_capture(args.out, state, light, monitor, actual)
             print(args.out)
         finally:
-            scope.close()
+            try:
+                scope.run()          # leave the scope running, as hardware_test does
+            finally:
+                scope.close()
         last.update(pd_ch=args.pd_ch, port=args.port, zero=args.zero)
     PREFERENCES.write_text(json.dumps(last, indent=2) + '\n')
 

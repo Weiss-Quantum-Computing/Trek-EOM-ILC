@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -177,6 +179,82 @@ class OpticalTests(unittest.TestCase):
             return np.zeros((2,20)), np.zeros((2,20))
         capture_angles(Rotator(), grab)
         self.assertEqual(events, [('rotate',0.),('grab',None),('rotate',45.),('grab',None)])
+
+
+class ReviewFixTests(unittest.TestCase):
+    """5 Oct 2026 review: light-level gate, calibration units, dithered capture."""
+
+    def test_light_level_drift_is_held_not_learned(self):
+        # A pure rotation leaves the contrast radius at 1 and is learned; the
+        # same light scaled by 1 % is a level change the model would read as
+        # rotation, so the correction is held and the reason is reported.
+        tuner = fixture()
+        light, mon = captures(tuner, 0.)
+        dimmed = {a: s * 0.99 for a, s in light.items()}
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = tuner.propose(tuner.baseline, dimmed, mon)
+        np.testing.assert_array_equal(result.drive, tuner.baseline)
+        self.assertFalse(result.metrics['light_level_ok'])
+        self.assertTrue(any('Light level' in m for m in result.messages))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            moved = tuner.propose(tuner.baseline, *captures(tuner, 1.))
+        self.assertTrue(moved.metrics['light_level_ok'])
+        self.assertAlmostEqual(moved.metrics['light_level'], 1., places=6)
+        self.assertGreater(np.max(np.abs(moved.drive)), 0)
+
+    def test_monitor_volt_calibration_refused(self):
+        # Fitted against monitor volts, omega is 1000x larger: v_pi ~5 V.
+        n, dt = 1001, 2e-6
+        cals = {a: FringeCal(1., .98, np.pi / 5.2, 2*np.deg2rad(a), np.deg2rad(a), n_eom=1)
+                for a in (0., 45.)}
+        loop = Loop(Plant(.56, dt=dt), np.zeros(n), dt, CHANNELS['EO1'], limits=CHANNELS['EO1'].limits)
+        with self.assertRaisesRegex(ValueError, 'Trek HV'):
+            FineTuner(loop, np.zeros(n), np.linspace(0, 1, n), cals, Settings(f_cut=1000.))
+
+    def test_capture_all_dither_steps_and_restores(self):
+        import ilc_bench
+        n = 200
+        class Scope:
+            def __init__(self, fail_at=None):
+                self.settings = {':CHANnel2:SCALe': '1.0', ':CHANnel2:OFFSet': '0.5',
+                                 ':CHANnel3:SCALe': '0.1', ':CHANnel3:OFFSet': '0.0'}
+                self.offsets = {2: [], 3: []}
+                self.shots, self.fail_at = 0, fail_at
+            def try_get(self, q, timeout_ms=2000):
+                return self.settings.get(q)
+            def put(self, k, v):
+                self.settings[k] = v
+                for c in (2, 3):
+                    if k == f':CHANnel{c}:OFFSet':
+                        self.offsets[c].append(float(v))
+            def single(self, wait_s=30.):
+                self.shots += 1
+                if self.fail_at == self.shots:
+                    raise RuntimeError('scope died')
+                return True
+            def waveform(self, ch, points=None):
+                return np.arange(n) * 1e-6, np.full(n, 0.3)   # true volts, whatever the offset
+            def run(self):
+                pass
+        with contextlib.redirect_stdout(io.StringIO()):
+            sc = Scope()
+            cap = ilc_bench.capture_all(sc, [2, 3], repeats=8, settle=0., keep='raw', dither_codes=3)
+            for c, scale in ((2, 1.0), (3, 0.1)):
+                steps = sc.offsets[c][:-1]                    # the last put is the restore
+                self.assertEqual(len(set(steps)), 8)
+                self.assertAlmostEqual(np.ptp(steps), 3 * ilc_bench.scopeio.ADC_CODE_PER_VDIV * scale * 7 / 8, places=6)
+            self.assertEqual(float(sc.settings[':CHANnel2:OFFSet']), 0.5)
+            self.assertEqual(float(sc.settings[':CHANnel3:OFFSet']), 0.0)
+            self.assertEqual(cap.raw['CH2'].shape, (8, n))
+            dead = Scope(fail_at=3)
+            with self.assertRaises(RuntimeError):
+                ilc_bench.capture_all(dead, [2, 3], repeats=8, settle=0., keep='raw', dither_codes=3)
+            self.assertEqual(float(dead.settings[':CHANnel2:OFFSet']), 0.5)
+            quiet = Scope()
+            ilc_bench.capture_all(quiet, [2, 3], repeats=4, settle=0., keep='raw')
+            self.assertFalse(any(quiet.offsets.values()), 'dither_codes=0 touched an offset')
 
 
 class FakeSerial:

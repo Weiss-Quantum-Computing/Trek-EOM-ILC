@@ -51,6 +51,7 @@ def main():
         ('max_step_awg', 'Maximum AWG step (V)', '0.002', None),
         ('max_total_awg', 'Maximum cumulative AWG correction (V)', '0.020', None),
         ('max_total_hv', 'Maximum predicted HV correction (V)', '10', None),
+        ('intensity_tolerance', 'Light-level tolerance vs calibration (fraction)', '0.005', None),
     ]
     body = ttk.Frame(root, padding=10)
     body.grid(sticky='nsew')
@@ -92,7 +93,7 @@ def main():
         pages[name],counts[name] = frame,0
     acquisition = {'port','zero','mon_ch','drive_ch','repeats'}
     calibration = {'angle_a','cal0','angle_b','cal45'}
-    limits = {'max_step_awg','max_total_awg','max_total_hv','hv_for_90','target_zero_hv','angle_offset_deg'}
+    limits = {'max_step_awg','max_total_awg','max_total_hv','hv_for_90','target_zero_hv','angle_offset_deg','intensity_tolerance'}
     hidden = {'channel','voltage_state','session','capture','out_dir'}
     field_controls = []
     for key, label, default, browse in fields:
@@ -318,7 +319,7 @@ def main():
             values['out_dir'] = str(Path(values['workspace_dir'])/
                 f"{Path(values['voltage_state']).name.removesuffix('.state.npz')}_{time.time_ns()}")
             variables['out_dir'].set(values['out_dir'])
-            for k in ['voltage_state','out_dir','target_zero_hv','angle_offset_deg','f_cut','max_step_awg','max_total_awg','max_total_hv']:
+            for k in ['voltage_state','out_dir','target_zero_hv','angle_offset_deg','f_cut','max_step_awg','max_total_awg','max_total_hv','intensity_tolerance']:
                 args.extend(['--'+k.replace('_','-'),values[k]])
             if values['hv_for_90']:
                 args.extend(['--hv-for-90',values['hv_for_90']])

@@ -26,6 +26,7 @@ class HardwareTestTests(unittest.TestCase):
                 return '1' if q.endswith('SCALe') else '0'
         scope = Scope()
         def capture(sc,channels,t,offset,**kwargs):
+            events.append(('dither',kwargs.get('dither_codes')))
             self.assertIs(sc,scope)
             self.assertEqual(channels,[2,3])
             self.assertEqual(kwargs['keep'],'both')
@@ -53,6 +54,8 @@ class HardwareTestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             light,monitor,actual = acquire(scope,rot,state,[0.,45.],2,3,folder,
                                            repeats=4,on_progress=progress.append,capture_function=capture)
+            self.assertEqual([e for e in events if e[0]=='dither'],[('dither',3),('dither',3)])
+            events[:] = [e for e in events if e[0]!='dither']
             self.assertEqual(events,[('move',0.),('capture',0.),('move',45.),('capture',45.)])
             self.assertEqual([e['kind'] for e in progress],['moving','capturing','trace','moving','capturing','trace'])
             captures = []

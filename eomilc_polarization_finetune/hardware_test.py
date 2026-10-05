@@ -17,7 +17,8 @@ from eomilc.polarimetry import FringeCal
 
 
 def acquire(scope, rotator, state, angles, pd_ch, mon_ch, folder,
-            repeats=16, settle=0.2, wait=30., on_progress=None, capture_function=None):
+            repeats=16, settle=0.2, wait=30., on_progress=None, capture_function=None,
+            dither_codes=3):
     """Capture each requested angle and persist its light/monitor shot stacks."""
     native_capture = capture_function is None
     if native_capture:
@@ -44,8 +45,11 @@ def acquire(scope, rotator, state, angles, pd_ch, mon_ch, folder,
         if not np.isfinite(got) or abs((got-angle+180)%360-180)>.05:
             raise ValueError(f'ELL14 did not land at requested {angle:g} deg')
         notify(dict(kind='capturing',angle=angle,actual=got))
+        # Offset-dithered: the scope's per-code pattern is identical in every
+        # undithered shot, so it survives the mean and reads as light.
         cap = capture_function(scope,[pd_ch,mon_ch],t,float(state.get('t_offset',0.)),
-                               repeats=repeats,wait_s=wait,settle=0.,keep='both',points=points)
+                               repeats=repeats,wait_s=wait,settle=0.,keep='both',points=points,
+                               dither_codes=dither_codes)
         if cap.t_raw[0]>t[0] or cap.t_raw[-1]<t[-1]:
             raise ValueError('scope trace does not cover the full waveform')
         clipping = []
@@ -57,7 +61,7 @@ def acquire(scope, rotator, state, angles, pd_ch, mon_ch, folder,
             raw = np.asarray(cap.raw[f'CH{ch}'],float)
             if not np.isfinite(raw).all():
                 raise ValueError(f'nonfinite scope CH{ch} samples')
-            if np.max(np.abs(raw-offset))>=3.95*scale:
+            if np.max(np.abs(raw-offset))>=(3.95-_margin(dither_codes))*scale:
                 clipping.append(ch)
         light[angle] = np.asarray(cap[f'CH{pd_ch}'],float)
         monitor[angle] = np.asarray(cap[f'CH{mon_ch}'],float)
@@ -76,6 +80,12 @@ def acquire(scope, rotator, state, angles, pd_ch, mon_ch, folder,
              actual_angles=[actual[a] for a in angles],
              light=np.stack([light[a] for a in angles]),monitor=np.stack([monitor[a] for a in angles]))
     return light,monitor,actual
+
+
+def _margin(codes):
+    """Divisions the dither moves a shot's window from the restored offset."""
+    from eomilc.scope import ADC_CODE_PER_VDIV
+    return 0.5*max(int(codes or 0),0)*ADC_CODE_PER_VDIV
 
 
 def convert(folder,light,calibrations,t):
@@ -113,6 +123,8 @@ def main():
     ap.add_argument('--repeats',type=int,default=16)
     ap.add_argument('--settle',type=float,default=.2)
     ap.add_argument('--wait',type=float,default=30.)
+    ap.add_argument('--dither-codes',type=int,default=3,
+                    help='offset dither across this many ADC codes over the shots (0 = off)')
     ap.add_argument('--out-dir',required=True)
     args = ap.parse_args()
     if args.session:
@@ -143,7 +155,8 @@ def main():
             if args.home:
                 rot.home()
             light,_,_ = acquire(scope,rot,state,angles,args.pd_ch,mon_ch,args.out_dir,
-                                args.repeats,args.settle,args.wait,notify)
+                                args.repeats,args.settle,args.wait,notify,
+                                dither_codes=args.dither_codes)
         if len(light)>=2 and all(a in calibrations for a in angles):
             path = convert(args.out_dir,light,{a:calibrations[a] for a in angles},state['t'])
             notify(dict(kind='conversion',path=str(path.resolve())))

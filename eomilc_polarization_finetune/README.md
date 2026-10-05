@@ -127,8 +127,8 @@ The raw analyzer hardware test retains its separate live trace window.
 
 The required contemporaneous locked-intensity baseline at about −32 ms before
 spin echo is documented below and in EXPLANATION.md. Automatic acquisition and
-normalization to that baseline are not implemented; this update does not solve
-intensity-drift ambiguity in the optical residual.
+normalization to that baseline are not implemented. Until they are, a
+**light-level gate** stands in: see *Light level and scope captures* below.
 
 **Resume correction session…** reopens an existing optical session. The last
 voltage case is remembered on launch. To use the other EOM, load its completed
@@ -214,8 +214,36 @@ the lock engaged, so **all optical corrections must be referenced to that
 measured drift**, rather than a fixed historical light level. This is an
 optical reference measurement; the voltage ILC drive remains the baseline
 for correction-size limits. Automatic acquisition of this pre-leg window and
-drift compensation are not yet implemented. See the
+drift compensation are not yet implemented; the light-level gate above holds
+the correction when the level has moved, but does not normalize it. See the
 [timing and baseline notes](EXPLANATION.md#spin-echo-timing-and-the-locked-intensity-baseline).
+
+## Light level and scope captures
+
+**Light-level gate.** A pure polarization change only rotates the two
+calibrated quadratures, (I − dark − A)/B at 0° and 45°; their length (the
+*contrast radius*) stays 1. A change in the light **level** — locked intensity
+drifting since the calibration, detector gain, a stale calibration — moves it
+off 1, and the model would otherwise read it as rotation: on a 20° hold, a
+0.5 % intensity drift reads as ~24 mdeg. Each step reports the median radius
+as `light_level`; when it is further from 1 than **Light-level tolerance**
+(default 0.005, Setup → Limits & target, or `--intensity-tolerance` at Init)
+the correction is held at zero with a warning. Real rotations pass at any size.
+The gate catches drifts above about 0.2 % in intensity; smaller ones still
+leak up to ~10 mdeg, which is what the locked-intensity normalization is for.
+
+**Calibration units.** Fringe calibrations must be fitted against Trek HV
+(`hv_V`). One fitted against monitor volts would make every correction 1000×
+too small; Init refuses a calibration whose v_pi is not within a factor of two
+of the channel's measured HV for 90°.
+
+**Offset dither.** Every capture steps the scope's channel offsets across
+three ADC codes over the shots (`--dither-codes`, 0 = off) and restores them.
+The MSO-X 2014A's per-code error (3.4 mV pk-pk per code at 1 V/div) is the
+same in every undithered shot, so it survives the shot mean, passes the
+standard-error gate, and on a photodiode hold reads as ~19 mdeg of rotation.
+Dithered, it averages to under 1 mdeg. The clipping check allows for the
+offsets the dither visits.
 
 ## Small correction rails
 
@@ -229,6 +257,7 @@ Defaults, configurable during Init:
 | Optical learning gain | 0.2 |
 | Maximum slow correction mode frequency | 100 Hz |
 | Resolved-mean threshold | 3 standard errors |
+| Light-level tolerance (contrast radius) | 0.5 % |
 
 Each step and the accumulated correction are bounded. A proposed step
 that reaches a rail raises a Python warning, prints `WARNING:` in the CLI,

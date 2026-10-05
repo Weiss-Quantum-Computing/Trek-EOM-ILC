@@ -23,6 +23,7 @@ class Settings:
     max_total_hv: float = 10.0
     slope_floor: float = 0.3
     sigma_gate: float = 3.0
+    intensity_tolerance: float = 0.005
 
     def validate(self, dt):
         values = tuple(vars(self).values())
@@ -34,6 +35,8 @@ class Settings:
             raise ValueError("correction rails must be positive")
         if not 0 < self.slope_floor < 1 or self.sigma_gate < 0:
             raise ValueError("need 0 < slope_floor < 1 and sigma_gate >= 0")
+        if not 0 < self.intensity_tolerance < 0.5:
+            raise ValueError("need 0 < intensity_tolerance < 0.5")
 
 
 def vector(x, name, n=None):
@@ -72,6 +75,26 @@ def validate_calibrations(calibrations):
         delta = (np.rad2deg(cal.theta_a) - float(angle) + 90) % 180 - 90
         if abs(delta) > 0.05:
             raise ValueError("calibration theta_a must match the analyzer user angle from EO zero")
+
+
+def contrast_radius(stacks, calibrations):
+    """Per sample, |(c, s)| of the light the calibrations predict, where
+    (I - dark - A)/B = c cos 2theta + s sin 2theta at each analyzer setting.
+
+    A pure polarization change only rotates (c, s): the radius stays 1
+    whatever the angle. A change of the light LEVEL -- the locked intensity
+    drifting since the calibration, detector gain, a stale calibration --
+    moves it off 1. With two settings the system is exactly determined;
+    with more it is a least-squares fit.
+    """
+    angles = sorted(stacks)
+    theta = np.array([calibrations[a].theta_a for a in angles])
+    m = np.column_stack([np.cos(2 * theta), np.sin(2 * theta)])
+    y = np.array([(np.asarray(stacks[a], float).mean(axis=0)
+                   - calibrations[a].i_dark - calibrations[a].a)
+                  / calibrations[a].b for a in angles])
+    q, *_ = np.linalg.lstsq(m, y, rcond=None)
+    return np.hypot(q[0], q[1])
 
 
 def optical_error(phi_target, stacks, calibrations, settings):
@@ -137,6 +160,21 @@ class FineTuner:
             raise ValueError('resonant voltage plant needs positive damping')
         if loop.channel.name not in ("EO1", "EO2"):
             raise ValueError("fine-tuning requires EO1 or EO2")
+        # The error is converted to HV through each calibration's own
+        # rad-per-volt, so a fringe fitted against MONITOR volts (which
+        # eomilc.polarimetry permits -- it does not convert) would make
+        # every correction 1000x too small, silently. Its half-wave
+        # voltage gives it away: one EOM's fringe in HV has v_pi near the
+        # channel's measured HV for 90 degrees.
+        v90 = float(loop.channel.v90_hv)
+        if np.isfinite(v90) and v90 > 0:
+            for angle, cal in calibrations.items():
+                if not 0.5 < cal.v_pi / v90 < 2.0:
+                    raise ValueError(
+                        f"the {float(angle):g} deg calibration has v_pi "
+                        f"{cal.v_pi:.4g} V against {v90:.4g} V for 90 deg on "
+                        f"{loop.channel.name}: fit the sweep in Trek HV "
+                        f"(hv_V), not monitor volts")
         report = loop.check(self.baseline)
         if not report:
             raise ValueError(f"baseline fails existing voltage guards: {report}")
@@ -181,6 +219,15 @@ class FineTuner:
             monitors.append(measured)
 
         error, sem, good = optical_error(self.phi_target, stacks, self.calibrations, cfg)
+        # Light-level gate. The model reads any intensity change against the
+        # calibration's fixed A and B as a polarization error: a 0.5 % drift
+        # in locked intensity is already tens of mdeg on a hold. The
+        # contemporaneous locked-intensity baseline that would normalise it
+        # is not implemented yet (README), so until it is, refuse to learn
+        # from light whose level has left the calibration's.
+        radius = contrast_radius(stacks, self.calibrations)
+        level = float(np.median(radius))
+        level_ok = abs(level - 1.0) <= cfg.intensity_tolerance
         # Soft threshold below the resolved mean error to avoid learning random
         # light fluctuations. Low pass only the correction, never the baseline.
         resolved = np.zeros(n)
@@ -199,6 +246,9 @@ class FineTuner:
         # slow projection. Require full coverage before correcting instead.
         if not good.all():
             warn('Some samples are optically blind at the selected angles; correction held at zero. Add a complementary analyzer angle.')
+            step[:] = 0.
+        if not level_ok:
+            warn(f'Light level is {100*(level-1):+.2f}% off the calibration (median contrast radius {level:.4f}, tolerance {100*cfg.intensity_tolerance:g}%). A change in locked intensity, detector gain or a stale calibration reads as polarization error; correction held at zero. Re-measure the calibration or the locked-intensity baseline.')
             step[:] = 0.
         peak = np.max(np.abs(step))
         if peak >= 0.98 * cfg.max_step_awg:
@@ -241,7 +291,9 @@ class FineTuner:
                        step_peak_awg=float(np.max(np.abs(candidate-current))),
                        total_peak_awg=float(np.max(np.abs(candidate-self.baseline))),
                        total_predicted_peak_hv=float(np.max(np.abs(self.response(candidate-self.baseline))) * loop.channel.mon_scale),
-                       rail_scale=alpha)
+                       rail_scale=alpha,
+                       light_level=level,
+                       light_level_ok=bool(level_ok))
         if not good.all():
             warn(f"{(~good).sum()} samples have no calibrated optical sensitivity; their correction is held.")
         return Result(candidate, error, sem, good, messages, metrics)
