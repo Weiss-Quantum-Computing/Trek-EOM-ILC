@@ -19,7 +19,7 @@ keeping the original GUI, source result file and learned baseline intact.
 
 ## What comes from the completed ILC results?
 
-Choose the final `drive_<name>.state.npz` with **Load ILC results…**.
+Choose the final `drive_<name>.state.npz` with **Import ILC results…**.
 The follow-up GUI reads the final drive, original voltage target, selected
 EOM, time grid, fixed AWG scaling, recorded voltage model and available
 transfer-function metadata. It previews the waveforms and recorded tracking
@@ -34,7 +34,7 @@ target angle = fixed angle offset
 
 This expresses what the original target was meant to produce. It does not
 assert that the measured light still follows that proportional relationship.
-The scale and reference convention are adjustable in Advanced settings;
+The scale and reference convention are adjustable in Setup → Limits & target;
 they must match the intention of the original voltage target.
 
 Only the selected EOM is corrected. Keep the other EOM's waveform fixed
@@ -65,7 +65,7 @@ offset, fringe midpoint, contrast and the selected EOM's optical sensitivity.
 
 ## First check that the hardware measurement works
 
-**Test analyzer + show traces** performs a live hardware check:
+**Validate optical acquisition** performs a live hardware check:
 
 1. Move the ELL14 to each specified setting and verify its settled position.
 2. Capture repeated photodiode and simultaneous Trek-monitor traces.
@@ -126,9 +126,9 @@ implementation. The current software does not yet automatically acquire the
 
 ## How does optical fine-tuning change the drive?
 
-**Start optical follow-up** creates a separate campaign whose baseline is
-the completed voltage ILC drive. **Capture light** obtains the optical
-measurements. **Calculate small correction** then:
+**Initialize correction session** creates a separate campaign whose baseline is
+the completed voltage ILC drive. **Acquire optical traces** obtains the optical
+measurements. **Compute correction** then:
 
 1. Predicts the desired photodiode signal at each analyzer setting from the
    intended angle and fringe calibration.
@@ -156,6 +156,28 @@ scaling and normalization OFF. The follow-up panel then takes fresh optical
 measurements to assess the result. Its capture metadata identifies the
 expected session and drive, but cannot prove that the correct waveform was
 actually uploaded to the generator.
+
+Each calculation is one iteration. **Run iterations** supports **Single
+iteration** or **N iterations**. It acquires fresh traces and calculates one
+update per iteration, pausing for manual AWG upload between updates. After the
+exported drive is uploaded with fixed scaling, **Continue after AWG upload**
+starts the next acquisition. The sequence does not reuse the previous capture.
+There is no unattended AWG upload or automatic convergence stop. **Stop** takes
+effect after the active operation, and rail or measurement warnings stop the
+sequence for review. The final exported drive still needs manual upload and
+measurement to validate its effect.
+The iteration number identifies a saved proposal; its optical improvement is
+known only after the next measurement. Total correction rails always refer
+back to the original finished voltage ILC drive, not the previous iteration.
+
+The **Plots** tab compares the saved drive and original baseline, Trek HV and
+voltage target, measured and expected light at each angle, reconstructed and
+intended polarization, polarization error modulo 180°, and AWG corrections.
+After a calculation it retains the previous iteration's measurements and
+marks the new drive as not yet measured. It does not invent a predicted
+optical improvement or show command data as a scope measurement. The GUI's
+optional **Manual control** tab stays last and includes 0°, 45°, 90°, 135° and
+custom-angle moves; **Setup** holds calibration, wiring and detailed limits.
 
 ## What “small” and “slow” mean here
 

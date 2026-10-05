@@ -58,7 +58,7 @@ class TraceWindow:
         NavigationToolbar2Tk(self.canvas,self.window)
         self.captures = []
         plot_traces(self.axes[:2],[])
-        self.axes[2].set(title='Polarization angle appears after calibrated traces are acquired',xlabel='Time (ms)',ylabel='Polarization (deg)')
+        self.axes[2].set(title='Polarization reconstruction requires calibrated optical traces',xlabel='Time (ms)',ylabel='Polarization (deg)')
         self.canvas.draw_idle()
 
     def update(self,event):
@@ -79,7 +79,7 @@ class TraceWindow:
         elif kind=='conversion':
             with np.load(event['path'],allow_pickle=False) as z:
                 plot_conversion(self.axes[2],{k:z[k] for k in z.files})
-            self.status.set('Light traces converted to polarization angle.')
+            self.status.set('Polarization reconstruction complete.')
             self.canvas.draw_idle()
         elif kind=='note':
             self.status.set(event['message'])

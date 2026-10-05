@@ -21,44 +21,125 @@ C:\ProgramData\anaconda3\python.exe -m eomilc_polarization_finetune.gui
 
 The GUI starts **after voltage ILC has finished**:
 
-The separate **Mount control** tab also works before loading any ILC results.
+The optional **Manual control** tab is the last tab and also works before loading any ILC results.
 Enter the ELL14 serial port (or `auto`) and analyzer zero offset, then click
 **Connect** to check the device identity without moving it. Use **Home** after
-power-up, **Move to angle** or the **0° / 45° / 90°** buttons to test rotation,
+power-up, **Move to angle** or the **0° / 45° / 90° / 135°** buttons to test rotation,
 and **Read position** / **Read status** to inspect the mount. Moves verify the
 reported landing angle. Commands run in the background, with results and
 errors shown in the panel. No scope or photodiode is needed for these tests.
-The port and zero settings are shared with **Hardware & light**; the zero is
+The port and zero settings are shared with **Setup → Acquisition**; the zero is
 applied when connecting, and reported angles use that analyzer frame.
 **Disconnect** before capturing light or running the analyzer trace test.
 Closing the GUI releases the connection after any active operation finishes.
 
-1. **Load ILC results…**: choose the completed `drive_<name>.state.npz` from
+Tabs are **Fine-tune**, **Plots**, **Setup**, then **Manual control**. The last
+tab is optional; the normal optical workflow moves the analyzer automatically.
+
+1. **Import ILC results…**: choose the completed `drive_<name>.state.npz` from
    the existing ILC GUI. The panel imports the final drive, original target,
    EOM channel, time grid, fixed AWG full scale and recorded plant/FRF. It
    displays the waveform and last recorded monitor-error metrics. You do not
    re-enter the voltage target or run voltage ILC again.
-2. **Hardware & light**: confirm the scope channels and ELL14 settings; supply
-   the optical fringe calibrations when available. Click **Test analyzer +
-   show traces** to verify the discrete-angle acquisition and view converted
-   polarization. Raw testing is available before optical calibration.
-3. **Fine-tune**: choose slow bandwidth and small correction limits, then
-   click **Start optical follow-up**. This copies the imported final drive
+2. **Optical acquisition** on the main page: select the photodiode channel and
+   analyzer angles, then click **Validate optical acquisition**. This checks
+   discrete-angle acquisition and displays raw traces. Add fringe calibration
+   files in **Setup → Calibration** to also display converted polarization.
+   Mount port, zero offset and other scope wiring live in **Setup → Acquisition**.
+3. **Bounded polarization correction** on the same page: choose bandwidth, then
+   click **Initialize correction session**. This copies the imported final drive
    into a new optical campaign. If that final drive is already playing, no
    new baseline upload is needed.
-4. **Capture light**, inspect the plots, then **Calculate small correction**.
-   The panel manages session and capture paths and saves the corrected drive
-   to a new file. **Open results folder** locates it. Upload the corrected
-   AWG file and repeat the optical measurement.
+4. Select **Single iteration** or **N iterations**, then **Run iterations**.
+   Each iteration acquires fresh traces and saves one correction. For multiple
+   iterations, upload each exported CSV through the existing AWG GUI, then
+   select **Continue after AWG upload**. **Open results folder** locates the files.
 
-**Resume optical follow-up…** reopens an existing optical session. The last
+## How corrections and iterations work
+
+**Single iteration** acquires the current waveform at the calibrated analyzer
+angles, computes one bounded correction and exports the next `pol_iNNN` state
+and AWG CSV. **N iterations** requests N such measured correction updates,
+starting from the current optical session rather than resetting its baseline.
+The sequence pauses after each update except the last. The status line reports
+progress and the exact CSV required for the next manual upload.
+
+Before **Run iterations**, the AWG must already be playing the current session's
+command. At each pause, upload the exported CSV with fixed full scale and
+normalization OFF, review the plots, then select **Continue after AWG upload**.
+That acknowledgement starts a new acquisition followed by one new correction;
+the sequence never reuses the preceding capture to calculate another step.
+The application does not upload waveforms, enable outputs, or modify the
+other EOM. Captures are checked against session, iteration, time grid and
+saved drive identity. Neither this check nor the upload acknowledgement proves
+which waveform is physically playing.
+
+**Stop** ends the sequence at an operation boundary: an active acquisition or
+calculation finishes, but no next operation starts. Stopping at an upload pause
+is immediate. Acquisition/voltage-check errors stop the sequence; correction
+warnings, including rail warnings, also stop it for review. Saved data remain
+available. The final exported command is not uploaded or measured automatically:
+upload it and use **Acquire optical traces** for a final validation.
+
+For individual operations, **Acquire optical traces** remains available on the
+main page; **Compute correction** and **Evaluate measurement quality** are in
+**Setup → Files & diagnostics**. A computed update is always one iteration.
+
+For each update, the software:
+
+1. Holds the intended polarization from the original voltage target fixed.
+   Fringe calibrations predict the light signal at each analyzer angle.
+2. Compares those predictions with the averaged photodiode traces. A joint
+   noise-weighted fit using calibrated optical slopes gives a small equivalent
+   HV error; optically blind slopes are excluded and errors below the default
+   three-standard-error gate are suppressed.
+3. Uses the existing voltage plant or recorded FRF inverse to translate this
+   error into an AWG correction, with learning gain 0.2. Only slow modes below
+   the selected bandwidth remain; the waveform endpoints stay fixed. This
+   bandwidth refers to variation within the waveform, not drift over minutes.
+   Below the first adjustable mode `1/(2T)`, the correction is zero.
+4. Bounds the step and accumulated change from the finished voltage ILC
+   baseline, and applies the existing voltage guards. Defaults are 2 mV per
+   AWG step, 20 mV total AWG change, and 10 V predicted HV change. Approaching
+   these rails produces a warning. Missing optical coverage holds the update
+   at zero. The next drive is the current drive plus the bounded update.
+
+There is no automatic convergence stop or guaranteed iteration count. Inspect
+the residual and measurement noise after each upload. Stop when the remaining
+error is acceptable or unresolved by the measurement; investigate rail warnings
+instead of repeatedly pushing against a limit. **Initialize correction session**
+starts a new campaign at iteration zero; it is not the next-iteration button.
+
+## Plots in the GUI
+
+**Plots** shows six synchronized panels after session initialization, capture,
+or correction: saved AWG drive and the original baseline; original voltage
+target and measured Trek voltage; measured photodiode signals at each analyzer
+angle with expected calibrated signals; intended and measured polarization;
+polarization error modulo 180°; and total/latest AWG correction.
+Light means show ±1 standard error; the angle plot also shows its uncertainty.
+Trek monitor measurements are converted to HV using the selected channel scale.
+The AWG drive panel shows saved commands, not a scope measurement of the AWG.
+After a correction, traces still belong to the previous, measured iteration;
+the new drive is explicitly marked **not yet measured**. Upload and acquire
+again to assess its effect. Matplotlib controls allow zooming and saving plots.
+The raw analyzer hardware test retains its separate live trace window.
+
+The required contemporaneous locked-intensity baseline at about −32 ms before
+spin echo is documented below and in EXPLANATION.md. Automatic acquisition and
+normalization to that baseline are not implemented; this update does not solve
+intensity-drift ambiguity in the optical residual.
+
+**Resume correction session…** reopens an existing optical session. The last
 voltage case is remembered on launch. To use the other EOM, load its completed
 ILC state; the EOM and default monitor/drive channels follow the selected
 results. Review physical scope wiring, especially the photodiode input.
-Advanced settings contain the voltage-to-angle convention, optional FRF
-override, report reference/window and output workspace. A relocated recorded
+Setup contains the correction limits, voltage-to-angle convention, optional FRF
+override, report reference/window and output workspace. The main page displays
+the active correction limits. Waveform preview and operation details are hidden
+until requested; actions become available as results and measurements are ready. A relocated recorded
 FRF is found alongside the state or in the repo's `run/` folder when available;
-if it is unavailable, select its actual file in Advanced.
+if it is unavailable, select its actual file in Setup → Files & diagnostics.
 
 Corrected drive uploads use the existing AWG GUI, with
 normalization OFF, fixed full scale, AMP = twice the state's full scale and
@@ -220,7 +301,7 @@ No auto-ranging is applied between angles.
 
 ## Test the polarization measurement before tuning
 
-Use **Test analyzer + show traces** for the live hardware check:
+Use **Validate optical acquisition** for the live hardware check:
 
 1. Select a voltage state (or existing optical session), set the ELL14 port
    and optical zero, and enter the photodiode, Trek monitor and AWG-output
@@ -229,7 +310,7 @@ Use **Test analyzer + show traces** for the live hardware check:
    fields are filled.
 2. Enter **Hardware test analyzer angles**, such as `0,45`. These settings
    control the live test independently of the fine-tune session's angle list.
-3. Click **Test analyzer + show traces**. A plot window opens. The ELL14 moves to
+3. Click **Validate optical acquisition**. A plot window opens. The ELL14 moves to
    each requested position, verifies it after settling, and acquires repeated
    scope traces. The plot updates as each angle completes, showing requested
    versus actual analyzer position, photodiode traces and simultaneous Trek

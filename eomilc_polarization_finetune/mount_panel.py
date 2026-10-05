@@ -25,13 +25,13 @@ class MountPanel(ttk.Frame):
         self.buttons = {}
         self.connection_entries = []
         ttk.Label(self, text='ELL14 mount control', font=('Arial', 14, 'bold')).grid(row=0, column=0, columnspan=3, sticky='w')
-        ttk.Label(self, text='Works without ILC results, scope or photodiode. Connect checks the device; movement requires Home or Move.', wraplength=850).grid(row=1, column=0, columnspan=3, sticky='w', pady=8)
+        ttk.Label(self, text='Independent ELL14 control. Connection verifies device identity without initiating motion.', wraplength=850).grid(row=1, column=0, columnspan=3, sticky='w', pady=8)
         for row, (label, value) in enumerate((('Serial port (or auto)', port), ('Analyzer zero offset (deg)', zero)), start=2):
             ttk.Label(self, text=label).grid(row=row, column=0, sticky='w')
             entry = ttk.Entry(self, textvariable=value, width=30)
             entry.grid(row=row, column=1, sticky='ew', pady=3)
             self.connection_entries.append(entry)
-        ttk.Label(self, text='Zero offset is applied on connection. Angles below use this analyzer frame, modulo 360°. Disconnect to change settings.', wraplength=850).grid(row=4, column=0, columnspan=3, sticky='w', pady=6)
+        ttk.Label(self, text='Analyzer coordinates: mount angle minus zero offset, modulo 360°. Connection parameters are editable while disconnected.', wraplength=850).grid(row=4, column=0, columnspan=3, sticky='w', pady=6)
         ttk.Label(self, textvariable=self.state_text, wraplength=850).grid(row=5, column=0, columnspan=3, sticky='w')
         ttk.Label(self, textvariable=self.position_text).grid(row=6, column=0, columnspan=3, sticky='w', pady=8)
         connection = ttk.Frame(self)
@@ -44,9 +44,9 @@ class MountPanel(ttk.Frame):
         move = ttk.Frame(self)
         move.grid(row=9, column=0, columnspan=3, sticky='w')
         self._button(move, 'move', 'Move to angle')
-        for angle in (0, 45, 90):
+        for angle in (0, 45, 90, 135):
             self._button(move, f'move_{angle}', f'{angle}°', angle)
-        ttk.Label(self, text='Home after power-up. Disconnect here before running a light capture or analyzer trace test.', wraplength=850).grid(row=10, column=0, columnspan=3, sticky='w', pady=8)
+        ttk.Label(self, text='Homing required after power-up. Manual serial connection must be released before optical acquisition.', wraplength=850).grid(row=10, column=0, columnspan=3, sticky='w', pady=8)
         self.log = tk.Text(self, height=8, width=90, state='disabled')
         self.log.grid(row=11, column=0, columnspan=3, sticky='ew')
         self.columnconfigure(1, weight=1)
@@ -79,7 +79,7 @@ class MountPanel(ttk.Frame):
         try:
             port, zero = self.port.get().strip(), float(self.zero.get())
             if action == 'connect' and (not port or not math.isfinite(zero)):
-                raise ValueError('Enter a serial port (or auto) and a finite zero offset.')
+                raise ValueError('Serial port (or auto) and finite analyzer zero offset required.')
             if action.startswith('move'):
                 angle = float(self.target.get()) if angle is None else angle
                 if not math.isfinite(angle):
@@ -124,7 +124,7 @@ class MountPanel(ttk.Frame):
             if position is not None:
                 self.position_text.set(f'Position: {position:.3f}° (analyzer frame)')
             elif error or self.mount is None:
-                self.position_text.set('Position: — (read again to update)')
+                self.position_text.set('Position: unavailable')
             self.log.configure(state='normal')
             self.log.insert('end', detail + '\n')
             self.log.see('end')
