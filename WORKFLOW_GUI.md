@@ -40,15 +40,19 @@ Support/EOM-ILC-GUI/` there rather than `%APPDATA%`.
 
 ## 1. The window at a glance
 
-| panel | what it does |
+The settings sit in five tabs on the left, in the order a campaign uses
+them; the session summary, the log and the status line underneath are always
+visible.
+
+| tab | what it holds |
 |---|---|
 | **Session** | load a state file, or build one: target + channel + name + first-shot gain → Init |
-| **Inverse model** | what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, and the FRF band |
-| **Capture post-processing** | how a measurement becomes an error: `t-offset` and baseline handling, shared by Step and Bench. Nothing here touches the first shot. |
-| **Step from captured files** | one ILC iteration from scope CSVs you captured yourself |
-| **Bench loop** | the hands-off cycle: upload → capture → update |
+| **Model** | *Inverse model*: what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, the learning notches, and the FRF band |
+| **Measure** | *Capture post-processing* (`t-offset`, baseline) and *Line (mains) ripple*: how a measurement becomes an error, shared by Step and Bench. Nothing here touches the first shot. |
+| **Run** | *Step from captured files* (one iteration from captures you took) and *Bench loop* (upload → capture → update, Auto-set, Upload, Hold) |
+| **Corrections** | learned target corrections: move the TARGET by an error measured elsewhere (the polarimeter), within limits — §11 |
 | **Log** | everything the loop reports. A timestamped copy appends to `run\ilc_gui.log` |
-| right side | nine tabs (eight figures plus the Table ledger), refreshed at every step, with the iteration selector and Compare box above them — see §7 |
+| right side | ten tabs (nine figures plus the Table ledger), refreshed at every step, with the iteration selector and Compare box above them — see §7 |
 
 Every individual field is documented in §10.
 
@@ -514,6 +518,26 @@ and it behaves like any entry again.
 | **t-offset us** *(state)* | The fixed trigger-to-waveform-start delay, subtracted when resampling every capture onto the loop grid. Measured **0** on this bench (2026-08-24). Measure once, leave alone: re-fitting it per iteration makes the loop chase its own alignment. Bench mode cross-checks it against the uploaded drive on the first iteration and refuses if stale. |
 | **zero baseline** *(panel)* | Subtracts the mean of the first 5 % of the record from the measurement. Only valid when the waveform is actually flat there — MKJ is already moving, so on MKJ this subtracts real signal and roughly doubles the reported error (the step warns when the target's own baseline is not flat). Off unless you know why. |
 
+### Line (mains) ripple (Measure tab)
+
+On a **line-synchronous trigger** the mains ripple on the monitor is the same
+in every shot (5 Oct 2026, the experiment's trigger: 0.9 / 1.35 mV at 60 Hz on
+the X1 / X2 monitors, ~1 V at each EOM; 23 mdeg on the light; same phase in
+all 19 analyzer steps over 25 minutes), so the shot average keeps it and the
+loop learns a drive that cancels it *at that phase* — which is wrong as soon
+as the experiment moves its ramps against its line resync. Measured once and
+subtracted from every measurement before the update, the loop never sees it.
+A free-running trigger already averages it away (the old bench practice):
+leave this off there.
+
+| field | what it does |
+|---|---|
+| **subtract the measured ripple…** *(state)* | Takes the fitted ripple out of every measurement before the update and the error metrics (`Loop.line`, state key `line_ref`, honoured by the CLIs too). The Error tabs show the error the loop acts on. Refuses (asks) when the fit's shots were not phase-coherent. |
+| **line Hz / harmonics / window ms** *(config)* | 60 Hz and 5 harmonics by default; the window of the bench measurement (100 ms = 6 periods — the record itself, ~11 ms, cannot tell 60 Hz from a slow drift, which is why it is measured separately). |
+| **Measure (drive off)** | Bench: AWG output OFF (asks if it is on, leaves it off), scope widened to the window on the same trigger (restored after), 8–32 dithered shots of the monitor, harmonics fitted to the mean, per-shot phase coherence reported (≥ 0.7 = line-synchronous). Times out with a hint if the scope triggers on the drive itself. |
+| **Fit from captures…** | Offline: Scope Grab CSV/NPZ captures of the monitor (column = *monitor col*), drive off — or any capture whose undriven stretches are named in **fit only in ms** (`-12:0, 10:16.5`). Must use the same trigger as the ILC runs. Short stretches fit badly (the log says when). |
+| **Clear** | Forgets the fit and switches the subtraction off. |
+
 ### Step from captured files
 
 | field | what it does |
@@ -554,3 +578,57 @@ and it behaves like any entry again.
 | **Δt labels** *(config)* | Append wall-clock offsets to legend labels: runs relative to their iteration's base measurement, base iterations relative to the previous one. Off by default — plot clutter only when the timing question is live. |
 | **spectra avg** *(config)* | Welch segment count for BOTH spectrum tabs: blank or `1` = the raw single-record FFT (full resolution, but a periodogram's per-bin scatter is ~100% and does not average down with record length), `N` = Hann-windowed 50%-overlap averaging over N segments (scatter drops ~√N, resolution coarsens ~N-fold — tones closer than the new bin width merge, burst-edge content smears across segments). Normalised so a pure tone keeps its height in both modes; the broadband noise floor moves with bin width, so only compare curves drawn at the same setting — the title says which. |
 | **link t** *(config)* | Rectangle-zoom (or pan, or home) on any time-domain plot — Waveforms, Drive corrections, Drive updates, Error — applies that time window to all of them, and redraws keep it until the next zoom. The toolbar zoom itself is unchanged; it just acts everywhere at once. Untick to zoom plots independently. |
+
+### Corrections tab
+
+| field | what it does |
+|---|---|
+| **Correction files** | The layers: file, slot (what it corrects — a new file in the same slot replaces the old one), gain, the peak applied after the gate, how much of the active record is resolved, status (added / changed / applied / refused / off). **Add file…**, **Remove**, **On / off**, **gain** + **Set** (0–1.5). |
+| **band Hz** *(config)* | Nothing faster than this is applied (the file's own `band_hz` if lower). 2 kHz default: the polarimeter is slow and noisy above it, and the ramps' motional band starts at 4.9 kHz. Must be under the loop's own band (f_cut, or the FRF's full-strength edge) or Apply refuses. |
+| **resolved at k sigma** *(config)* | Where the low-passed correction is under k × its own low-passed standard error (the file's sigma column) it is held at zero — that part is the measurement's noise. 3 by default. |
+| **floor V** *(config)* | Smaller than this is held at zero: below what the monitor average can verify (dithered 64-shot mean ~0.05 mV; 0.1 mV = 0.1 V at an EOM). Volts at the output. |
+| **cap V** *(config)* | Largest total change allowed, volts at the output. Past it Apply refuses — lower a gain, or raise the cap on purpose. |
+| **end fade us / only where the target is active** *(config)* | Both record ends fade to exactly zero; with the tick, the correction is zero wherever the base target sits at its idle level (the AWG holds the first sample between bursts). |
+| **Preview** | Gates every switched-on file against the BASE target, checks the total, logs the numbers and draws the *Target corrections* plot tab. Changes nothing. |
+| **Apply to target** | Preview, then: refuse on any failure (wrong channel, another target's grid or values, over the cap, band above the loop's, the estimated drive past the Trek limits, the AWG rail or the ±full-scale upload mapping); otherwise confirm with the numbers and set target = base + total. The base target is kept in the state (`base_target`, `corr_total`, `corrections`); the next measurement is against the new target. |
+| **Revert to base** | Target back to the base target; the files stay in the box, switched off. |
+
+## 11. Learned target corrections (the outer loop)
+
+The ILC makes the **monitor** follow the target. What the experiment needs is
+the **light**, and the light does not do exactly what the monitors say
+(5 Oct 2026: light − monitors ±2–3° over the ramps, a static function of
+rotation plus a 7 µs lag). A correction moves the target by minus that
+error; the loop then learns the drive that puts the monitor on the moved
+target, and the light lands on the original target. Moving the *drive*
+instead does not work: the next ILC update pulls the monitor back onto the
+old target.
+
+The correction must be **light − monitors**, not light − target: the loop
+removes the monitor's own error by itself, so a correction built on
+light − target removes it twice and puts it back with the opposite sign.
+
+Nothing here is specific to polarization or to the EOMs. A correction file
+(`eomilc/corrections.py`: `# EOM-ILC target correction v1`, `# key: value`
+header, `time_us,delta_V,sigma_V`, volts in the target CSV's units) can come
+from any measurement of any outcome, for any channel GEN included; the panel
+checks it against the session's own limits.
+
+Workflow for the optical correction:
+
+1. Run the polarimeter scan with the CmdX1/X2 and MonX1/X2 roles (and, for
+   the line ripple, a second scan of the same sequence with the ramps
+   disabled).
+2. `ramp-polarimeter` → *ILC target* (or `tools/target_compare.py`): writes
+   `target_<name>_played.csv` (the ILC target with the experiment's timing)
+   and `corr_<name>_optical.csv` per crystal.
+3. ILC panel: Init a campaign on `target_<name>_played.csv`, converge it.
+4. Corrections → Add `corr_<name>_optical.csv` → Preview → Apply (a gain
+   under 1 for the first pass is the cautious choice: the statistical sigma
+   is small, but leg-to-leg and up/down differences of 0.1–0.2° are not in
+   it). Iterate the loop until it has learned the new target.
+5. Verification scan, and a new correction file. It *replaces* the old one
+   in the same slot (the box asks): light − monitors does not depend on the
+   correction already applied (to first order), so each scan is a fresh
+   estimate of the WHOLE correction, not of a remainder. Stacking them would
+   apply it twice.

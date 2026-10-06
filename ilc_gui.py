@@ -66,6 +66,7 @@ from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
 from matplotlib.figure import Figure
 
 from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
+from eomilc import corrections as corrmod, mains
 from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
 import ilc_bench            # the debugged bench helpers; main() is guarded
 import run_ilc              # load_target and the state-file conventions
@@ -212,6 +213,13 @@ class Session:
                                      # when it was not the flat conversion
         self.target_path = ""        # the target CSV Init read, so Load can
                                      # put it back in the Target box
+        # Learned target corrections (eomilc.corrections): loop.target is
+        # base_target + corr_total once any are applied; None = never.
+        # Monitor volts, like loop.target.
+        self.base_target = None
+        self.corr_total = None
+        self.corr_layers = []        # [{path, slot, gain, on, ...}] as applied
+        self.line_fit = None         # {"fit": mains record, "meta": {...}}
 
     @property
     def channel(self):
@@ -232,6 +240,22 @@ def load_session(path) -> Session:
     s.frf_max = float(st["frf_max"]) if "frf_max" in st else 0.0
     s.seed_path = str(st["seed_path"]) if "seed_path" in st else ""
     s.target_path = str(st["target_path"]) if "target_path" in st else ""
+    if "base_target" in st:
+        s.base_target = np.asarray(st["base_target"], float)
+        if "corr_total" in st:
+            s.corr_total = np.asarray(st["corr_total"], float)
+    if "corrections" in st:
+        try:
+            s.corr_layers = list(json.loads(str(st["corrections"])))
+        except ValueError:
+            s.corr_layers = []
+    if "line_fit" in st:
+        try:
+            rec = json.loads(str(st["line_fit"]))
+            s.line_fit = {"fit": mains.from_record(rec["fit"]),
+                          "meta": rec.get("meta", {})}
+        except (ValueError, KeyError, TypeError):
+            s.line_fit = None
     if s.model_key == "frf" and s.frf_path and os.path.exists(s.frf_path):
         try:                       # the loop resumes with its recorded inverse
             loop.frf = ilc.FRF(s.frf_path, f_use=s.frf_use, f_max=s.frf_max)
@@ -245,8 +269,22 @@ def load_session(path) -> Session:
 
 
 def save_session(s: Session):
-    """Same keys as run_ilc / ilc_bench write, so the CLIs can resume this."""
+    """Same keys as run_ilc / ilc_bench write, so the CLIs can resume this.
+    The panel's extra keys (run_ilc.PASS_THROUGH) are written only when
+    there is something in them, and the CLIs carry them through."""
     lp = s.loop
+    extra = {}
+    if s.base_target is not None:
+        extra["base_target"] = np.asarray(s.base_target, float)
+        if s.corr_total is not None:
+            extra["corr_total"] = np.asarray(s.corr_total, float)
+    if s.corr_layers:
+        extra["corrections"] = json.dumps(s.corr_layers)
+    if s.line_fit is not None:
+        extra["line_fit"] = json.dumps({"fit": mains.to_record(s.line_fit["fit"]),
+                                        "meta": s.line_fit.get("meta", {})})
+    if lp.line is not None:
+        extra["line_ref"] = np.asarray(lp.line, float)
     np.savez(s.state_path, t=s.t, target=lp.target, u=s.u, dt=lp.dt,
              channel=lp.channel.name, gain=lp.plant.gain, tau=lp.plant.tau,
              offset=lp.plant.offset, tau2=lp.plant.tau2, fn=lp.plant.fn,
@@ -256,7 +294,7 @@ def save_session(s: Session):
              model=s.model_key, frf_path=s.frf_path,
              frf_use=s.frf_use, frf_max=s.frf_max, seed_path=s.seed_path,
              target_path=s.target_path,
-             notches=np.asarray(lp.notches, float).reshape(-1, 2))
+             notches=np.asarray(lp.notches, float).reshape(-1, 2), **extra)
 
 
 def find_target_file(target, mon_scale, dirs):
@@ -707,6 +745,14 @@ class App:
                  keep_native=self.keepnative_var.get(),
                  keep_verticals=self.keepvert_var.get(),
                  seed_drive=self.seed_var.get(),
+                 line_f=self.linef_var.get(), line_h=self.lineh_var.get(),
+                 line_win=self.linewin_var.get(),
+                 line_seg=self.lineseg_var.get(),
+                 corr_band=self.corrband_var.get(), corr_k=self.corrk_var.get(),
+                 corr_floor=self.corrfloor_var.get(),
+                 corr_cap=self.corrcap_var.get(),
+                 corr_fade=self.corrfade_var.get(),
+                 corr_active=bool(self.corract_var.get()),
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get())
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -737,8 +783,27 @@ class App:
         right = ttk.Frame(outer)
         right.pack(side="left", fill="both", expand=True)
 
+        # The settings live in tabs, in the order a campaign uses them:
+        # Session (what is being learned), Model (what the update divides
+        # by), Measure (how a capture becomes an error), Run (step / bench /
+        # hold), Corrections (learned changes to the TARGET from another
+        # measurement). The session summary, the log and the status line sit
+        # under the tabs and are always visible. Tabs are selected by FRAME
+        # (self._tabs), never by index.
+        self.lnb = ttk.Notebook(left)
+        self.lnb.pack(fill="x")
+        self._tabs = {}
+        for key, label in (("session", "Session"), ("model", "Model"),
+                           ("measure", "Measure"), ("run", "Run"),
+                           ("corr", "Corrections")):
+            fr = ttk.Frame(self.lnb, padding=2)
+            self.lnb.add(fr, text=label)
+            self._tabs[key] = fr
+        tab_session, tab_model = self._tabs["session"], self._tabs["model"]
+        tab_measure, tab_run = self._tabs["measure"], self._tabs["run"]
+
         # ---- session -------------------------------------------------
-        sf = ttk.LabelFrame(left, text="Session", padding=3)
+        sf = ttk.LabelFrame(tab_session, text="Session", padding=3)
         sf.pack(fill="x", pady=(0, 2))
         self.state_var = tk.StringVar(value=self.cfg.get("state", ""))
         self.state_entry = self._path_row(
@@ -811,14 +876,11 @@ class App:
         b.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         self._actions.append(b)
 
-        self.summary = ttk.Label(sf, text="no session loaded", justify="left",
-                                 font=MONO)
-        self.summary.grid(row=7, column=0, columnspan=4, sticky="w", pady=(2, 0))
         sf.columnconfigure(1, weight=1)
 
         # ---- inverse model -------------------------------------------
-        vf = ttk.LabelFrame(left, text="Inverse model (what the update "
-                                       "divides the error by)", padding=3)
+        vf = ttk.LabelFrame(tab_model, text="Inverse model (what the update "
+                                            "divides the error by)", padding=3)
         vf.pack(fill="x", pady=(0, 2))
         self.model_var = tk.StringVar(
             value=self.cfg.get("model", KEY2LABEL["frf"]))
@@ -920,8 +982,8 @@ class App:
         # Settings that shape how a MEASUREMENT is turned into an error --
         # nothing here touches the first shot, which is a pure flat
         # conversion. Applies to both Step and the bench loop.
-        pf = ttk.LabelFrame(left, text="Capture post-processing "
-                                       "(Step + Bench)", padding=3)
+        pf = ttk.LabelFrame(tab_measure, text="Capture post-processing "
+                                              "(Step + Bench)", padding=3)
         pf.pack(fill="x", pady=(0, 2))
         r0 = ttk.Frame(pf); r0.grid(row=0, column=0, sticky="ew")
         self.toff_var = tk.StringVar(value="0.0")
@@ -937,7 +999,7 @@ class App:
         pf.columnconfigure(0, weight=1)
 
         # ---- manual step ---------------------------------------------
-        mf = ttk.LabelFrame(left, text="Step from captured files", padding=3)
+        mf = ttk.LabelFrame(tab_run, text="Step from captured files", padding=3)
         mf.pack(fill="x", pady=(0, 2))
         self.meas_var = tk.StringVar(value=self.cfg.get("measured", ""))
         self._path_row(mf, 0, "Captures", self.meas_var, self._browse_measured)
@@ -963,7 +1025,7 @@ class App:
         mf.columnconfigure(1, weight=1)
 
         # ---- bench loop ----------------------------------------------
-        bf = ttk.LabelFrame(left, text="Bench loop (upload -> capture -> update)",
+        bf = ttk.LabelFrame(tab_run, text="Bench loop (upload -> capture -> update)",
                             padding=3)
         bf.pack(fill="x", pady=(0, 2))
         r0 = ttk.Frame(bf); r0.grid(row=0, column=0, sticky="ew")
@@ -1040,6 +1102,15 @@ class App:
                            "Outputs switch OFF when a run that played anything ends.",
                   foreground="#666666").grid(row=5, column=0, sticky="w")
         bf.columnconfigure(0, weight=1)
+
+        # ---- line ripple + target corrections (their own builders) ------
+        self._build_line_frame(tab_measure)
+        self._build_corr_tab(self._tabs["corr"])
+
+        # ---- always visible: the session summary, the log, the status -
+        self.summary = ttk.Label(left, text="no session loaded", justify="left",
+                                 font=MONO)
+        self.summary.pack(fill="x", pady=(4, 2))
 
         # ---- log ------------------------------------------------------
         lf = ttk.LabelFrame(left, text="Log", padding=2)
@@ -1155,6 +1226,9 @@ class App:
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
         self._table_tab()
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True)
+        self.fig_corr, self.ax_corr = self._tab("Target corrections", 3,
+                                                sharex=True)
+        self._corr_frame = self.nb.tabs()[-1]
 
         # Home on any TIME-domain figure homes them all: the nav stacks of
         # panes that were only ever synced programmatically are empty, so
@@ -1211,6 +1285,786 @@ class App:
         ysb.pack(side="right", fill="y")
         tv.pack(side="left", fill="both", expand=True)
         self.table = tv
+
+    # ------------------------------------------------- line (mains) ripple
+    def _build_line_frame(self, parent):
+        """The Measure tab's line-ripple box. On a line-synchronous trigger
+        the mains ripple on the monitor is the same in every shot, so the
+        shot average keeps it and the loop learns a drive that cancels it
+        AT THAT PHASE -- wrong as soon as the experiment moves its ramps
+        against the line resync. Measured once with the drive off and
+        subtracted from every measurement (Loop.line), the loop never sees
+        it. See eomilc.mains for the measured numbers."""
+        lf = ttk.LabelFrame(parent, text="Line (mains) ripple", padding=3)
+        lf.pack(fill="x", pady=(0, 2))
+        self._line_fit = None            # the panel's last fit, carried to Init
+        self.line_on_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(lf, text="subtract the measured ripple from every "
+                                 "measurement before the update",
+                        variable=self.line_on_var,
+                        command=self._on_line_toggle).grid(row=0, column=0,
+                                                           sticky="w")
+        r1 = ttk.Frame(lf); r1.grid(row=1, column=0, sticky="ew", pady=1)
+        self.linef_var = tk.StringVar(value=self.cfg.get("line_f", "60"))
+        self.lineh_var = tk.StringVar(value=self.cfg.get("line_h", "5"))
+        self.linewin_var = tk.StringVar(value=self.cfg.get("line_win", "100"))
+        self.lineseg_var = tk.StringVar(value=self.cfg.get("line_seg", ""))
+        for lab, var, w in (("line Hz", self.linef_var, 5),
+                            ("harmonics", self.lineh_var, 3),
+                            ("window ms", self.linewin_var, 5)):
+            ttk.Label(r1, text=lab).pack(side="left", padx=(0, 2))
+            ttk.Entry(r1, textvariable=var, width=w).pack(side="left",
+                                                          padx=(0, 8))
+        r2 = ttk.Frame(lf); r2.grid(row=2, column=0, sticky="ew", pady=1)
+        b = ttk.Button(r2, text="Measure (drive off)",
+                       command=self.do_line_measure)
+        b.pack(side="left", fill="x", expand=True)
+        self._actions.append(b)
+        b = ttk.Button(r2, text="Fit from captures...",
+                       command=self.do_line_from_files)
+        b.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self._actions.append(b)
+        b = ttk.Button(r2, text="Clear", command=self.do_line_clear, width=6)
+        b.pack(side="left", padx=(4, 0))
+        self._actions.append(b)
+        r3 = ttk.Frame(lf); r3.grid(row=3, column=0, sticky="ew", pady=1)
+        ttk.Label(r3, text="captures: fit only in ms").pack(side="left")
+        ttk.Entry(r3, textvariable=self.lineseg_var, width=18).pack(
+            side="left", padx=(2, 4))
+        ttk.Label(r3, text="(e.g. -12:0, 10:16.5; blank = all)",
+                  foreground="#666666").pack(side="left")
+        self.line_status = ttk.Label(lf, text="nothing measured",
+                                     foreground="#444444", wraplength=430,
+                                     justify="left")
+        self.line_status.grid(row=4, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(lf, text="Only with a line-synchronous trigger: a free-"
+                           "running one already averages the ripple away, "
+                           "and subtracting a fixed phase would add it back. "
+                           "Captures must share the ILC runs' trigger.",
+                  foreground="#666666", wraplength=430,
+                  justify="left").grid(row=5, column=0, sticky="w")
+        lf.columnconfigure(0, weight=1)
+
+    def _line_segments(self):
+        """'-12:0, 10:16.5' (ms) -> [(t0, t1)] in seconds; blank -> None."""
+        text = self.lineseg_var.get().strip()
+        if not text:
+            return None
+        out = []
+        for tok in re.split(r"[,;]+", text):
+            tok = tok.strip()
+            if not tok:
+                continue
+            a, sep, b = tok.partition(":")
+            try:
+                out.append((float(a) * 1e-3, float(b) * 1e-3))
+            except ValueError:
+                raise RuntimeError(f"fit window {tok!r}: use from:to in ms, "
+                                   f"e.g. -12:0, 10:16.5")
+            if not sep or out[-1][1] <= out[-1][0]:
+                raise RuntimeError(f"fit window {tok!r}: needs from:to with "
+                                   f"to > from")
+        return out or None
+
+    def _fit_line_shots(self, t, stack, f_line, harmonics, segments):
+        """Fit the ripple to the shot mean; the per-shot phase of the
+        fundamental says whether the trigger is line-synchronous (coherence
+        near 1) or free-running (near 1/sqrt(shots))."""
+        t = np.asarray(t, float)
+        stack = np.atleast_2d(np.asarray(stack, float))
+        segs = (None if segments is None else
+                [(t >= a) & (t <= b) for a, b in segments])
+        if segs is not None and not any(m.any() for m in segs):
+            raise RuntimeError("no samples inside the fit windows")
+        fit = mains.fit_line(t, stack.mean(axis=0), f_line, harmonics, segs)
+        coh = None
+        if len(stack) > 1:
+            ph = [np.deg2rad(mains.fit_line(t, row, f_line, 1, segs)
+                             ["phase_deg"][0]) for row in stack]
+            coh = float(abs(np.mean(np.exp(1j * np.asarray(ph)))))
+        span = float(sum((min(b, t[-1]) - max(a, t[0])) for a, b in segments)
+                     if segments else t[-1] - t[0])
+        meta = dict(measured=datetime.datetime.now().isoformat(
+                        timespec="seconds"),
+                    n_shots=int(len(stack)), coherence=coh,
+                    span_ms=round(span * 1e3, 3),
+                    segments_ms=([[a * 1e3, b * 1e3] for a, b in segments]
+                                 if segments else None))
+        return fit, meta
+
+    def _apply_line(self, s, on):
+        s.loop.line = (mains.line_wave(s.t, s.line_fit["fit"])
+                       if on and s.line_fit is not None else None)
+
+    def _set_line_fit(self, fit, meta):
+        """Main thread: adopt a fit for the panel and the loaded session."""
+        self._line_fit = {"fit": fit, "meta": meta}
+        s = self.session
+        sc = s.loop.channel.mon_scale if s else 1.0
+        unit = f"V at the {s.loop.channel.out_name}" if s else "V"
+        self.log(f"line ripple ({meta.get('source', '?')}): "
+                 + mains.describe(fit, scale=sc, unit=unit))
+        coh = meta.get("coherence")
+        if coh is not None:
+            synced = coh >= 0.7
+            self.log(f"  phase coherence over {meta['n_shots']} shots "
+                     f"{coh:.2f} -- "
+                     + ("line-synchronous trigger: the ripple repeats in "
+                        "every shot and the average keeps it"
+                        if synced else
+                        "the trigger is NOT line-synchronous: the ripple "
+                        "averages away by itself; leave subtraction OFF"))
+            if not synced and self.line_on_var.get():
+                self.line_on_var.set(False)
+                self.log("  subtraction switched OFF")
+        if fit.get("cond", 0) > 1e3:
+            self.log(f"  NOTE: the fit window is short for {fit['f_line']:g} "
+                     f"Hz (condition {fit['cond']:.0f}) -- the ripple and a "
+                     f"drift trade off; use a window of several periods")
+        if s is not None:
+            s.line_fit = self._line_fit
+            self._apply_line(s, self.line_on_var.get())
+            save_session(s)
+        if not self.line_on_var.get():
+            self.log("  tick 'subtract the measured ripple' to use it")
+        self._refresh_line_status()
+        self._refresh_summary()
+
+    def _on_line_toggle(self):
+        s = self.session
+        want = bool(self.line_on_var.get())
+        lf = s.line_fit if (s is not None and s.line_fit) else self._line_fit
+        if want and lf is None:
+            self.line_on_var.set(False)
+            return messagebox.showinfo(
+                "Line ripple", "Nothing measured yet: Measure (drive off), "
+                               "or Fit from captures taken on the same "
+                               "trigger with the drive off.")
+        if want:
+            coh = lf["meta"].get("coherence")
+            if coh is not None and coh < 0.7 and not messagebox.askyesno(
+                    "Line ripple",
+                    f"The ripple's phase moved from shot to shot (coherence "
+                    f"{coh:.2f}): the trigger was not line-synchronous when "
+                    f"it was measured, so the shot average removes the "
+                    f"ripple by itself, and subtracting a fixed phase ADDS "
+                    f"ripple-shaped error.\n\nSubtract it anyway?"):
+                self.line_on_var.set(False)
+                return
+        if s is not None:
+            if s.line_fit is None:
+                s.line_fit = lf
+            self._apply_line(s, want)
+            save_session(s)
+            self.log("line ripple " + ("subtracted from every measurement "
+                                       "before the update" if want else
+                                       "no longer subtracted"))
+        self._refresh_line_status()
+        self._refresh_summary()
+
+    def _refresh_line_status(self):
+        s = self.session
+        lf = s.line_fit if (s is not None and s.line_fit) else self._line_fit
+        if lf is None:
+            return self.line_status.configure(text="nothing measured")
+        sc = s.loop.channel.mon_scale if s else 1.0
+        m = lf.get("meta", {})
+        coh = m.get("coherence")
+        on = s is not None and s.loop.line is not None
+        txt = (("SUBTRACTED: " if on else "measured, not used: ")
+               + mains.describe(lf["fit"], scale=sc, unit="V")
+               + f"\n{m.get('source', '')}, {m.get('n_shots', '?')} shots, "
+                 f"{m.get('span_ms', '?')} ms"
+               + (f", coherence {coh:.2f}" if coh is not None else "")
+               + f", {m.get('measured', '')}")
+        self.line_status.configure(text=txt)
+
+    def do_line_clear(self):
+        self._line_fit = None
+        s = self.session
+        if s is not None:
+            s.line_fit = None
+            s.loop.line = None
+            save_session(s)
+        self.line_on_var.set(False)
+        self.log("line ripple cleared")
+        self._refresh_line_status()
+        self._refresh_summary()
+
+    def do_line_measure(self):
+        """Bench: the monitor with the drive OFF, on the run's own trigger,
+        over a window of several line periods, ripple fitted."""
+        if self.session is None:
+            return messagebox.showerror("Line ripple",
+                                        "load or init a session first -- the "
+                                        "ripple is evaluated on its record")
+        try:
+            f = self._floats(awg_ch=self.awgch_var, scope_ch=self.scopech_var,
+                             repeats=self.repeats_var, wait=self.wait_var,
+                             f_line=self.linef_var, harm=self.lineh_var,
+                             win=self.linewin_var)
+        except RuntimeError as e:
+            return messagebox.showerror("Line ripple", str(e))
+        if not self._wiring_ok(f["awg_ch"], f["scope_ch"], "Line ripple"):
+            return
+        if f["win"] * 1e-3 * f["f_line"] < 2:
+            return messagebox.showerror(
+                "Line ripple", f"a {f['win']:g} ms window holds "
+                               f"{f['win']*1e-3*f['f_line']:.1f} periods of "
+                               f"{f['f_line']:g} Hz; use at least 2 (100 ms "
+                               f"is 6 at 60 Hz)")
+        reps = max(8, min(int(f["repeats"]), 32))
+        t_off = self.session.t_off
+        self.run_worker(lambda: self._line_measure_work(
+            int(f["awg_ch"]), int(f["scope_ch"]), reps, f["wait"],
+            f["f_line"], int(f["harm"]), f["win"] * 1e-3, t_off),
+            "measuring line ripple, drive off...")
+
+    def _line_measure_work(self, awg_ch, scope_ch, repeats, wait_s, f_line,
+                           harmonics, win_s, t_off):
+        awg, scope = self._connect_pair()
+        tb, shots, t0 = {}, [], None
+        try:
+            if awg.is_on(awg_ch):
+                if not self.ask_user(
+                        "Line ripple",
+                        f"AWG CH{awg_ch} output is ON. The reference is the "
+                        f"monitor with the drive OFF -- switch the output off "
+                        f"now? (It stays off afterwards, as after any run.)"):
+                    print("line ripple NOT measured: the output was left on")
+                    return
+                awg.set_output(awg_ch, False)
+                print(f"CH{awg_ch} output OFF")
+            for k in (":TIMebase:RANGe", ":TIMebase:POSition"):
+                tb[k] = scope.get(k)
+            scope.put(":TIMebase:RANGe", f"{win_s:.6g}")
+            scope.put(":TIMebase:POSition", f"{0.4 * win_s:.6g}")
+            print(f"scope: {win_s*1e3:g} ms window from {-0.1*win_s*1e3:g} ms "
+                  f"(restored afterwards), CH{scope_ch}, {repeats} shots")
+            pts = scope_points_for(20000)
+            plan, restore = self._dither_plan(scope, (scope_ch,), repeats, 3)
+            try:
+                self.msgs.put(("progress", 0, repeats))
+                for i in range(repeats):
+                    if self.stop_evt.is_set():
+                        raise RuntimeError("stopped; nothing kept")
+                    self._dither_step(scope, plan, i, repeats, 3)
+                    got = scope.single(wait_s=wait_s)
+                    if got is not True:
+                        raise RuntimeError(
+                            f"no trigger within {wait_s:g} s with the drive "
+                            f"off. If the scope triggers on the drive itself "
+                            f"there is nothing to trigger on: capture the "
+                            f"monitor on the experiment's trigger (Scope Grab) "
+                            f"and use 'Fit from captures'.")
+                    ts, vs = self._read_waveform(scope, scope_ch, pts)
+                    scope.run()
+                    ts, vs = np.asarray(ts, float), np.asarray(vs, float)
+                    if t0 is None:
+                        t0 = ts
+                    shots.append(np.interp(t0, ts, vs))
+                    self.msgs.put(("progress", i + 1, repeats))
+            finally:
+                self._dither_restore(scope, restore)
+        finally:
+            for k, v in tb.items():
+                try:
+                    scope.put(k, v)
+                except Exception as e:
+                    print(f"could not restore {k} ({e})")
+            awg.close()
+            scope.close()
+            print("instruments closed")
+        fit, meta = self._fit_line_shots(t0 - t_off, np.asarray(shots),
+                                         f_line, harmonics, None)
+        meta["source"] = f"bench, drive off, CH{scope_ch}"
+        self.msgs.put(("call", lambda: self._set_line_fit(fit, meta)))
+
+    def do_line_from_files(self, files=None):
+        """Offline: Scope Grab captures (CSV or NPZ) of the monitor with the
+        drive off -- or with undriven stretches named in 'fit only in ms' --
+        taken on the same trigger as the ILC runs."""
+        s = self.session
+        if s is None:
+            return messagebox.showerror("Line ripple",
+                                        "load or init a session first")
+        try:
+            f = self._floats(f_line=self.linef_var, harm=self.lineh_var)
+            segs = self._line_segments()
+        except RuntimeError as e:
+            return messagebox.showerror("Line ripple", str(e))
+        if files is None:
+            files = filedialog.askopenfilenames(
+                title="Captures of the monitor, drive off (same trigger)",
+                filetypes=[("Scope Grab captures", "*.csv *.npz"),
+                           ("All files", "*.*")])
+        if not files:
+            return
+        mon = self.moncol_var.get()
+        try:
+            t0, stack = None, []
+            for p in files:
+                tr = scopeio.load(p)
+                tt = np.asarray(tr.t, float) - s.t_off
+                y = np.asarray(tr[mon], float)
+                if t0 is None:
+                    t0 = tt
+                stack.append(np.interp(t0, tt, y))
+            fit, meta = self._fit_line_shots(t0, np.asarray(stack), f["f_line"],
+                                             int(f["harm"]), segs)
+        except (OSError, KeyError, ValueError, RuntimeError) as e:
+            return messagebox.showerror("Line ripple", str(e))
+        meta["source"] = (f"{len(files)} capture(s), {mon}, "
+                          f"{os.path.basename(files[0])}"
+                          + (" ..." if len(files) > 1 else ""))
+        self._set_line_fit(fit, meta)
+
+    # ---------------------------------------------- learned target corrections
+    def _build_corr_tab(self, parent):
+        """Corrections: the outer loop. A correction file (eomilc.corrections)
+        says how far the TARGET should move so that something the monitor
+        cannot see -- the light's polarization, for the EOMs -- comes out
+        right. The loop then learns the drive. The base target is kept."""
+        ttk.Label(parent, text=(
+            "Moves the target the loop follows by a correction measured "
+            "elsewhere (e.g. the polarimeter's light-minus-monitor error). "
+            "The loop then learns the drive for the new target; the base "
+            "target stays on record and Revert restores it."),
+            foreground="#555555", wraplength=440, justify="left").pack(
+            fill="x", pady=(0, 3))
+        lf = ttk.LabelFrame(parent, text="Correction files", padding=3)
+        lf.pack(fill="x", pady=(0, 2))
+        cols = ("on", "file", "slot", "gain", "kept", "res", "status")
+        heads = ("on", "file", "slot", "gain", "kept pk (V)", "resolved",
+                 "status")
+        widths = (28, 150, 62, 40, 70, 58, 70)
+        tv = ttk.Treeview(lf, columns=cols, show="headings", height=4,
+                          selectmode="browse")
+        for c, h, w in zip(cols, heads, widths):
+            tv.heading(c, text=h)
+            tv.column(c, width=w, stretch=(c == "file"),
+                      anchor="w" if c in ("file", "slot", "status") else "e")
+        tv.grid(row=0, column=0, sticky="ew")
+        self.corr_tv = tv
+        r = ttk.Frame(lf); r.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        for text, cmd in (("Add file...", self.do_corr_add),
+                          ("Remove", self.do_corr_remove),
+                          ("On / off", self.do_corr_toggle)):
+            b = ttk.Button(r, text=text, command=cmd)
+            b.pack(side="left", padx=(0, 4))
+            self._actions.append(b)
+        ttk.Label(r, text="gain").pack(side="left", padx=(6, 2))
+        self.corrgain_var = tk.StringVar(value="1")
+        e = ttk.Entry(r, textvariable=self.corrgain_var, width=5)
+        e.pack(side="left")
+        e.bind("<Return>", lambda ev: self.do_corr_gain())
+        b = ttk.Button(r, text="Set", width=4, command=self.do_corr_gain)
+        b.pack(side="left", padx=(2, 0))
+        self._actions.append(b)
+        lf.columnconfigure(0, weight=1)
+
+        gf = ttk.LabelFrame(parent, text="Limits (nothing past these is "
+                                         "applied)", padding=3)
+        gf.pack(fill="x", pady=(0, 2))
+        cfg = self.cfg
+        self.corrband_var = tk.StringVar(value=cfg.get("corr_band", "2000"))
+        self.corrk_var = tk.StringVar(value=cfg.get("corr_k", "3"))
+        self.corrfloor_var = tk.StringVar(value=cfg.get("corr_floor", "0.1"))
+        self.corrcap_var = tk.StringVar(value=cfg.get("corr_cap", "300"))
+        self.corrfade_var = tk.StringVar(value=cfg.get("corr_fade", "200"))
+        self.corract_var = tk.BooleanVar(value=bool(cfg.get("corr_active",
+                                                            True)))
+        r1 = ttk.Frame(gf); r1.grid(row=0, column=0, sticky="ew")
+        for lab, var, w in (("band Hz", self.corrband_var, 6),
+                            ("resolved at k sigma", self.corrk_var, 4),
+                            ("floor V", self.corrfloor_var, 5)):
+            ttk.Label(r1, text=lab).pack(side="left", padx=(0, 2))
+            ttk.Entry(r1, textvariable=var, width=w).pack(side="left",
+                                                          padx=(0, 8))
+        r2 = ttk.Frame(gf); r2.grid(row=1, column=0, sticky="ew", pady=1)
+        for lab, var, w in (("cap V", self.corrcap_var, 6),
+                            ("end fade us", self.corrfade_var, 5)):
+            ttk.Label(r2, text=lab).pack(side="left", padx=(0, 2))
+            ttk.Entry(r2, textvariable=var, width=w).pack(side="left",
+                                                          padx=(0, 8))
+        ttk.Checkbutton(r2, text="only where the target is active",
+                        variable=self.corract_var).pack(side="left")
+        ttk.Label(gf, text=(
+            "band: nothing faster is applied (the outer measurement is slow). "
+            "k sigma: held at zero where the file's own error explains it. "
+            "floor: smaller than the monitor average can verify (~0.1 mV, so "
+            "0.1 V at an EOM). cap: largest total change. Volts at the "
+            "output, as in a target CSV. The Trek limits, the AWG rail and "
+            "full scale are always checked."),
+            foreground="#666666", wraplength=440, justify="left").grid(
+            row=2, column=0, sticky="w")
+        gf.columnconfigure(0, weight=1)
+
+        r3 = ttk.Frame(parent); r3.pack(fill="x", pady=(2, 2))
+        for text, cmd in (("Preview", self.do_corr_preview),
+                          ("Apply to target", self.do_corr_apply),
+                          ("Revert to base", self.do_corr_revert)):
+            b = ttk.Button(r3, text=text, command=cmd)
+            b.pack(side="left", fill="x", expand=True, padx=(0, 4))
+            self._actions.append(b)
+        self.corr_status = ttk.Label(parent, text="no session loaded",
+                                     foreground="#444444", wraplength=440,
+                                     justify="left")
+        self.corr_status.pack(fill="x")
+        self._corr_pending = []          # the box: applied layers + new files
+        self._corr_cache = {}            # path -> (mtime, Correction)
+
+    def _load_corr(self, path):
+        mt = os.path.getmtime(path)
+        hit = self._corr_cache.get(path)
+        if hit and hit[0] == mt:
+            return hit[1]
+        c = corrmod.read_correction(path)
+        self._corr_cache[path] = (mt, c)
+        return c
+
+    def _refresh_corr_list(self):
+        tv = self.corr_tv
+        sel = tv.selection()
+        tv.delete(*tv.get_children())
+        for i, L in enumerate(self._corr_pending):
+            tv.insert("", "end", iid=str(i), values=(
+                "yes" if L.get("on", True) else "no",
+                os.path.basename(L["path"]), L.get("slot", ""),
+                f"{L.get('gain', 1.0):g}",
+                f"{L['kept_peak']:.1f}" if "kept_peak" in L else "",
+                f"{100*L['resolved']:.0f}%" if "resolved" in L else "",
+                L.get("status", "")))
+        if sel and sel[0] in tv.get_children():
+            tv.selection_set(sel)
+        self._refresh_corr_status()
+
+    def _refresh_corr_status(self):
+        s = self.session
+        if s is None:
+            return self.corr_status.configure(text="no session loaded")
+        sc = s.loop.channel.mon_scale
+        if s.base_target is None or s.corr_total is None:
+            txt = "target = base target (no corrections applied)"
+        else:
+            on = [L for L in s.corr_layers if L.get("on", True)]
+            d = s.corr_total * sc
+            txt = (f"target = base + {len(on)} correction(s): "
+                   f"{np.max(np.abs(d)):.1f} V peak, "
+                   f"{np.sqrt(np.mean(d * d)):.1f} V rms change "
+                   f"(applied {on[0].get('applied', '?') if on else '?'})")
+        if any(L.get("status") in ("added", "changed")
+               for L in self._corr_pending):
+            txt += "\nchanged since the last Apply: Preview, then Apply"
+        self.corr_status.configure(text=txt)
+
+    def _corr_selected(self):
+        sel = self.corr_tv.selection()
+        return int(sel[0]) if sel else None
+
+    def do_corr_add(self, paths=None):
+        if self.session is None:
+            return messagebox.showerror("Corrections",
+                                        "load or init a session first")
+        if paths is None:
+            paths = filedialog.askopenfilenames(
+                title="Target correction files",
+                filetypes=[("Target corrections", "*.csv"),
+                           ("All files", "*.*")])
+        for p in paths:
+            try:
+                c = self._load_corr(p)
+            except (OSError, ValueError) as e:
+                messagebox.showerror("Corrections", str(e))
+                continue
+            p = os.path.abspath(p)
+            same = [i for i, L in enumerate(self._corr_pending)
+                    if L.get("slot") and L["slot"] == c.slot]
+            layer = dict(path=p, slot=c.slot, gain=1.0, on=True,
+                         status="added",
+                         quantity=str(c.meta.get("quantity", "")))
+            if same:
+                old = self._corr_pending[same[0]]
+                if not messagebox.askyesno(
+                        "Corrections",
+                        f"{os.path.basename(p)} is for the same slot "
+                        f"('{c.slot}') as {os.path.basename(old['path'])}.\n\n"
+                        f"Replace it? (A new measurement of the same thing "
+                        f"supersedes the old one; stacking both would apply "
+                        f"it twice.)"):
+                    continue
+                layer["gain"] = old.get("gain", 1.0)
+                self._corr_pending[same[0]] = layer
+            else:
+                self._corr_pending.append(layer)
+            self.log(f"correction added: {os.path.basename(p)} -- "
+                     f"{c.meta.get('quantity', 'quantity not stated')}; "
+                     f"source {c.meta.get('source', '?')}")
+            for k in ("method", "line", "notes"):
+                if c.meta.get(k):
+                    self.log(f"  {k}: {c.meta[k]}")
+        self._refresh_corr_list()
+
+    def do_corr_remove(self):
+        i = self._corr_selected()
+        if i is None:
+            return
+        L = self._corr_pending.pop(i)
+        self.log(f"correction removed from the box: "
+                 f"{os.path.basename(L['path'])} (Apply to take it out of "
+                 f"the target)")
+        self._refresh_corr_list()
+
+    def do_corr_toggle(self):
+        i = self._corr_selected()
+        if i is None:
+            return
+        L = self._corr_pending[i]
+        L["on"] = not L.get("on", True)
+        L["status"] = "changed"
+        self._refresh_corr_list()
+
+    def do_corr_gain(self):
+        i = self._corr_selected()
+        if i is None:
+            return messagebox.showinfo("Corrections", "select a file first")
+        try:
+            g = float(self.corrgain_var.get())
+        except ValueError:
+            return messagebox.showerror("Corrections", "gain must be a number")
+        if not 0 <= g <= 1.5:
+            return messagebox.showerror(
+                "Corrections", "gain 0..1.5: 1 applies the measured "
+                               "correction, less learns part of it")
+        self._corr_pending[i]["gain"] = g
+        self._corr_pending[i]["status"] = "changed"
+        self._refresh_corr_list()
+
+    def _corr_settings(self):
+        f = self._floats(band=self.corrband_var, k=self.corrk_var,
+                         floor=self.corrfloor_var, cap=self.corrcap_var,
+                         fade=self.corrfade_var)
+        if f["band"] <= 0 or f["k"] < 0 or f["floor"] < 0 or f["cap"] <= 0:
+            raise RuntimeError("band and cap must be > 0; k and floor >= 0")
+        return corrmod.GateSettings(band_hz=f["band"], k_sigma=f["k"],
+                                    floor_out=f["floor"], cap_out=f["cap"],
+                                    fade_s=f["fade"] * 1e-6,
+                                    active_only=bool(self.corract_var.get()))
+
+    def _corr_compute(self):
+        """Gate every 'on' layer against the BASE target and check the total.
+        Returns (total_out, results, notes, base_out); results is
+        [(layer, kept_out, info)], notes [(level, text)]."""
+        s = self.session
+        ch = s.loop.channel
+        sc = ch.mon_scale
+        st = self._corr_settings()
+        base = s.base_target if s.base_target is not None else s.loop.target
+        base_out = np.asarray(base, float) * sc
+        total = np.zeros_like(base_out)
+        results, notes, bands = [], [], []
+        for L in self._corr_pending:
+            if not L.get("on", True):
+                continue
+            c = self._load_corr(L["path"])
+            tag = os.path.basename(L["path"])
+            mch = c.meta.get("channel")
+            if mch and str(mch) != s.channel:
+                notes.append(("fail", f"{tag}: written for {mch}, this session "
+                                      f"is {s.channel}"))
+                continue
+            for lev, txt in corrmod.check_target(c.meta, base_out, s.loop.dt):
+                notes.append((lev, f"{tag}: {txt}"))
+            kept, info = corrmod.gate(c, s.t, base_out, st, L.get("gain", 1.0))
+            for lev, txt in info["notes"]:
+                notes.append((lev, f"{tag}: {txt}"))
+            L.update(kept_peak=info["kept_peak"], kept_rms=info["kept_rms"],
+                     resolved=info["resolved_frac"], band=info["band_hz"])
+            bands.append(info["band_hz"])
+            results.append((L, kept, info))
+            total = total + kept
+        if results:
+            learn = (float(s.loop.frf.f_use) if s.loop.frf is not None
+                     else float(s.loop.f_cut))
+            notes += corrmod.check_feasible(
+                total, base_out, s.u, s.loop.dt, ch, s.loop.limits,
+                s.loop.plant.gain, s.full_scale, learn, max(bands), st.cap_out)
+        return total, results, notes, base_out
+
+    def do_corr_preview(self):
+        if self.session is None:
+            return messagebox.showerror("Corrections",
+                                        "load or init a session first")
+        try:
+            total, results, notes, base_out = self._corr_compute()
+        except (RuntimeError, OSError, ValueError) as e:
+            return messagebox.showerror("Corrections", str(e))
+        self._report_corr(total, results, notes, "preview")
+        self._plot_corrections(total, results, base_out)
+        self.nb.select(self._corr_frame)
+        self._refresh_corr_list()
+        return notes
+
+    def _report_corr(self, total, results, notes, what):
+        if not results:
+            self.log(f"corrections {what}: nothing switched on")
+            return
+        for L, kept, info in results:
+            self.log(f"  {os.path.basename(L['path'])}: x{info['gain']:g}, band "
+                     f"{info['band_hz']:g} Hz, raw {info['raw_peak']:.1f} V pk -> "
+                     f"applied {info['kept_peak']:.1f} V pk / {info['kept_rms']:.1f} "
+                     f"V rms; resolved over {100*info['resolved_frac']:.0f}% "
+                     f"of the active record (median filtered sigma "
+                     f"{info['sigma_lp_median']:.2g} V)")
+        self.log(f"corrections {what}: total {np.max(np.abs(total)):.1f} V "
+                 f"peak at the {self.session.loop.channel.out_name}")
+        for lev, txt in notes:
+            self.log(f"  {lev.upper()}: {txt}")
+
+    def do_corr_apply(self):
+        s = self.session
+        if s is None:
+            return messagebox.showerror("Corrections",
+                                        "load or init a session first")
+        try:
+            total, results, notes, base_out = self._corr_compute()
+        except (RuntimeError, OSError, ValueError) as e:
+            return messagebox.showerror("Corrections", str(e))
+        self._report_corr(total, results, notes, "apply")
+        self._plot_corrections(total, results, base_out)
+        if not results:
+            return messagebox.showinfo(
+                "Corrections", "Nothing is switched on. To take every "
+                               "correction out, use Revert to base.")
+        fails = [t for lev, t in notes if lev == "fail"]
+        if fails:
+            for L, _, _ in results:
+                L["status"] = "refused"
+            self._refresh_corr_list()
+            return messagebox.showerror(
+                "Corrections -- refused",
+                "Not applied:\n\n" + "\n\n".join(fails))
+        warns = [t for lev, t in notes if lev == "warn"]
+        sc = s.loop.channel.mon_scale
+        u_pk = float(np.max(np.abs(s.u + total / sc / s.loop.plant.gain)))
+        msg = (f"Move the target by {np.max(np.abs(total)):.1f} V peak "
+               f"({np.sqrt(np.mean(total**2)):.1f} V rms over the record) at "
+               f"the {s.loop.channel.out_name}?\n\nEstimated drive peak "
+               f"{u_pk:.3f} V of the {s.full_scale:g} V full scale. The next "
+               f"iteration measures against the new target, so the error "
+               f"jumps once and the loop then learns it.")
+        if warns:
+            msg += "\n\nWarnings:\n- " + "\n- ".join(warns)
+        if not messagebox.askyesno("Apply corrections", msg):
+            return
+        if s.base_target is None:
+            s.base_target = np.asarray(s.loop.target, float).copy()
+        s.corr_total = total / sc
+        s.loop.target = s.base_target + s.corr_total
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        for L, _, _ in results:
+            L["status"], L["applied"] = "applied", stamp
+        for L in self._corr_pending:
+            if not L.get("on", True):
+                L["status"] = "off"
+        s.corr_layers = [dict(L) for L in self._corr_pending]
+        if s.loop.history and isinstance(s.loop.history[-1], dict):
+            s.loop.history[-1]["target_changed"] = stamp
+        save_session(s)
+        self.log(f"target corrected at iteration {s.iteration} ({stamp}); base "
+                 f"target kept in the state. The next measurement is against "
+                 f"the new target.")
+        self._refresh_corr_list()
+        self._refresh_summary()
+        self._redraw_iterations()
+        self._plot_corrections(total, results, base_out)
+
+    def do_corr_revert(self):
+        s = self.session
+        if s is None or s.base_target is None:
+            return messagebox.showinfo("Corrections",
+                                       "the target is already the base target")
+        if not messagebox.askyesno(
+                "Revert", "Put the target back to the base target? The files "
+                          "stay in the box (switched off)."):
+            return
+        s.loop.target = np.asarray(s.base_target, float).copy()
+        s.base_target, s.corr_total = None, None
+        for L in self._corr_pending:
+            L["on"], L["status"] = False, "off"
+        s.corr_layers = [dict(L) for L in self._corr_pending]
+        save_session(s)
+        self.log("target reverted to the base target")
+        self._refresh_corr_list()
+        self._refresh_summary()
+        self._redraw_iterations()
+
+    def _replot_corr_quiet(self):
+        """The Corrections plot for a freshly loaded session: the gate re-run
+        on the box's files (nothing logged, nothing applied), the stored
+        total underneath. A file that has gone missing just leaves the
+        middle panel empty."""
+        s = self.session
+        results, base_out = (), None
+        if s is not None and self._corr_pending:
+            try:
+                _, results, _, base_out = self._corr_compute()
+            except Exception:
+                results = ()
+        total = (s.corr_total * s.loop.channel.mon_scale
+                 if s is not None and s.corr_total is not None else None)
+        self._plot_corrections(total, results, base_out)
+
+    def _plot_corrections(self, total=None, results=(), base_out=None):
+        s = self.session
+        ax0, ax1, ax2 = self.ax_corr
+        for ax in self.fig_corr.axes[3:]:       # the last draw's twin axis
+            ax.remove()
+        for ax in self.ax_corr:
+            ax.clear()
+        if s is None:
+            self.fig_corr._canvas.draw_idle()
+            return
+        sc = s.loop.channel.mon_scale
+        tms = s.t * 1e3
+        out = s.loop.channel.out_name
+        if base_out is None:
+            base = s.base_target if s.base_target is not None else s.loop.target
+            base_out = np.asarray(base, float) * sc
+        if total is None and s.corr_total is not None:
+            total = s.corr_total * sc
+        ax0.plot(tms, base_out, color=TARGET_COLOUR, lw=1.0, label="base target")
+        if total is not None:
+            ax0.plot(tms, base_out + total, color="#d62728", lw=0.9, ls="--",
+                     label="base + corrections")
+        ax0.set_ylabel(f"{out} (V)")
+        ax0.set_title(f"{s.channel} '{s.stem}' target and learned corrections")
+        ax0.legend(fontsize=7, loc="best")
+        for i, (L, kept, info) in enumerate(results):
+            col = CMP_COLOURS[i % len(CMP_COLOURS)]
+            name = os.path.basename(L["path"])
+            ax1.fill_between(tms, -info["thr"], info["thr"], color=col,
+                             alpha=0.15, lw=0)
+            ax1.plot(tms, info["lp"], color=col, lw=0.6, alpha=0.6,
+                     label=f"{name}: in band, before the gate")
+            ax1.plot(tms, kept, color=col, lw=1.1, label=f"{name}: applied")
+        ax1.set_ylabel(f"change ({out} V)")
+        if results:
+            ax1.legend(fontsize=7, loc="best")
+            self._plot_note(ax1, "shaded: k sigma (filtered) and floor -- held "
+                                 "at zero inside")
+        if total is not None:
+            ax2.plot(tms, total, color="k", lw=1.0, label="total target change")
+            ax2b = ax2.twinx()
+            ax2b.plot(tms, total / sc / s.loop.plant.gain * 1e3, color="#1f77b4",
+                      lw=0.6, alpha=0.6)
+            ax2b.set_ylabel("estimated drive change (mV)", color="#1f77b4")
+            ax2.legend(fontsize=7, loc="upper left")
+        ax2.set_ylabel(f"{out} V")
+        ax2.set_xlabel("time (ms)")
+        for ax in self.ax_corr:
+            ax.grid(True, alpha=0.3)
+        self.fig_corr._canvas.draw_idle()
 
     def _path_row(self, parent, row, label, var, browse):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
@@ -2074,6 +2928,22 @@ class App:
             its = sorted({sn["it"] for sn in s.snapshots})
             self.log(f"  recalled {len(its)} stored measurement(s): "
                      f"iterations {', '.join(str(i) for i in its)}")
+        # the Corrections box and the line-ripple switch follow the state
+        self._corr_pending = [dict(L) for L in s.corr_layers]
+        if s.line_fit is not None:
+            self._line_fit = s.line_fit
+        self.line_on_var.set(s.loop.line is not None)
+        if s.base_target is not None:
+            d = (s.corr_total if s.corr_total is not None else
+                 s.loop.target - s.base_target) * s.loop.channel.mon_scale
+            self.log(f"  target = base + learned corrections "
+                     f"({np.max(np.abs(d)):.1f} V peak) -- Corrections tab")
+        if s.loop.line is not None:
+            self.log("  line ripple subtracted before each update -- Measure "
+                     "tab")
+        self._refresh_corr_list()
+        self._refresh_line_status()
+        self._replot_corr_quiet()
         self._refresh_summary()
         self._show_session(select_tab=True)
 
@@ -2222,6 +3092,14 @@ class App:
         s.frf_path, s.frf_use, s.frf_max = frf_rec
         s.seed_path = seed
         s.target_path = os.path.abspath(target)
+        # The line ripple belongs to the bench and its trigger, not to the
+        # campaign: a fit the panel holds carries into the new session (on
+        # the new record) if the switch is on. Corrections do not carry --
+        # they belong to the target they were measured against.
+        if self._line_fit is not None:
+            s.line_fit = self._line_fit
+            self._apply_line(s, self.line_on_var.get())
+        self._corr_pending = []
         save_session(s)
         self.session = s
         self.state_var.set(state_path)
@@ -2291,7 +3169,16 @@ class App:
                f"history {len(lp.history)} iterations")
         if s.seed_path:
             txt += f"\niteration 0 was seed {os.path.basename(s.seed_path)}"
+        if s.base_target is not None:
+            d = (s.loop.target - s.base_target) * lp.channel.mon_scale
+            txt += (f"\ntarget = base + corrections "
+                    f"({np.max(np.abs(d)):.1f} V pk)")
+        if lp.line is not None:
+            txt += (f"\nline ripple subtracted "
+                    f"({np.max(np.abs(lp.line))*lp.channel.mon_scale:.2f} V pk)")
         self.summary.configure(text=txt)
+        self._refresh_corr_status()
+        self._refresh_line_status()
 
     # --------------------------------------------------- shared step pieces
     def _check_taper_band(self, path, f_use, f_max):
@@ -2411,7 +3298,12 @@ class App:
         s = self.session
         f_top = s.loop.frf.f_max if s.loop.frf is not None else s.loop.f_cut
         try:
-            nb = ilc.learnable_band(s.loop.target, stack, s.loop.dt, f_top)
+            # the loop's error is target - (y - line): the same thing as
+            # (target + line) - y, which is what these helpers take
+            tgt = s.loop.target + (s.loop.line if s.loop.line is not None
+                                   and len(s.loop.line) == len(s.loop.target)
+                                   else 0.0)
+            nb = ilc.learnable_band(tgt, stack, s.loop.dt, f_top)
         except ValueError as e:
             print(f"         noise floor: not estimated -- {e}")
             return {}
@@ -2435,7 +3327,7 @@ class App:
                   f"to ~{ff/1e3:.0f} kHz, or stop")
         out = dict(f_floor=ff, noise_ratio_top=float(r))
         try:
-            lines = ilc.noise_lines(s.loop.target, stack, s.loop.dt, f_top)
+            lines = ilc.noise_lines(tgt, stack, s.loop.dt, f_top)
         except ValueError:
             lines = []
         if lines:
@@ -4451,7 +5343,12 @@ class App:
         ax = self.ax_out
         ax.clear()
         ax.plot(tms, s.loop.target * sc, color=TARGET_COLOUR, lw=1.0,
-                label="target", **self._dot_kw(len(tms)))
+                label="target" if s.base_target is None
+                else "target (base + learned corrections)",
+                **self._dot_kw(len(tms)))
+        if s.base_target is not None:
+            ax.plot(tms, s.base_target * sc, color=TARGET_COLOUR, lw=0.7,
+                    ls=":", label="base target")
         if not s.snapshots:
             # model output, not data -- dashed and dotless on purpose
             ax.plot(tms, s.loop.plant.forward(s.u) * sc, color=PRED_COLOUR,
@@ -4613,7 +5510,7 @@ class App:
         ax.clear()
         n = len(snaps)
         for idx, sn in enumerate(snaps):
-            ax.plot(tms, (s.loop.target - sn["y"]) * sc,
+            ax.plot(tms, (s.loop.target - s.loop._seen(sn["y"])) * sc,
                     color=self._iter_colour(idx, n),
                     lw=1.1 if idx == n - 1 else 0.8,
                     ls="--" if sn.get("run") is not None else "-",
@@ -4625,7 +5522,7 @@ class App:
             csc = cs.loop.channel.mon_scale
             k = len(csnaps)
             for idx, sn in enumerate(csnaps):
-                ax.plot(ctms, (cs.loop.target - sn["y"]) * csc,
+                ax.plot(ctms, (cs.loop.target - cs.loop._seen(sn["y"])) * csc,
                         color=self._cmp_colour(col, idx, k),
                         lw=1.1 if idx == k - 1 else 0.8,
                         ls="--" if sn.get("run") is not None else "-",
@@ -4677,7 +5574,7 @@ class App:
 
         n = len(snaps)
         for idx, sn in enumerate(snaps):
-            fe, ae = asd(s.loop.target - sn["y"], s.loop.dt, sc)
+            fe, ae = asd(s.loop.target - s.loop._seen(sn["y"]), s.loop.dt, sc)
             ax.loglog(fe, ae, color=self._iter_colour(idx, n),
                       lw=1.0 if idx == n - 1 else 0.7,
                       ls="--" if sn.get("run") is not None else "-",
@@ -4688,7 +5585,8 @@ class App:
             csc = cs.loop.channel.mon_scale
             k = len(csnaps)
             for idx, sn in enumerate(csnaps):
-                fe, ae = asd(cs.loop.target - sn["y"], cs.loop.dt, csc)
+                fe, ae = asd(cs.loop.target - cs.loop._seen(sn["y"]),
+                             cs.loop.dt, csc)
                 ax.loglog(fe, ae, color=self._cmp_colour(col, idx, k),
                           lw=1.0 if idx == k - 1 else 0.7,
                           ls="--" if sn.get("run") is not None else "-",

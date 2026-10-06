@@ -1,6 +1,6 @@
 """Offline regression suite for ilc_gui.py, against real MKJX1 campaign data.
 
-55 numbered checks: state round-trips, the span guard, the header-less
+57 numbered checks: state round-trips, the span guard, the header-less
 file refusal, the FRQ-vs-record check, the seed-drive Init, the model ladder
 with Fit to FRF, the per-channel limits,
 the GEN from-scratch path, flat first shot, hold-run display, plot
@@ -8,8 +8,9 @@ overlays, compare-campaign overlays and their picker, status line and
 tail-scrolling path entries, drive spectrum, spectrum
 averaging, the native-rate spectrum and its bench-kept files, the FRF
 probe + measurement maths + overlay viewer, the iteration
-table, dot density, linked time axes, and the multi-channel capture the
-optical campaign rides on. No instruments are touched --
+table, dot density, linked time axes, the multi-channel capture the
+optical campaign rides on, the settings tabs, learned target corrections and
+the line-ripple subtraction (tests/test_corrections.py has the maths). No instruments are touched --
 bench/auto-set/upload/hold hardware paths are exercised on the bench, not
 here. A Tk window flashes briefly; a PNG of every figure lands in the
 scratch folder for eyeballing.
@@ -1806,6 +1807,85 @@ app._frf_capture(_fds2, 1, 3, bins, sN.t, sN.t_off, repeats=4, wait_s=1, settle=
 assert not any(_fds2.offsets.values()), "dither=False touched an offset"
 print("[47b] Measure FRF dither: drive, monitor and aux stepped over 3 codes and restored; H unchanged; off when asked")
 
+# [48] Settings tabs, learned target corrections, line ripple (5 Oct 2026).
+# The left side is tabs selected by FRAME; a correction file moves the
+# TARGET (base kept), round-trips through the state, refuses past the cap,
+# and Revert puts the base back; a line-ripple fit from captures is
+# subtracted from every measurement once ticked and is saved in the state.
+from eomilc import corrections as _corrmod, mains as _mains
+assert set(app._tabs) == {"session", "model", "measure", "run", "corr"}
+for _fr in app._tabs.values():
+    app.lnb.select(_fr)
+root.update()
+app.state_var.set(STATE)
+app.do_load(); root.update()
+_s = app.session
+_sc = _s.loop.channel.mon_scale
+_base_out = _s.loop.target * _sc
+_bump = 60.0 * np.sin(2 * np.pi * 600 * _s.t) * (_base_out > 0.05 * _base_out.max())
+_cmeta = dict(channel=_s.channel, slot="optical", band_hz=2000.0,
+              line_removed=True, quantity="smoke test",
+              **_corrmod.target_fingerprint(_base_out, _s.loop.dt))
+_cpath = _corrmod.write_correction(os.path.join(SCRATCH, "corr_smoke.csv"), _s.t,
+                                   _bump, np.full_like(_s.t, 2.0), _cmeta)
+app._corr_pending = []
+app.do_corr_add([_cpath])
+app.corrcap_var.set("10")                     # far under the 60 V bump
+app.do_corr_apply(); root.update()
+assert app.session.base_target is None, "applied past the cap"
+assert app._corr_pending[0]["status"] == "refused"
+app.corrcap_var.set("300")
+app.do_corr_apply(); root.update()
+_s = app.session
+assert _s.base_target is not None
+_d = (_s.loop.target - _s.base_target) * _sc
+assert 30 < np.max(np.abs(_d)) < 70, np.max(np.abs(_d))   # the hard-edged test bump overshoots a little through the band filter
+assert _d[0] == 0 and _d[-1] == 0
+app.do_load(); root.update()                  # the state carries it
+_s = app.session
+assert _s.base_target is not None and _s.corr_layers[0]["status"] == "applied"
+assert np.allclose((_s.loop.target - _s.base_target) * _sc, _d)
+app.do_corr_revert(); root.update()
+_s = app.session
+assert _s.base_target is None and np.allclose(_s.loop.target * _sc, _base_out)
+print(f"[48] tabs by frame; correction refused past a 10 V cap, applied at 300 "
+      f"({np.max(np.abs(_d)):.1f} V pk, ends 0), reloaded from the state, reverted")
+
+# [48b] line ripple from captures: 12 shots of 60/120/180 Hz at a FIXED phase
+# (line-synchronous) over 100 ms -> fit, coherence ~1, ticked -> Loop.line set
+# and saved; free-running phases -> coherence low, switched off with a note.
+_tl = np.arange(-10e-3, 90e-3, 5e-6)
+_rng48 = np.random.default_rng(48)
+def _cap48(i, locked):
+    ph = 0.0 if locked else _rng48.uniform(0, 2 * np.pi)
+    y = (0.9e-3 * np.cos(2 * np.pi * 60 * _tl + np.deg2rad(44) + ph)
+         + 0.3e-3 * np.cos(2 * np.pi * 120 * _tl - 0.8 + 2 * ph)
+         + _rng48.normal(0, 0.3e-3, _tl.size))
+    p = os.path.join(SCRATCH, f"line48_{'L' if locked else 'F'}_{i:02d}.csv")
+    pd.DataFrame({"Time (s)": _tl + _s.t_off, "CH3": y}).to_csv(p, index=False)
+    return p
+_locked = [_cap48(i, True) for i in range(12)]
+app.moncol_var.set("CH3"); app.lineh_var.set("3"); app.lineseg_var.set("")
+app.do_line_from_files(_locked); root.update()
+_lf = app.session.line_fit
+assert _lf is not None and _lf["meta"]["coherence"] > 0.9, _lf["meta"]
+assert abs(_lf["fit"]["amp"][0] - 0.9e-3) < 0.05e-3
+app.line_on_var.set(True); app._on_line_toggle(); root.update()
+assert app.session.loop.line is not None
+app.do_load(); root.update()
+assert app.session.loop.line is not None and app.line_on_var.get()
+_free = [_cap48(i, False) for i in range(12)]
+app.do_line_from_files(_free); root.update()
+assert app.session.line_fit["meta"]["coherence"] < 0.7
+assert not app.line_on_var.get(), "a free-running fit left subtraction on"
+_coh_free = app.session.line_fit["meta"]["coherence"]
+app.do_line_clear(); root.update()
+assert app.session.loop.line is None
+print(f"[48b] line ripple: locked captures -> 60 Hz {_lf['fit']['amp'][0]*1e3:.3f} mV, "
+      f"coherence {_lf['meta']['coherence']:.2f}, subtracted and reloaded; "
+      f"free-running -> coherence {_coh_free:.2f}, "
+      f"switched off; cleared")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the
@@ -1819,7 +1899,7 @@ try:
                       ("dspec", app.fig_dspec), ("ddelta", app.fig_ddel),
                       ("err", app.fig_err), ("spec", app.fig_spec),
                       ("conv", app.fig_conv),
-                      ("frf", app.fig_frf)):
+                      ("frf", app.fig_frf), ("corr", app.fig_corr)):
         fig.savefig(os.path.join(SCRATCH, f"fig_{name}.png"), dpi=100)
     print("[10b] figure PNGs saved from the canvases")
 except Exception:

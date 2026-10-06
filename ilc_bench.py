@@ -953,8 +953,17 @@ def main():
     _AWGMOD = load_module(a.awg_gui, "bk4063b_awg_gui")
 
     # ---- target and loop: fresh from the model, or resumed from a state file
+    # the panel's keys every save carries through (run_ilc.PASS_THROUGH --
+    # not imported: run_ilc pulls in pandas, which this module avoids)
+    extra = {}
     if a.resume:
         st = {k: z for k, z in np.load(a.resume, allow_pickle=True).items()}
+        extra = {k: st[k] for k in ("base_target", "corr_total", "corrections",
+                                    "line_fit", "line_ref") if k in st}
+        line = (np.asarray(st["line_ref"], float).ravel()
+                if "line_ref" in st else None)
+        if line is not None and line.size != len(st["t"]):
+            line = None
         ch = CHANNELS[str(st["channel"])]
         t, v = st["t"], st["target"]
         dt = float(st["dt"])
@@ -967,7 +976,8 @@ def main():
                         limits=ch.limits,
                         notches=tuple((float(f0), float(bw)) for f0, bw in
                                       np.asarray(st["notches"], float).reshape(-1, 2))
-                        if "notches" in st else ())
+                        if "notches" in st else (),
+                        line=line)
         loop.history = list(st["history"])
         u = st["u"]
         k0 = int(st["iteration"])
@@ -1035,7 +1045,8 @@ def main():
                  f_cut=loop.f_cut, iteration=iteration, t_offset=t_off,
                  history=np.array(loop.history, dtype=object),
                  seed_path=seed_path, target_path=target_path,
-                 notches=np.asarray(loop.notches, float).reshape(-1, 2))
+                 notches=np.asarray(loop.notches, float).reshape(-1, 2),
+                 **extra)
 
     # ---- instruments
     awg = make_awg(_AWGMOD)

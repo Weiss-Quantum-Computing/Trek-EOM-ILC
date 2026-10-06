@@ -112,6 +112,19 @@ class Loop:
     frf: "FRF | None" = None            # measured inverse; see class FRF
     notches: tuple = ()                 # ((f0 Hz, width Hz), ...): the update
                                         # is blind there -- see notch_filter
+    line: "np.ndarray | None" = None    # measured line ripple on the target
+                                        # grid (monitor V), taken out of every
+                                        # measurement before the update and
+                                        # the metrics -- see eomilc.mains
+
+    def _seen(self, y_k):
+        """The measurement the loop acts on: y less the measured line ripple,
+        when there is one (same grid, or it is ignored with no fuss -- a
+        stale reference from another record length must not crash a step)."""
+        y_k = np.asarray(y_k, float)
+        if self.line is not None and len(self.line) == len(y_k):
+            return y_k - self.line
+        return y_k
 
     # ---------------------------------------------------------------- drives
     def first_shot(self, flat: bool = True,
@@ -153,6 +166,7 @@ class Loop:
         inverse differentiates twice, and unfiltered 8-bit scope noise through
         d2/dt2 is larger than the correction it is meant to carry.
         """
+        y_raw, y_k = y_k, self._seen(y_k)
         if self.frf is not None:
             # The measured inverse carries its own band limit (the taper up to
             # f_max), so the error must NOT be pre-filtered at f_cut here --
@@ -169,12 +183,12 @@ class Loop:
             e = notch_filter(e, self.dt, self.notches)
             u_next = smooth(u_k + self.gamma * self.plant.lead(e),
                             self.dt, self.f_cut)
-        self.history.append(self.metrics(y_k))
+        self.history.append(self.metrics(y_raw))
         return _limit_ends(u_next, self.limits.idle_awg)
 
     # --------------------------------------------------------------- metrics
     def metrics(self, y: np.ndarray) -> dict:
-        e = self.target - y
+        e = self.target - self._seen(y)
         span = float(np.ptp(self.target))
         scale = self.channel.mon_scale       # the *_hv keys are in output units
         return dict(peak_err_mon=float(np.abs(e).max()),

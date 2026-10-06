@@ -27,7 +27,14 @@ plotting helpers — the repo has them, use them.
   conversion `target/gain`, no model involved. States written from 27 Aug
   also carry the CURRENT model record: `model`
   (`static`/`one_pole`/`resonant`/`frf`) and, in frf mode,
-  `frf_path`/`frf_use`/`frf_max`.
+  `frf_path`/`frf_use`/`frf_max`. From 5 Oct 2026, optionally:
+  `base_target` + `corr_total` (monitor V; `target` = base + learned target
+  corrections, `corrections` a JSON list of the files applied — so errors
+  measured before the `history` entry tagged `target_changed` were against
+  the base), and `line_fit` (JSON) + `line_ref` (monitor V on the grid: the
+  measured line ripple the loop subtracts from every measurement before the
+  update and the metrics — compare a `meas_*.npy` with `target + line_ref`
+  to reproduce the loop's own error).
 - `meas_<stem>_iNN.npy` — measurement of iteration NN (monitor V, on the
   state's `t` grid, already the average of 64 HRES scope repeats).
   `meas_<stem>_iNN_rMM.npy` — hold-mode re-measurement MM of the SAME

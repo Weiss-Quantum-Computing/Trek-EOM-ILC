@@ -117,6 +117,28 @@ def state_notches(state) -> tuple:
     return tuple((float(f0), float(bw)) for f0, bw in a)
 
 
+# Keys the panel adds (5 Oct 2026) that every CLI save carries through as
+# they are: the target before learned corrections and what was added to it
+# (eomilc.corrections), and the measured line ripple the update ignores
+# (eomilc.mains). Absent = none. `target` is always the target the loop
+# follows, so a CLI step on a corrected campaign keeps the correction.
+PASS_THROUGH = ("base_target", "corr_total", "corrections", "line_fit",
+                "line_ref")
+
+
+def passthrough(state) -> dict:
+    return {k: state[k] for k in PASS_THROUGH if k in state}
+
+
+def state_line(state):
+    """The line ripple a state says to take out of every measurement
+    (monitor V on the record grid), or None."""
+    if "line_ref" not in state:
+        return None
+    a = np.asarray(state["line_ref"], float).ravel()
+    return a if a.size == len(np.asarray(state["t"])) else None
+
+
 def build_loop(state):
     ch = CHANNELS[str(state["channel"])]
     p = plantmod.Plant(gain=float(state["gain"]), tau=float(state["tau"]),
@@ -125,7 +147,8 @@ def build_loop(state):
                        dt=float(state["dt"]))
     loop = ilc.Loop(plant=p, target=state["target"], dt=float(state["dt"]), channel=ch,
                     gamma=float(state["gamma"]), f_cut=float(state["f_cut"]),
-                    limits=ch.limits, notches=state_notches(state))
+                    limits=ch.limits, notches=state_notches(state),
+                    line=state_line(state))
     loop.history = list(state["history"]) if "history" in state else []
     return loop
 
@@ -265,7 +288,8 @@ def cmd_step(a):
                history=np.array(loop.history, dtype=object),
                seed_path=str(st["seed_path"]) if "seed_path" in st else "",
                target_path=str(st["target_path"]) if "target_path" in st else "",
-               notches=np.asarray(loop.notches, float).reshape(-1, 2))
+               notches=np.asarray(loop.notches, float).reshape(-1, 2),
+               **passthrough(st))
     print(f"\n{loop.report()}\n\nwrote {out}\n      {gui}  (GUI-ready, normalised)")
 
 
