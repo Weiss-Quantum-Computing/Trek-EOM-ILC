@@ -367,7 +367,7 @@ refuses on a mismatch (OFST up to ±60 mV is allowed for the idle trim).
 (`target_<stem>X1.csv`, `target_<stem>X2.csv`) is one campaign: both drives
 play at once, both monitors are read from the same frozen shots, and each
 channel's loop learns from its own monitor. Which scope channel is which
-comes from the panel's *Scope channels* map (Measure tab; the polarimeter's
+comes from the panel's *Scope channels* map (Scope tab; the polarimeter's
 role names, kept in the panel's config.json): the MonXn channel is the
 monitor, the CmdXn channel the drive readback for the alignment check — with
 no CmdXn assigned that channel's alignment is not verified and the log says

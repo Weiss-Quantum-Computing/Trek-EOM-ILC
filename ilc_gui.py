@@ -1183,40 +1183,41 @@ class App:
         self.lnb.pack(fill="x")
         self._tabs = {}
         for key, label in (("session", "Session"), ("model", "Model"),
-                           ("measure", "Measure"), ("run", "Run"),
+                           ("scope", "Scope"), ("run", "Run"),
                            ("corr", "Corrections")):
             fr = ttk.Frame(self.lnb, padding=2)
             self.lnb.add(fr, text=label)
             self._tabs[key] = fr
         tab_session, tab_model = self._tabs["session"], self._tabs["model"]
-        tab_measure, tab_run = self._tabs["measure"], self._tabs["run"]
+        tab_measure, tab_run = self._tabs["scope"], self._tabs["run"]
 
-        # ---- session -------------------------------------------------
-        sf = ttk.LabelFrame(tab_session, text="Session", padding=3)
-        sf.pack(fill="x", pady=(0, 2))
+        # ---- session: two paths, resume or start ----------------------
+        rf = ttk.LabelFrame(tab_session, text="Resume a campaign", padding=3)
+        rf.pack(fill="x", pady=(0, 2))
         self.state_var = tk.StringVar(value=self.cfg.get("state", ""))
         self.state_entry = self._path_row(
-            sf, 0, "State", self.state_var,
+            rf, 0, "State", self.state_var,
             lambda: self._browse(self.state_var, "State files",
                                  "*.state.npz", RUN_DIR))
-        b = ttk.Button(sf, text="Load state", command=self.do_load)
+        b = ttk.Button(rf, text="Load state", command=self.do_load)
         b.grid(row=0, column=3, padx=2)
         self._actions = [b]
+        rf.columnconfigure(1, weight=1)
 
-        ttk.Separator(sf).grid(row=1, column=0, columnspan=4, sticky="ew", pady=3)
-
+        sf = ttk.LabelFrame(tab_session, text="New campaign", padding=3)
+        sf.pack(fill="x", pady=(0, 2))
         self.target_var = tk.StringVar(value=self.cfg.get("target", ""))
-        self._path_row(sf, 2, "Target", self.target_var, self._browse_target)
+        self._path_row(sf, 0, "Target", self.target_var, self._browse_target)
         b = ttk.Button(sf, text="Build...", command=self.do_build_target)
-        b.grid(row=2, column=3, padx=2)
+        b.grid(row=0, column=3, padx=2)
         self._actions.append(b)
         b = ttk.Button(sf, text="Plot", command=self.do_preview_target)
-        b.grid(row=2, column=4, padx=2)
+        b.grid(row=0, column=4, padx=2)
         self._actions.append(b)
         ch0 = self.cfg.get("channel", "EO1")
         self.channel_var = tk.StringVar(value=ch0 if ch0 in CHANNELS else "EO1")
         self.stem_var = tk.StringVar(value=self.cfg.get("stem", ""))
-        r3 = ttk.Frame(sf); r3.grid(row=3, column=0, columnspan=4, sticky="ew", pady=1)
+        r3 = ttk.Frame(sf); r3.grid(row=1, column=0, columnspan=4, sticky="ew", pady=1)
         ttk.Label(r3, text="Channel").pack(side="left")
         cb = ttk.Combobox(r3, textvariable=self.channel_var, width=5,
                           values=list(CHANNELS), state="readonly")
@@ -1227,7 +1228,7 @@ class App:
         ttk.Label(r3, text=f"(<= {NAME_LIMIT - 4} chars; '_iNN' is appended)"
                   ).pack(side="left")
 
-        r4 = ttk.Frame(sf); r4.grid(row=4, column=0, columnspan=5, sticky="ew", pady=1)
+        r4 = ttk.Frame(sf); r4.grid(row=2, column=0, columnspan=5, sticky="ew", pady=1)
         # The first-shot gain is deliberately NOT the model gain: it fixes
         # what iteration 0 plays, and tuning the correction model afterwards
         # must not silently rescale it. Blank = fall back to the model gain.
@@ -1252,19 +1253,20 @@ class App:
         # the target, enforced; the limit check runs on it like on any
         # drive. Blank = the flat first shot. Cleared with the channel.
         self.seed_var = tk.StringVar(value=self.cfg.get("seed_drive", ""))
-        self._path_row(sf, 5, "Seed drive", self.seed_var,
+        self._path_row(sf, 3, "Seed drive", self.seed_var,
                        lambda: self._browse(self.seed_var, "Drive CSV",
                                             "*.csv", RUN_DIR))
         ttk.Label(sf, text="(optional: iteration 0 = this drive as-is)",
-                  foreground="#666666").grid(row=5, column=3, columnspan=2,
+                  foreground="#666666").grid(row=3, column=3, columnspan=2,
                                              sticky="w")
 
-        b = ttk.Button(sf, text="Init  (first shot = flat conversion, "
-                                "target / gain; or the seed drive)",
-                       command=self.do_init)
-        b.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+        b = ttk.Button(sf, text="Init campaign", command=self.do_init)
+        b.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(3, 0))
         self._actions.append(b)
-
+        ttk.Label(sf, text="first shot = flat conversion target / gain, or the "
+                           "seed drive as-is; then Run tab",
+                  foreground="#666666").grid(row=5, column=0, columnspan=5,
+                                             sticky="w")
         sf.columnconfigure(1, weight=1)
 
         # ---- inverse model -------------------------------------------
@@ -1290,13 +1292,15 @@ class App:
         self.pzeta_var = tk.StringVar()
         self._param_vars = {"gain": self.pgain_var, "tau": self.ptau_var,
                             "fn": self.pfn_var, "zeta": self.pzeta_var}
-        self._param_entries = {}
+        self._param_entries, self._param_labels = {}, {}
         for lab, key, w in (("gain", "gain", 7), ("tau us", "tau", 6),
                             ("fn Hz", "fn", 6), ("zeta", "zeta", 6)):
-            ttk.Label(r1, text=lab).pack(side="left", padx=(0, 2))
+            lw = ttk.Label(r1, text=lab)
+            lw.pack(side="left", padx=(0, 2))
             e = ttk.Entry(r1, textvariable=self._param_vars[key], width=w)
             e.pack(side="left", padx=(0, 8))
             self._param_entries[key] = e
+            self._param_labels[key] = lw
 
         r2 = ttk.Frame(vf); r2.grid(row=2, column=0, columnspan=4,
                                     sticky="ew", pady=1)
@@ -1305,12 +1309,14 @@ class App:
         ttk.Label(r2, text="gamma").pack(side="left", padx=(0, 2))
         ttk.Entry(r2, textvariable=self.gamma_var, width=5).pack(
             side="left", padx=(0, 8))
-        ttk.Label(r2, text="f_cut Hz").pack(side="left", padx=(0, 2))
+        self._fcut_label = ttk.Label(r2, text="f_cut Hz")
+        self._fcut_label.pack(side="left", padx=(0, 2))
         self._fcut_entry = ttk.Entry(r2, textvariable=self.fcut_var, width=7)
         self._fcut_entry.pack(
             side="left", padx=(0, 6))
-        ttk.Label(r2, text="(learning gain; parametric band edge)",
-                  foreground="#666666").pack(side="left")
+        self._band_note = ttk.Label(r2, text="(learning gain; parametric band edge)",
+                                    foreground="#666666")
+        self._band_note.pack(side="left")
 
         # Learning notches: the update is blind at these lines (both rungs).
         # The monitors carry a free-running ~24 kHz line the loop can only
@@ -1346,12 +1352,20 @@ class App:
         r4 = ttk.Frame(vf); r4.grid(row=5, column=0, columnspan=4, sticky="ew")
         self.fuse_var = tk.StringVar(value=self.cfg.get("f_use", "50e3"))
         self.fmax_var = tk.StringVar(value=self.cfg.get("f_max", "75e3"))
-        ttk.Label(r4, text="full strength to Hz").pack(side="left")
+        l1 = ttk.Label(r4, text="full strength to Hz")
+        l1.pack(side="left")
         self._fuse_entry = ttk.Entry(r4, textvariable=self.fuse_var, width=7)
         self._fuse_entry.pack(side="left", padx=(2, 8))
-        ttk.Label(r4, text="taper to zero at Hz").pack(side="left")
+        l2 = ttk.Label(r4, text="taper to zero at Hz")
+        l2.pack(side="left")
         self._fmax_entry = ttk.Entry(r4, textvariable=self.fmax_var, width=7)
         self._fmax_entry.pack(side="left", padx=2)
+        # (widget, pack options) in order, so the taper row can be hidden on
+        # the parametric rungs and come back in the same order
+        self._taper_widgets = ((l1, dict(side="left")),
+                               (self._fuse_entry, dict(side="left", padx=(2, 8))),
+                               (l2, dict(side="left")),
+                               (self._fmax_entry, dict(side="left", padx=2)))
         b = ttk.Button(r4, text="Show FRF", command=self.do_show_frf)
         b.pack(side="right")
         self._actions.append(b)
@@ -1372,8 +1386,7 @@ class App:
         # nothing here touches the first shot, which is a pure flat
         # conversion. Applies to both Step and the bench loop.
         self._build_channels_frame(tab_measure)
-        pf = ttk.LabelFrame(tab_measure, text="Capture post-processing "
-                                              "(Step + Bench)", padding=3)
+        pf = ttk.LabelFrame(tab_measure, text="Capture (Step + Bench)", padding=3)
         pf.pack(fill="x", pady=(0, 2))
         r0 = ttk.Frame(pf); r0.grid(row=0, column=0, sticky="ew")
         self.toff_var = tk.StringVar(value="0.0")
@@ -1388,86 +1401,39 @@ class App:
                   foreground="#666666").grid(row=1, column=0, sticky="w")
         pf.columnconfigure(0, weight=1)
 
-        # ---- manual step ---------------------------------------------
-        mf = ttk.LabelFrame(tab_run, text="Step from captured files", padding=3)
-        mf.pack(fill="x", pady=(0, 2))
+        # ---- run: the bench flow in order --------------------------------
+        # Numbered the way a campaign goes: instruments, learn, hold. The
+        # set-once numbers (trigger timeout, the skip/keep ticks, GEN's
+        # channel numbers) live in Bench settings..., the hand-capture
+        # path in Manual step... -- both reachable, neither in the way.
+        # The vars are created here whatever dialog shows them, so every
+        # worker and test reads the same ones.
         self.meas_var = tk.StringVar(value=self.cfg.get("measured", ""))
-        self._path_row(mf, 0, "Captures", self.meas_var, self._browse_measured)
-        r1 = ttk.Frame(mf); r1.grid(row=1, column=0, columnspan=4, sticky="ew", pady=1)
-        ttk.Label(r1, text="monitor col").pack(side="left")
         self.moncol_var = tk.StringVar(value="CH3")
-        ttk.Combobox(r1, textvariable=self.moncol_var, width=5,
-                     values=("CH1", "CH2", "CH3", "CH4")).pack(side="left", padx=(2, 8))
         self.refit_var = tk.BooleanVar(value=False)
         self.force_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(r1, text="refit plant", variable=self.refit_var).pack(side="left")
-        ttk.Checkbutton(r1, text="force", variable=self.force_var).pack(side="left")
-        r2 = ttk.Frame(mf)
-        r2.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(2, 0))
-        self.step_btn = ttk.Button(r2, text="Step  (captures -> update drive)",
-                                   command=self.do_step)
-        self.step_btn.pack(side="left", fill="x", expand=True)
-        self._actions.append(self.step_btn)
-        b = ttk.Button(r2, text="Native spectrum",
-                       command=self.do_native_spec)
-        b.pack(side="left", padx=(4, 0))
-        self._actions.append(b)
-        mf.columnconfigure(1, weight=1)
-
-        # ---- bench loop ----------------------------------------------
-        bf = ttk.LabelFrame(tab_run, text="Bench loop (upload -> capture -> update)",
-                            padding=3)
-        bf.pack(fill="x", pady=(0, 2))
-        r0 = ttk.Frame(bf); r0.grid(row=0, column=0, sticky="ew")
         self.awgch_var = tk.StringVar(value="1")
         self.scopech_var = tk.StringVar(value="3")
         self.iters_var = tk.StringVar(value=str(self.cfg.get("iterations", "2")))
         self.repeats_var = tk.StringVar(value=str(self.cfg.get("repeats", "64")))
         self.wait_var = tk.StringVar(value="30")
-        for lab, var, w in (("AWG ch", self.awgch_var, 3),
-                            ("scope ch", self.scopech_var, 3),
-                            ("iterations", self.iters_var, 3),
-                            ("repeats", self.repeats_var, 4),
-                            ("trigger timeout s", self.wait_var, 4)):
-            ttk.Label(r0, text=lab).pack(side="left", padx=(0, 2))
-            ttk.Entry(r0, textvariable=var, width=w).pack(side="left", padx=(0, 6))
         self.skip_var = tk.BooleanVar(value=False)
-        r0b = ttk.Frame(bf); r0b.grid(row=1, column=0, sticky="w")
-        ttk.Checkbutton(r0b, text="skip setup checks (don't)",
-                        variable=self.skip_var).pack(side="left")
         self.keepnative_var = tk.BooleanVar(
             value=bool(self.cfg.get("keep_native", False)))
-        ttk.Checkbutton(r0b, text="keep native-rate avg",
-                        variable=self.keepnative_var).pack(side="left",
-                                                           padx=(10, 0))
         # Auto-set sizes the scope verticals from the session's spans, so a
         # session with a smaller target (an edited endpoint) lands on a
         # finer V/div and a different 8-bit lattice than the campaign it is
         # compared against. Ticked, Auto-set leaves V/div and offset alone.
         self.keepvert_var = tk.BooleanVar(
             value=bool(self.cfg.get("keep_verticals", False)))
-        ttk.Checkbutton(r0b, text="keep verticals",
-                        variable=self.keepvert_var).pack(side="left",
-                                                         padx=(10, 0))
-        rr = ttk.Frame(bf); rr.grid(row=2, column=0, sticky="ew", pady=(2, 0))
-        b = ttk.Button(rr, text="Auto-set instruments", command=self.do_autoset)
-        b.pack(side="left", fill="x", expand=True)
-        self._actions.append(b)
-        self.upload_btn = ttk.Button(rr, text="Upload drive to AWG",
-                                     command=self.do_upload)
-        self.upload_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        self._actions.append(self.upload_btn)
-        r2 = ttk.Frame(bf); r2.grid(row=3, column=0, sticky="ew", pady=(2, 0))
-        self.bench_btn = ttk.Button(r2, text="Run bench loop", command=self.do_bench)
-        self.bench_btn.pack(side="left", fill="x", expand=True)
-        self._actions.append(self.bench_btn)
-        # not in _actions: opening the window is harmless mid-run, and it is
-        # how a batch in progress is watched after its window was closed
-        ttk.Button(r2, text="Batch...", command=self.do_batch).pack(
-            side="left", padx=(4, 0))
-        self.stop_btn = ttk.Button(r2, text="Stop", command=self.stop_evt.set,
-                                   state="disabled")
-        self.stop_btn.pack(side="left", padx=(4, 0))
+        self.holdruns_var = tk.StringVar(value=str(self.cfg.get("hold_runs", "5")))
+        self.holdgap_var = tk.StringVar(value=str(self.cfg.get("hold_gap", "30")))
+        # Which stored iteration to hold: blank = the current drive. Any
+        # earlier drive_<stem>_iNN.csv of the loaded campaign can be
+        # re-measured without Init (which would restart the campaign at
+        # i00 under the same names) -- the runs are tagged to THAT
+        # iteration, so 'iter 9 r1' sits beside iteration 9's own point.
+        self.holditer_var = tk.StringVar(value="")
         # the Batch window's settings live here, so they outlast the window
         self._batch_win = None
         self.batchplan_var = tk.StringVar(value=self.cfg.get("batch_plan", ""))
@@ -1477,37 +1443,67 @@ class App:
             value=self.cfg.get("batch_follow_ch", "X1"))
         self.batchredo_var = tk.BooleanVar(value=False)
         self.batchgui_var = tk.BooleanVar(value=False)
-        r3 = ttk.Frame(bf); r3.grid(row=4, column=0, sticky="ew", pady=(2, 0))
-        ttk.Label(r3, text="runs").pack(side="left")
-        self.holdruns_var = tk.StringVar(value=str(self.cfg.get("hold_runs",
-                                                                "5")))
-        ttk.Entry(r3, textvariable=self.holdruns_var, width=4).pack(
-            side="left", padx=(2, 6))
-        ttk.Label(r3, text="gap between runs s").pack(side="left")
-        self.holdgap_var = tk.StringVar(value=str(self.cfg.get("hold_gap",
-                                                               "30")))
-        ttk.Entry(r3, textvariable=self.holdgap_var, width=6).pack(
-            side="left", padx=(2, 6))
-        # Which stored iteration to hold: blank = the current drive. Any
-        # earlier drive_<stem>_iNN.csv of the loaded campaign can be
-        # re-measured without Init (which would restart the campaign at
-        # i00 under the same names) -- the runs are tagged to THAT
-        # iteration, so 'iter 9 r1' sits beside iteration 9's own point.
-        ttk.Label(r3, text="iter").pack(side="left")
-        self.holditer_var = tk.StringVar(value="")
-        ttk.Entry(r3, textvariable=self.holditer_var, width=4).pack(
-            side="left", padx=(2, 6))
-        b = ttk.Button(r3, text="Hold  (re-measure, no update)",
-                       command=self.do_hold)
+        self._bench_last = ""            # the last instrument fact a run reported
+
+        rs = ttk.LabelFrame(tab_run, text="Bench", padding=3)
+        rs.pack(fill="x", pady=(0, 2))
+        self.run_state = ttk.Label(rs, text="", font=MONO, justify="left")
+        self.run_state.pack(fill="x")
+
+        f1 = ttk.LabelFrame(tab_run, text="1  Instruments", padding=3)
+        f1.pack(fill="x", pady=(0, 2))
+        b = ttk.Button(f1, text="Auto-set instruments", command=self.do_autoset)
         b.pack(side="left", fill="x", expand=True)
         self._actions.append(b)
-        ttk.Label(bf, text="Close the AWG GUI and Scope Grab first (both hold VISA).\n"
-                           "Outputs switch OFF when a run that played anything ends.",
-                  foreground="#666666").grid(row=5, column=0, sticky="w")
-        bf.columnconfigure(0, weight=1)
+        self.upload_btn = ttk.Button(f1, text="Upload drive to AWG",
+                                     command=self.do_upload)
+        self.upload_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self._actions.append(self.upload_btn)
+
+        f2 = ttk.LabelFrame(tab_run, text="2  Learn (upload -> capture -> update, "
+                                          "state saved each iteration)", padding=3)
+        f2.pack(fill="x", pady=(0, 2))
+        ttk.Label(f2, text="iterations").pack(side="left", padx=(0, 2))
+        ttk.Entry(f2, textvariable=self.iters_var, width=3).pack(side="left", padx=(0, 8))
+        ttk.Label(f2, text="repeats").pack(side="left", padx=(0, 2))
+        ttk.Entry(f2, textvariable=self.repeats_var, width=4).pack(side="left", padx=(0, 8))
+        self.bench_btn = ttk.Button(f2, text="Run bench loop", command=self.do_bench)
+        self.bench_btn.pack(side="left", fill="x", expand=True)
+        self._actions.append(self.bench_btn)
+        self.stop_btn = ttk.Button(f2, text="Stop", command=self.stop_evt.set,
+                                   state="disabled")
+        self.stop_btn.pack(side="left", padx=(4, 0))
+
+        f3 = ttk.LabelFrame(tab_run, text="3  Hold (re-measure, no update)", padding=3)
+        f3.pack(fill="x", pady=(0, 2))
+        ttk.Label(f3, text="runs").pack(side="left")
+        ttk.Entry(f3, textvariable=self.holdruns_var, width=4).pack(side="left", padx=(2, 6))
+        ttk.Label(f3, text="gap s").pack(side="left")
+        ttk.Entry(f3, textvariable=self.holdgap_var, width=5).pack(side="left", padx=(2, 6))
+        ttk.Label(f3, text="iter").pack(side="left")
+        ttk.Entry(f3, textvariable=self.holditer_var, width=4).pack(side="left", padx=(2, 6))
+        b = ttk.Button(f3, text="Hold", command=self.do_hold)
+        b.pack(side="left", fill="x", expand=True)
+        self._actions.append(b)
+
+        more = ttk.Frame(tab_run)
+        more.pack(fill="x", pady=(2, 2))
+        # not in _actions: opening the window is harmless mid-run, and it is
+        # how a batch in progress is watched after its window was closed
+        ttk.Button(more, text="Batch...", command=self.do_batch).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(more, text="Manual step...", command=self.do_manual_step_dialog).pack(
+            side="left", fill="x", expand=True, padx=(4, 0))
+        ttk.Button(more, text="Bench settings...", command=self.do_bench_settings).pack(
+            side="left", fill="x", expand=True, padx=(4, 0))
+        ttk.Label(tab_run, text="Close the AWG GUI and Scope Grab first (both hold "
+                                "VISA). Outputs switch OFF when a run that played "
+                                "anything ends.",
+                  foreground="#666666", wraplength=470, justify="left").pack(
+            fill="x")
 
         # ---- line ripple + target corrections (their own builders) ------
-        self._build_line_frame(tab_measure)
+        self._build_line_row(tab_measure)
         self._build_corr_tab(self._tabs["corr"])
 
         # ---- always visible: the session summary, the log, the status -
@@ -1618,20 +1614,29 @@ class App:
         self._cmp_last = []          # the groups the last redraw resolved
         self._cmp_described = set()  # campaigns already spelled out
 
+        # Six tabs: the daily views first (waveforms, error, convergence),
+        # then the drive diagnostics, the ledger, and the loop's inputs. A
+        # tab with more than one figure has a view bar on top; _show_fig
+        # brings any figure to the front.
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
+        self._views = {}
         self.fig_wave, (self.ax_out, self.ax_drv) = self._tab("Waveforms", 2, sharex=True)
-        self.fig_dcor, (self.ax_dcor,) = self._tab("Drive corrections", 1)
-        self.fig_dspec, (self.ax_dspec,) = self._tab("Drive spectrum", 1)
-        self.fig_ddel, (self.ax_ddel,) = self._tab("Drive updates", 1)
-        self.fig_err, (self.ax_err,) = self._tab("Error", 1)
-        self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1)
+        self.fig_err, (self.ax_err,) = self._tab("Error", 1, tab="Error", view="error")
+        self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1, tab="Error",
+                                                   view="spectrum")
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
+        self.fig_dcor, (self.ax_dcor,) = self._tab("Drive corrections", 1, tab="Drive",
+                                                   view="corrections")
+        self.fig_dspec, (self.ax_dspec,) = self._tab("Drive spectrum", 1, tab="Drive",
+                                                     view="spectrum")
+        self.fig_ddel, (self.ax_ddel,) = self._tab("Drive updates", 1, tab="Drive",
+                                                   view="updates")
         self._table_tab()
-        self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True)
-        self.fig_corr, self.ax_corr = self._tab("Target corrections", 3,
-                                                sharex=True)
-        self._corr_frame = self.nb.tabs()[-1]
+        self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True, tab="Inputs",
+                                              view="FRF")
+        self.fig_corr, self.ax_corr = self._tab("Target corrections", 3, sharex=True,
+                                                tab="Inputs", view="target corrections")
 
         # Home on any TIME-domain figure homes them all: the nav stacks of
         # panes that were only ever synced programmatically are empty, so
@@ -1644,18 +1649,60 @@ class App:
         # follow the remembered channel -- they were built with EO1's values
         self._apply_channel_defaults()
 
-    def _tab(self, name, nrows, sharex=False):
-        frame = ttk.Frame(self.nb)
-        self.nb.add(frame, text=name)
+    def _tab(self, name, nrows, sharex=False, tab=None, view=None):
+        """A figure in the plot notebook. `tab` names the notebook tab it
+        lives in (default: its own, titled `name`); `view` names it on that
+        tab's view bar when the tab holds several figures."""
+        tab = tab or name
+        grp = self._views.get(tab)
+        if grp is None:
+            frame = ttk.Frame(self.nb)
+            self.nb.add(frame, text=tab)
+            body = ttk.Frame(frame)
+            body.pack(side="bottom", fill="both", expand=True)
+            grp = self._views[tab] = {"frame": frame, "body": body, "bar": None,
+                                      "var": tk.StringVar(), "views": {}}
+        host = ttk.Frame(grp["body"])
+        if view is None:
+            host.pack(fill="both", expand=True)
+        else:
+            if grp["bar"] is None:
+                grp["bar"] = ttk.Frame(grp["frame"])
+                grp["bar"].pack(side="top", fill="x")
+            ttk.Radiobutton(grp["bar"], text=view, value=view, variable=grp["var"],
+                            command=lambda t=tab: self._show_view(t)).pack(
+                side="left", padx=(4, 10), pady=(1, 0))
+            grp["views"][view] = host
+            if len(grp["views"]) == 1:
+                grp["var"].set(view)
+                host.pack(fill="both", expand=True)
         fig = Figure(figsize=(8.6, 6.2), dpi=100, constrained_layout=True)
         axes = fig.subplots(nrows, 1, sharex=sharex)
         axes = np.atleast_1d(axes)
-        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas = FigureCanvasTkAgg(fig, master=host)
         canvas.get_tk_widget().pack(fill="both", expand=True)
-        tb = NavigationToolbar2Tk(canvas, frame)     # zoom/pan, scope habits
+        tb = NavigationToolbar2Tk(canvas, host)      # zoom/pan, scope habits
         fig._canvas = canvas
         fig._toolbar = tb
+        fig._tab, fig._view = tab, view
         return fig, axes
+
+    def _show_view(self, tab):
+        grp = self._views[tab]
+        want = grp["var"].get()
+        for v, host in grp["views"].items():
+            if v == want:
+                host.pack(fill="both", expand=True)
+            else:
+                host.pack_forget()
+
+    def _show_fig(self, fig):
+        """Bring a figure to the front: its tab, and its view on that tab."""
+        grp = self._views[fig._tab]
+        self.nb.select(grp["frame"])
+        if fig._view is not None and grp["var"].get() != fig._view:
+            grp["var"].set(fig._view)
+            self._show_view(fig._tab)
 
     def _table_tab(self):
         """The one non-figure tab: a ledger of every stored iteration,
@@ -1749,9 +1796,16 @@ class App:
             chans = chanmap.normalise(self._channels_from_panel())
             self.cfg["scope_channels"] = chans
             note = chanmap.describe(self.cfg)
+            # the panel's two short lines: roles by channel, then what each
+            # chain reads (the full names are in the boxes above)
+            short = "  ".join(f"CH{ch} {chans[ch]['role']}" for ch in chanmap.CHANNEL_IDS)
+            rest = " | ".join(L.replace("AWG CH", "AWG ").replace(" -> monitor ", ": mon ")
+                              .replace("no readback (CmdX unassigned)", "no readback")
+                              for L in note.split("\n")[1:])
+            shown = short + "\n" + rest
         except ValueError as e:
-            note = str(e)
-        self.chan_note.configure(text=note)
+            note = shown = str(e)
+        self.chan_note.configure(text=shown)
         if not quiet:
             self._apply_channel_defaults()
             self.log("scope channels: " + note.replace("\n", " | "))
@@ -1780,8 +1834,9 @@ class App:
             return None
 
     # ------------------------------------------------- line (mains) ripple
-    def _build_line_frame(self, parent):
-        """The Measure tab's line-ripple box. On a line-synchronous trigger
+    def _build_line_row(self, parent):
+        """The Scope tab's line-ripple row: the on/off switch, what is
+        measured, and a button for the rest. On a line-synchronous trigger
         the mains ripple on the monitor is the same in every shot, so the
         shot average keeps it and the loop learns a drive that cancels it
         AT THAT PHASE -- wrong as soon as the experiment moves its ramps
@@ -1792,51 +1847,178 @@ class App:
         lf.pack(fill="x", pady=(0, 2))
         self._line_fit = None            # the panel's last fit, carried to Init
         self.line_on_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(lf, text="subtract the measured ripple from every "
-                                 "measurement before the update",
-                        variable=self.line_on_var,
-                        command=self._on_line_toggle).grid(row=0, column=0,
-                                                           sticky="w")
-        r1 = ttk.Frame(lf); r1.grid(row=1, column=0, sticky="ew", pady=1)
         self.linef_var = tk.StringVar(value=self.cfg.get("line_f", "60"))
         self.lineh_var = tk.StringVar(value=self.cfg.get("line_h", "5"))
         self.linewin_var = tk.StringVar(value=self.cfg.get("line_win", "100"))
         self.lineseg_var = tk.StringVar(value=self.cfg.get("line_seg", ""))
+        r0 = ttk.Frame(lf); r0.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(r0, text="subtract the measured ripple from every "
+                                 "measurement",
+                        variable=self.line_on_var,
+                        command=self._on_line_toggle).pack(side="left")
+        ttk.Button(r0, text="Line ripple...", command=self.do_line_dialog).pack(
+            side="right")
+        self.line_status = ttk.Label(lf, text="nothing measured",
+                                     foreground="#444444", wraplength=430,
+                                     justify="left")
+        self.line_status.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        lf.columnconfigure(0, weight=1)
+
+    def do_line_dialog(self):
+        """Measure / fit / clear the line ripple, and its numbers."""
+        fr = self._dialog("_line_win", "Line (mains) ripple")
+        if fr is None:
+            return
+        r1 = ttk.Frame(fr); r1.pack(fill="x", pady=1)
         for lab, var, w in (("line Hz", self.linef_var, 5),
                             ("harmonics", self.lineh_var, 3),
                             ("window ms", self.linewin_var, 5)):
             ttk.Label(r1, text=lab).pack(side="left", padx=(0, 2))
             ttk.Entry(r1, textvariable=var, width=w).pack(side="left",
                                                           padx=(0, 8))
-        r2 = ttk.Frame(lf); r2.grid(row=2, column=0, sticky="ew", pady=1)
-        b = ttk.Button(r2, text="Measure (drive off)",
-                       command=self.do_line_measure)
-        b.pack(side="left", fill="x", expand=True)
-        self._actions.append(b)
-        b = ttk.Button(r2, text="Fit from captures...",
-                       command=self.do_line_from_files)
-        b.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        self._actions.append(b)
-        b = ttk.Button(r2, text="Clear", command=self.do_line_clear, width=6)
-        b.pack(side="left", padx=(4, 0))
-        self._actions.append(b)
-        r3 = ttk.Frame(lf); r3.grid(row=3, column=0, sticky="ew", pady=1)
+        r2 = ttk.Frame(fr); r2.pack(fill="x", pady=1)
+        for text, cmd, w in (("Measure (drive off)", self.do_line_measure, None),
+                             ("Fit from captures...", self.do_line_from_files, None),
+                             ("Clear", self.do_line_clear, 6)):
+            b = ttk.Button(r2, text=text, command=cmd, width=w)
+            b.pack(side="left", fill="x", expand=w is None, padx=(0, 4))
+            b.configure(state="disabled" if self.busy else "normal")
+            self._actions.append(b)
+        r3 = ttk.Frame(fr); r3.pack(fill="x", pady=1)
         ttk.Label(r3, text="captures: fit only in ms").pack(side="left")
         ttk.Entry(r3, textvariable=self.lineseg_var, width=18).pack(
             side="left", padx=(2, 4))
         ttk.Label(r3, text="(e.g. -12:0, 10:16.5; blank = all)",
                   foreground="#666666").pack(side="left")
-        self.line_status = ttk.Label(lf, text="nothing measured",
-                                     foreground="#444444", wraplength=430,
-                                     justify="left")
-        self.line_status.grid(row=4, column=0, sticky="w", pady=(2, 0))
-        ttk.Label(lf, text="Only with a line-synchronous trigger: a free-"
+        ttk.Label(fr, text="Only with a line-synchronous trigger: a free-"
                            "running one already averages the ripple away, "
                            "and subtracting a fixed phase would add it back. "
-                           "Captures must share the ILC runs' trigger.",
+                           "Captures must share the ILC runs' trigger. The "
+                           "measured ripple is shown on the Scope tab.",
                   foreground="#666666", wraplength=430,
-                  justify="left").grid(row=5, column=0, sticky="w")
-        lf.columnconfigure(0, weight=1)
+                  justify="left").pack(fill="x", pady=(4, 0))
+
+    def _dialog(self, attr, title):
+        """A settings window (one at a time per `attr`); returns its padded
+        frame, or None when it was already open (then it is raised). Buttons
+        built into it may join _actions: set_busy drops the dead ones."""
+        w = getattr(self, attr, None)
+        if w is not None and w.winfo_exists():
+            w.lift()
+            return None
+        w = tk.Toplevel(self.root)
+        w.title(title)
+        w.transient(self.root)
+        w.resizable(False, False)
+        setattr(self, attr, w)
+        fr = ttk.Frame(w, padding=6)
+        fr.pack(fill="both", expand=True)
+        return fr
+
+    def do_manual_step_dialog(self):
+        """One iteration from captures taken by hand (the workflow before
+        the bench loop; Native spectrum reads the same files)."""
+        fr = self._dialog("_step_win", "Manual step from captured files")
+        if fr is None:
+            return
+        g = ttk.Frame(fr); g.pack(fill="x")
+        self._path_row(g, 0, "Captures", self.meas_var, self._browse_measured)
+        g.columnconfigure(1, weight=1)
+        r1 = ttk.Frame(fr); r1.pack(fill="x", pady=1)
+        ttk.Label(r1, text="monitor col").pack(side="left")
+        ttk.Combobox(r1, textvariable=self.moncol_var, width=5,
+                     values=("CH1", "CH2", "CH3", "CH4")).pack(side="left", padx=(2, 8))
+        ttk.Checkbutton(r1, text="refit plant", variable=self.refit_var).pack(side="left")
+        ttk.Checkbutton(r1, text="force", variable=self.force_var).pack(side="left")
+        r2 = ttk.Frame(fr); r2.pack(fill="x", pady=(3, 0))
+        self.step_btn = ttk.Button(r2, text="Step  (captures -> update drive)",
+                                   command=self.do_step)
+        self.step_btn.pack(side="left", fill="x", expand=True)
+        b = ttk.Button(r2, text="Native spectrum", command=self.do_native_spec)
+        b.pack(side="left", padx=(4, 0))
+        for w in (self.step_btn, b):
+            w.configure(state="disabled" if self.busy else "normal")
+            self._actions.append(w)
+        ttk.Label(fr, text="The captures glob is averaged as one measurement "
+                           "(unique prefixes: the step averages everything "
+                           "the glob matches). Nothing is uploaded; play the "
+                           "written drive yourself.",
+                  foreground="#666666", wraplength=430, justify="left").pack(
+            fill="x", pady=(4, 0))
+
+    def do_bench_settings(self):
+        """The set-once numbers of the bench loop."""
+        fr = self._dialog("_bench_win", "Bench settings")
+        if fr is None:
+            return
+        r0 = ttk.Frame(fr); r0.pack(fill="x", pady=1)
+        ttk.Label(r0, text="trigger timeout s").pack(side="left", padx=(0, 2))
+        ttk.Entry(r0, textvariable=self.wait_var, width=4).pack(side="left", padx=(0, 6))
+        ttk.Label(r0, text="(per shot; raise it for slow burst rates)",
+                  foreground="#666666").pack(side="left")
+        for text, var, note in (
+                ("skip setup checks (don't)", self.skip_var,
+                 "a mismatched AMP/OFST/clock silently rescales the drive"),
+                ("keep native-rate avg", self.keepnative_var,
+                 "meas_<stem>_iNN_native.npz beside every measurement"),
+                ("keep verticals", self.keepvert_var,
+                 "Auto-set leaves V/div and offset alone (same 8-bit lattice)")):
+            r = ttk.Frame(fr); r.pack(fill="x", pady=1)
+            ttk.Checkbutton(r, text=text, variable=var).pack(side="left")
+            ttk.Label(r, text=note, foreground="#666666").pack(side="left", padx=(6, 0))
+        r4 = ttk.Frame(fr); r4.pack(fill="x", pady=(4, 1))
+        ttk.Label(r4, text="AWG ch").pack(side="left", padx=(0, 2))
+        ttk.Entry(r4, textvariable=self.awgch_var, width=3).pack(side="left", padx=(0, 6))
+        ttk.Label(r4, text="scope ch").pack(side="left", padx=(0, 2))
+        ttk.Entry(r4, textvariable=self.scopech_var, width=3).pack(side="left", padx=(0, 6))
+        ttk.Label(fr, text="Channel numbers: EO1 and EO2 take them from the Scope "
+                           "tab's map (a number that contradicts it is refused); "
+                           "GEN uses these as typed.",
+                  foreground="#666666", wraplength=430, justify="left").pack(
+            fill="x", pady=(0, 2))
+
+    def _refresh_run_state(self):
+        """The Bench line on the Run tab: the wiring in force and the last
+        thing a run reported about the instruments."""
+        if not hasattr(self, "run_state"):
+            return
+        ch = self.channel_var.get()
+        try:
+            awg, mon = int(self.awgch_var.get()), int(self.scopech_var.get())
+            rb = self._drive_scope_ch(awg)
+            line1 = (f"{ch}: AWG CH{awg} -> monitor CH{mon}, readback "
+                     + (f"CH{rb}" if rb else "none (alignment not verified)"))
+        except (ValueError, TypeError):
+            line1 = f"{ch}: channel numbers not set"
+        self.run_state.configure(
+            text=line1 + "\n" + (self._bench_last or "instruments: nothing played this session"))
+
+    def _bench_note(self, text):
+        """A worker's one-line instrument fact for the Bench line (any
+        thread: it goes through the message pump)."""
+        stamp = datetime.datetime.now().strftime("%H:%M")
+
+        def apply():
+            self._bench_last = f"{stamp} {text}"
+            self._refresh_run_state()
+        if threading.current_thread() is threading.main_thread():
+            apply()
+        else:
+            self.msgs.put(("call", apply))
+
+    def _hint(self):
+        """What to do next, for the status line when nothing is running."""
+        s = self.session
+        if s is None:
+            return "ready -- Load state, or Init a campaign (Session tab)"
+        hist = [m for m in s.loop.history if isinstance(m, dict) and "rms_err_hv" in m]
+        if not hist:
+            return f"ready -- {s.stem}: Auto-set, then Run bench loop (Run tab)"
+        late = [(i, m["rms_err_hv"]) for i, m in enumerate(hist) if i >= 8] or \
+            list((i, m["rms_err_hv"]) for i, m in enumerate(hist))
+        i, r = min(late, key=lambda t: t[1])
+        return (f"ready -- {s.stem}: lowest rms {'since i08 ' if len(hist) > 8 else ''}"
+                f"is i{i:02d} ({r:.2f} V at the EOM)")
 
     def _line_segments(self):
         """'-12:0, 10:16.5' (ms) -> [(t0, t1)] in seconds; blank -> None."""
@@ -1956,6 +2138,8 @@ class App:
         self._refresh_summary()
 
     def _refresh_line_status(self):
+        if not self.line_status.winfo_exists():
+            return
         s = self.session
         lf = s.line_fit if (s is not None and s.line_fit) else self._line_fit
         if lf is None:
@@ -2119,10 +2303,9 @@ class App:
         cannot see -- the light's polarization, for the EOMs -- comes out
         right. The loop then learns the drive. The base target is kept."""
         ttk.Label(parent, text=(
-            "Moves the target the loop follows by a correction measured "
-            "elsewhere (e.g. the polarimeter's light-minus-monitor error). "
-            "The loop then learns the drive for the new target; the base "
-            "target stays on record and Revert restores it."),
+            "Moves the TARGET by an error measured elsewhere (the polarimeter's "
+            "light minus monitors); the loop then learns the drive. Revert "
+            "restores the base target."),
             foreground="#555555", wraplength=440, justify="left").pack(
             fill="x", pady=(0, 3))
         lf = ttk.LabelFrame(parent, text="Correction files", padding=3)
@@ -2183,12 +2366,8 @@ class App:
         ttk.Checkbutton(r2, text="only where the target is active",
                         variable=self.corract_var).pack(side="left")
         ttk.Label(gf, text=(
-            "band: nothing faster is applied (the outer measurement is slow). "
-            "k sigma: held at zero where the file's own error explains it. "
-            "floor: smaller than the monitor average can verify (~0.1 mV, so "
-            "0.1 V at an EOM). cap: largest total change. Volts at the "
-            "output, as in a target CSV. The Trek limits, the AWG rail and "
-            "full scale are always checked."),
+            "Volts at the output, as in a target CSV; the Trek limits, the "
+            "AWG rail and full scale are always checked (WORKFLOW_GUI.md 10)."),
             foreground="#666666", wraplength=440, justify="left").grid(
             row=2, column=0, sticky="w")
         gf.columnconfigure(0, weight=1)
@@ -2394,7 +2573,7 @@ class App:
             return messagebox.showerror("Corrections", str(e))
         self._report_corr(total, results, notes, "preview")
         self._plot_corrections(total, results, base_out)
-        self.nb.select(self._corr_frame)
+        self._show_fig(self.fig_corr)
         self._refresh_corr_list()
         return notes
 
@@ -2659,6 +2838,7 @@ class App:
     def set_busy(self, busy):
         self.busy = busy
         state = "disabled" if busy else "normal"
+        self._actions = [b for b in self._actions if b.winfo_exists()]
         for b in self._actions:
             b.configure(state=state)
         self.stop_btn.configure(state="normal" if busy else "disabled")
@@ -2669,7 +2849,7 @@ class App:
         self._refresh_compare_status()
         if not busy:
             self.progress.configure(value=0)
-            self.status.configure(text="ready")
+            self.status.configure(text=self._hint())
 
     def run_worker(self, fn, status):
         if self.busy:
@@ -2866,6 +3046,7 @@ class App:
         self.moncol_var.set(mon_col)
         self.awgch_var.set(str(awg_ch))
         self.scopech_var.set(str(scope_ch))
+        self._refresh_run_state()
         # Point at this channel's wide-probe FRF unless the user browsed to
         # something that is not just the other channel's default.
         cur = os.path.basename(self.frf_var.get())
@@ -2878,19 +3059,37 @@ class App:
         return LABEL2KEY.get(self.model_var.get(), "frf")
 
     def _update_model_fields(self):
-        """Only the parameters the selected model actually has are editable --
-        a greyed box says 'this model does not know about that'. That
-        includes the band knobs: f_cut belongs to the parametric rungs
+        """Only the parameters the selected model actually has are shown
+        (and the hidden ones are disabled as well, so nothing reads them).
+        That includes the band knobs: f_cut belongs to the parametric rungs
         (the FRF path deliberately never pre-filters at it -- ilc.update),
-        and the f_use/f_max taper belongs to the measured FRF."""
+        and the f_use/f_max taper belongs to the measured FRF. The FRF path
+        row stays on every rung: the fit dialog reads it."""
         key = self._model_key()
         need = PARAMS_FOR[key]
-        for k, e in self._param_entries.items():
-            e.configure(state="normal" if k in need else "disabled")
+        for k in ("gain", "tau", "fn", "zeta"):
+            self._param_labels[k].pack_forget()
+            self._param_entries[k].pack_forget()
+        for k in ("gain", "tau", "fn", "zeta"):
+            self._param_entries[k].configure(state="normal" if k in need else "disabled")
+            if k in need:
+                self._param_labels[k].pack(side="left", padx=(0, 2))
+                self._param_entries[k].pack(side="left", padx=(0, 8))
         frf = key == "frf"
         self._fcut_entry.configure(state="disabled" if frf else "normal")
+        for w in (self._fcut_label, self._fcut_entry, self._band_note):
+            w.pack_forget()
+        if not frf:
+            self._fcut_label.pack(side="left", padx=(0, 2))
+            self._fcut_entry.pack(side="left", padx=(0, 6))
+            self._band_note.pack(side="left")
         for e in (self._fuse_entry, self._fmax_entry):
             e.configure(state="normal" if frf else "disabled")
+        for w, _opts in self._taper_widgets:
+            w.pack_forget()
+        if frf:
+            for w, opts in self._taper_widgets:
+                w.pack(**opts)
 
     def _set_param_entries(self, p):
         """Plant -> panel entries (blank = the term is absent from p)."""
@@ -3173,7 +3372,7 @@ class App:
     def _after_fit(self, p, u_fit, y, it):
         self._set_param_entries(p)
         self._plot_waveforms_pinned(u_fit, y, p.forward(u_fit), it)
-        self.nb.select(0)
+        self._show_fig(self.fig_wave)
 
     def _browse_target(self):
         self._browse(self.target_var, "Target CSV", "*.csv",
@@ -3276,7 +3475,7 @@ class App:
         self._finish_time_axis(self.ax_out)
         self.fig_wave._canvas.draw_idle()
         if not replay:
-            self.nb.select(0)
+            self._show_fig(self.fig_wave)
         self._wave_redraw = (lambda:
                              self.do_preview_target(quiet=True, replay=True))
 
@@ -3655,6 +3854,8 @@ class App:
 
     def _refresh_summary(self):
         s = self.session
+        if not self.busy:
+            self.status.configure(text=self._hint())
         if s is None:
             self.upload_btn.configure(text="Upload drive to AWG")
             return self.summary.configure(text="no session loaded")
@@ -4103,7 +4304,7 @@ class App:
         ax.legend(loc="best", fontsize=7)
         self.fig_spec._canvas.draw_idle()
         # front the Error spectrum tab (by its frame, not a magic index)
-        self.nb.select(self.fig_spec._canvas.get_tk_widget().master)
+        self._show_fig(self.fig_spec)
 
     def do_autoset(self):
         """Configure the AWG and scope from what the session already knows:
@@ -4183,6 +4384,9 @@ class App:
                   f"(FRQ {1.0/period:.6g} Hz), AMP {2*fs:g} Vpp, OFST 0, "
                   f"load HZ -- output left "
                   f"{'ON' if awg.is_on(awg_ch) else 'OFF'}")
+            self._bench_note(f"Auto-set: CH{awg_ch} FRQ {1.0/period:.6g} Hz, AMP "
+                             f"{2*fs:g} Vpp, output {'ON' if awg.is_on(awg_ch) else 'OFF'}; "
+                             f"scope HRES")
             print(f"       waveform readback: {arwv}")
             if not pick:
                 print(f"       NOTE: '{wname}' is not in the generator's user "
@@ -4502,6 +4706,7 @@ class App:
                 try:
                     awg.set_output(awg_ch, False)
                     print(f"CH{awg_ch} output OFF (end of hold)")
+                    self._bench_note(f"CH{awg_ch} output OFF (end of hold)")
                 except Exception as e:
                     print(f"could not switch CH{awg_ch} output off: {e}")
             awg.close()
@@ -4727,6 +4932,7 @@ class App:
                 try:
                     awg.set_output(awg_ch, False)
                     print(f"CH{awg_ch} output OFF (end of run)")
+                    self._bench_note(f"CH{awg_ch} output OFF (end of run)")
                 except Exception as e:
                     print(f"could not switch CH{awg_ch} output off: {e}")
             # both closes leave the shared ResourceManager standing
@@ -5155,6 +5361,7 @@ class App:
                 try:
                     awg.set_output(awg_ch, False)
                     print(f"CH{awg_ch} output OFF (end of run)")
+                    self._bench_note(f"CH{awg_ch} output OFF (end of run)")
                 except Exception as e:
                     print(f"could not switch CH{awg_ch} output off: {e}")
             if retune:
@@ -5337,6 +5544,7 @@ class App:
             return False, False
         awg.set_output(awg_ch, True)
         print(f"CH{awg_ch} output ON (confirmed in dialog)")
+        self._bench_note(f"CH{awg_ch} output ON")
         if not awg.is_on(awg_ch):
             print(f"CH{awg_ch} did not switch on -- aborting")
             return False, True
@@ -6000,7 +6208,7 @@ class App:
         self._wave_redraw = None            # back onto the selection
         self._redraw_iterations()
         if select_tab:
-            self.nb.select(0)
+            self._show_fig(self.fig_wave)
 
     def _show_iteration(self, u, y, m, it):
         self._wave_redraw = None            # back onto the selection
@@ -6756,7 +6964,7 @@ class App:
             axm.legend(loc="best", fontsize=7)
         self.fig_frf._canvas.draw_idle()
         # by frame, not index -- tab positions have moved before (measured)
-        self.nb.select(self.fig_frf._canvas.get_tk_widget().master)
+        self._show_fig(self.fig_frf)
         self.log(f"taper {f['f_use']/1e3:g}-{f['f_max']/1e3:g} kHz shaded")
 
 

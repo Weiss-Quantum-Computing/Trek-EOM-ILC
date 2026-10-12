@@ -48,11 +48,12 @@ visible.
 |---|---|
 | **Session** | load a state file, or build one: target + channel + name + first-shot gain → Init |
 | **Model** | *Inverse model*: what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, the learning notches, and the FRF band |
-| **Measure** | *Capture post-processing* (`t-offset`, baseline) and *Line (mains) ripple*: how a measurement becomes an error, shared by Step and Bench. Nothing here touches the first shot. |
-| **Run** | *Step from captured files* (one iteration from captures you took) and *Bench loop* (upload → capture → update, Auto-set, Upload, Hold) |
+| **Scope** | the *Scope channels* map (which channel is the PD, the monitors, the Trek commands — the polarimeter's roles), the capture settings (`t-offset`, baseline), and the line-ripple switch with its **Line ripple…** dialog |
+| **Run** | the bench flow in order: a *Bench* line (wiring in force, the last thing a run reported about the instruments), **1 Instruments** (Auto-set, Upload), **2 Learn** (iterations, repeats, Run, Stop), **3 Hold**, then **Batch…**, **Manual step…** (one iteration from captures you took) and **Bench settings…** (trigger timeout, the skip/keep ticks, GEN's channel numbers) |
 | **Corrections** | learned target corrections: move the TARGET by an error measured elsewhere (the polarimeter), within limits — §11 |
 | **Log** | everything the loop reports. A timestamped copy appends to `run\ilc_gui.log` |
-| right side | ten tabs (nine figures plus the Table ledger), refreshed at every step, with the iteration selector and Compare box above them — see §7 |
+| right side | six tabs, refreshed at every step, with the iteration selector and Compare box above them: Waveforms, Error (error / spectrum), Convergence, Drive (corrections / spectrum / updates), Table, Inputs (FRF / target corrections) — a tab with several figures has a view bar on top; see §7 |
+| status line | what is running, or when idle the next step: Load/Init, then Auto-set and Run, then the lowest-rms iteration since i08 (the batch's keeper rule) |
 
 Every individual field is documented in §10.
 
@@ -150,8 +151,9 @@ the parametric model from each iteration's own data as it steps.
 ## 5. The hands-off bench loop
 
 1. Both other GUIs closed; burst firing (the external trigger running).
-2. Check **AWG ch / scope ch** (auto-set per channel), **iterations**, and
-   **repeats** (64 = the campaign standard; 16 is a usable quick check).
+2. Read the **Bench** line (the channel numbers come from the Scope tab's
+   map), set **iterations** and **repeats** (64 = the campaign standard; 16
+   is a usable quick check).
 3. **Auto-set instruments** configures both from what the session already
    knows: the AWG gets the record's period as its arb frequency (DDS),
    AMP = 2× full scale / OFST 0, load HZ, the NCYC-1 EXT burst, **and the
@@ -360,7 +362,7 @@ The **Model** combobox selects what the update divides the error by:
 ## 7. Reading the plots
 
 The **Iterations shown** box above the tabs picks which stored iterations
-the Drive corrections, Drive updates, Error and Error spectrum tabs
+the Drive (corrections, updates) and Error (error, spectrum) views
 overlay: blank shows
 the last two, `all` shows everything, `2-5` a range, `0,3,6` a list
 (Enter or **Redraw** applies it). Iterations are coloured dark-to-light by
@@ -414,14 +416,14 @@ every draw and overrides anything the sliders set.
 | tab | what to look for |
 |---|---|
 | **Waveforms** | target vs measured output (top); the drives (bottom) with the current drive's first/last-sample idle markers against the idle cap. Follows the **Iterations** box and **Compare** like the other tabs: every selected measurement (hold runs dashed) and every selected iteration's drive, the current drive always drawn bold. After Init, before any measurement: the model-predicted output. A fit pins its own drive/measurement/prediction view here until the next iteration or load. |
-| **Drive corrections** | the drive side of the Error tab: each selected iteration's AWG waveform minus the target's flat conversion (or minus the stored iteration-0 drive when it exists) — what the loop has learned to *add* at the input, in mV at the AWG. Growth here without matching error shrinkage is the loop learning noise or a wrong inverse. |
-| **Drive spectrum** | the corrections of the tab above, in frequency: where the learned correction lives, mirroring the Error spectrum (band edge drawn the same way). The update cannot put power right of the band edge — content there came from a hand-edited drive, a stale state, or a band that was wider earlier, and the current band cannot remove it. Base measurements only (hold runs replay the same drive), iterations without a stored drive skipped. |
-| **Drive updates** | `u_k − u_(k−1)`: the update each shown iteration actually applied, against the immediately prior iteration's drive (which may come from any stored iteration, selected or not). Shrinking updates are convergence seen from the input; updates that stop shrinking while the error flat-lines mean the loop is re-learning the same correction against noise or drift. |
-| **Error** | target − measured for the selected iterations. Peak/rms of the newest in the title. The stuck peak at t = 0 is the burst-entry transient — the loop cannot fix the idle level (WORKFLOW.md). |
-| **Error spectrum** | where the residual lives. The update only acts left of the drawn band edge (f_cut line, or the shaded FRF taper). Error growing *right* of the edge while the in-band falls is the model diverging — tighten the band or climb the ladder. Looks noisy? That is mostly estimator variance, not signal: raise *spectra avg*. Need the band past the grid Nyquist? *Native spectrum* in the Step panel. |
+| **Drive → corrections** | the drive side of the Error tab: each selected iteration's AWG waveform minus the target's flat conversion (or minus the stored iteration-0 drive when it exists) — what the loop has learned to *add* at the input, in mV at the AWG. Growth here without matching error shrinkage is the loop learning noise or a wrong inverse. |
+| **Drive → spectrum** | the corrections of the view above, in frequency: where the learned correction lives, mirroring the Error spectrum (band edge drawn the same way). The update cannot put power right of the band edge — content there came from a hand-edited drive, a stale state, or a band that was wider earlier, and the current band cannot remove it. Base measurements only (hold runs replay the same drive), iterations without a stored drive skipped. |
+| **Drive → updates** | `u_k − u_(k−1)`: the update each shown iteration actually applied, against the immediately prior iteration's drive (which may come from any stored iteration, selected or not). Shrinking updates are convergence seen from the input; updates that stop shrinking while the error flat-lines mean the loop is re-learning the same correction against noise or drift. |
+| **Error → error** | target − measured for the selected iterations. Peak/rms of the newest in the title. The stuck peak at t = 0 is the burst-entry transient — the loop cannot fix the idle level (WORKFLOW.md). |
+| **Error → spectrum** | where the residual lives. The update only acts left of the drawn band edge (f_cut line, or the shaded FRF taper). Error growing *right* of the edge while the in-band falls is the model diverging — tighten the band or climb the ladder. Looks noisy? That is mostly estimator variance, not signal: raise *spectra avg*. Need the band past the grid Nyquist? *Native spectrum* in the Step panel. |
 | **Convergence** | peak and rms error vs iteration, log scale, with model-change annotations. Flat-lining means the current inverse has given what it can. |
 | **Table** | the ledger: one row per stored iteration and hold run — peak/rms error (V and %FS), the played drive's peak, wall-clock timestamp, Δt against the reference — compare stems included, the Iterations box deliberately *not* applied. The *model* column names the model that **built that row's drive**: iteration 0 is blank (Init's flat first shot involves no model), hold runs inherit their base iteration's label, and a model whose drive was never measured does not appear. **Save CSV…** writes exactly what the table shows (this tab's equivalent of the figures' toolbar save). |
-| **FRF** | measured magnitude/phase/coherence, dropped tones flagged, taper band shaded, current parametric model overlaid. |
+| **Inputs → FRF** | measured magnitude/phase/coherence, dropped tones flagged, taper band shaded, current parametric model overlaid. |
 
 ## 8. Files every step writes
 
@@ -466,7 +468,7 @@ filed.
 - **The scope channels are ROLES, not numbers (12 Oct 2026).** The bench
   loop reads the monitor from the channel with the MonXn role and the
   drive back from the CmdXn channel of the *Scope channels* map on the
-  Measure tab — the same map the polarimeter uses. No CmdXn channel means
+  Scope tab — the same map the polarimeter uses. No CmdXn channel means
   the trigger alignment is NOT verified on that run (the log says so) and
   Measure FRF refuses (it is monitor / drive). The map is written into every
   state the bench measures, and Load state says when it differs from the
@@ -519,7 +521,7 @@ and it behaves like any entry again.
 | **taper to zero at Hz** *(config)* | `f_max`: a raised cosine takes the correction from full strength at `f_use` to zero here; the error is also smoothed at `f_max` so out-of-band noise cannot alias into the correction. Nothing above `f_max` is ever corrected. Both edges are checked against the loaded file: `f_use` past its top coherent tone is refused outright, `f_max` past it warns and names how much of the band is extrapolated. The campaign ended at 50/75 kHz; stepping one FRF through widening tapers is the frequency-ranged demo. |
 | **Show FRF** | Plots the FRF file (magnitude / unwrapped phase / coherence, taper band shaded, dropped tones flagged) with the current parametric model overlaid for comparison. |
 
-### Scope channels (Measure tab)
+### Scope channels (Scope tab)
 
 | field | what it does |
 |---|---|
@@ -527,14 +529,14 @@ and it behaves like any entry again.
 | **Copy from polarimeter** | Reads `%APPDATA%\RampPolarimeter\config.json` and takes its channel map, logging what changed — the one way to keep the two programs' views of the rack identical. |
 | **Defaults** | The bench as wired 5–12 Oct 2026: CH1 PD, CH2 CmdX1, CH3 MonX1, CH4 MonX2. |
 
-### Capture post-processing (Step + Bench)
+### Capture (Scope tab; Step + Bench)
 
 | field | what it does |
 |---|---|
 | **t-offset us** *(state)* | The fixed trigger-to-waveform-start delay, subtracted when resampling every capture onto the loop grid. Measured **0** on this bench (2026-08-24). Measure once, leave alone: re-fitting it per iteration makes the loop chase its own alignment. Bench mode cross-checks it against the uploaded drive on the first iteration and refuses if stale. |
 | **zero baseline** *(panel)* | Subtracts the mean of the first 5 % of the record from the measurement. Only valid when the waveform is actually flat there — MKJ is already moving, so on MKJ this subtracts real signal and roughly doubles the reported error (the step warns when the target's own baseline is not flat). Off unless you know why. |
 
-### Line (mains) ripple (Measure tab)
+### Line (mains) ripple (Scope tab; the numbers and buttons in the **Line ripple…** dialog)
 
 On a **line-synchronous trigger** the mains ripple on the monitor is the same
 in every shot (5 Oct 2026, the experiment's trigger: 0.9 / 1.35 mV at 60 Hz on
@@ -554,7 +556,7 @@ leave this off there.
 | **Fit from captures…** | Offline: Scope Grab CSV/NPZ captures of the monitor (column = *monitor col*), drive off — or any capture whose undriven stretches are named in **fit only in ms** (`-12:0, 10:16.5`). Must use the same trigger as the ILC runs. Short stretches fit badly (the log says when). |
 | **Clear** | Forgets the fit and switches the subtraction off. |
 
-### Step from captured files
+### Manual step… (Run tab dialog)
 
 | field | what it does |
 |---|---|
@@ -565,18 +567,18 @@ leave this off there.
 | **Step** | One iteration: average captures → error metrics → update → limit check → write drive + AWG copy → save state. |
 | **Native spectrum** | The error spectrum at the SCOPE's native sample rate: the target is interpolated onto the capture's time base instead of the capture being boxcar-decimated onto the waveform grid. Same record length — the low-frequency bins do **not** move — but the band extends to the scope Nyquist and the top octave loses the anti-alias boxcar's droop. Uses the Captures glob + monitor col + the *spectra avg* setting; draws as a black overlay on the Error spectrum tab (next Redraw clears it). Same span guard as Step. Reads raw Scope Grab CSVs and the bench loop's kept `meas_*_native.npz` alike — for bench campaigns, tick *keep native-rate avg* so those files exist. |
 
-### Bench loop
+### Run tab
 
 | field | what it does |
 |---|---|
-| **AWG ch** | Generator channel (1 or 2) the drive is uploaded to and selected on. 1 drives EO1, 2 drives EO2. |
-| **scope ch** | Scope channel carrying the **monitor** for this chain. Filled from the *Scope channels* map (the MonXn channel) when EO1/EO2 is selected; a number that contradicts the map is refused at Run / Auto-set / Hold. |
+| **Bench** line | The wiring in force (AWG channel → monitor channel, readback channel or "none (alignment not verified)") and the last instrument fact a run reported (Auto-set's FRQ/AMP/output, output ON/OFF at a run's end), with its time. |
+| **AWG ch / scope ch** *(Bench settings…)* | Generator channel the drive is uploaded to and the scope channel carrying the monitor. EO1/EO2 fill them from the *Scope channels* map (the MonXn channel) and refuse a number that contradicts it; GEN uses them as typed. |
 | **iterations** *(config)* | Number of updates to run. The loop measures `iterations + 1` times — the last measurement documents the final drive without updating past it. |
 | **repeats** *(config)* | HRES single shots averaged in software per iteration. 64 is the campaign standard (~25 s at the 20 Hz trigger, dithers the scope's 2.5 mV word lattice to its 0.16 mV floor); 16 is a usable quick check; below 16 is refused. |
-| **trigger timeout s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
-| **skip setup checks** *(panel)* | Uploads without verifying AMP/OFST/clock/acquisition mode. A mismatch silently rescales the drive, which is the one error the loop cannot see. Don't. |
-| **keep native-rate avg** *(config)* | Bench loop and Hold also save each iteration's repeat average at the scope's own sample rate — `meas_<stem>_iNN[_rMM]_native.npz` (`t` = waveform time, `y` = monitor V) beside the usual decimated `.npy`. Costs ~0.5–1 MB per iteration and nothing else; point the Captures glob at these files to run *Native spectrum* on a bench campaign after the fact. |
-| **keep verticals** *(config)* | Auto-set leaves the scope's V/div and offset as they are (it still sets FRQ, AMP, OFST, load, burst, timebase and HRES, and prints the verticals it found). Tick it for a session whose target span differs from the campaign it is compared against — an edited endpoint, say — so the 8-bit lattice stays the same; untick and Auto-set re-ranges both channels from the session's own spans. |
+| **trigger timeout s** *(Bench settings…)* | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |
+| **skip setup checks** *(Bench settings…)* | Uploads without verifying AMP/OFST/clock/acquisition mode. A mismatch silently rescales the drive, which is the one error the loop cannot see. Don't. |
+| **keep native-rate avg** *(config, Bench settings…)* | Bench loop and Hold also save each iteration's repeat average at the scope's own sample rate — `meas_<stem>_iNN[_rMM]_native.npz` (`t` = waveform time, `y` = monitor V) beside the usual decimated `.npy`. Costs ~0.5–1 MB per iteration and nothing else; point the Captures glob at these files to run *Native spectrum* on a bench campaign after the fact. |
+| **keep verticals** *(config, Bench settings…)* | Auto-set leaves the scope's V/div and offset as they are (it still sets FRQ, AMP, OFST, load, burst, timebase and HRES, and prints the verticals it found). Tick it for a session whose target span differs from the campaign it is compared against — an edited endpoint, say — so the 8-bit lattice stays the same; untick and Auto-set re-ranges both channels from the session's own spans. |
 | **Upload `<stem>_iNN` to AWG** | Uploads the session's current drive into the generator's user memory and selects it — the manual-workflow counterpart of what the bench loop does each iteration, at the same fixed ±full-scale mapping (never normalised). Asks before overwriting a stored waveform of the same name; no dialog when the name is free. Warns in the log when the output is live (the new waveform plays the moment it is selected). |
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
 | **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |

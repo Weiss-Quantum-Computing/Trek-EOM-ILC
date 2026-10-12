@@ -1813,7 +1813,7 @@ print("[47b] Measure FRF dither: drive, monitor and aux stepped over 3 codes and
 # and Revert puts the base back; a line-ripple fit from captures is
 # subtracted from every measurement once ticked and is saved in the state.
 from eomilc import corrections as _corrmod, mains as _mains
-assert set(app._tabs) == {"session", "model", "measure", "run", "corr"}
+assert set(app._tabs) == {"session", "model", "scope", "run", "corr"}
 for _fr in app._tabs.values():
     app.lnb.select(_fr)
 root.update()
