@@ -1886,6 +1886,73 @@ print(f"[48b] line ripple: locked captures -> 60 Hz {_lf['fit']['amp'][0]*1e3:.3
       f"free-running -> coherence {_coh_free:.2f}, "
       f"switched off; cleared")
 
+# [54] Scope channels by ROLE (12 Oct 2026): the polarimeter's vocabulary on
+# the Measure tab. The Trek chains' numbers follow the map, the drive readback
+# is the CmdXn channel (none = alignment skipped, an FRF refused), the PD comes
+# from the map, GEN keeps its old numbers, and the map rides into the state and
+# through the CLI pass-through.
+import json as _json
+import run_ilc as _run_ilc
+from eomilc import channels as _chm
+assert set(app.chan_role) == {"1", "2", "3", "4"}
+app._set_channels(_chm.DEFAULT_CHANNELS); root.update()
+app.channel_var.set("EO1"); app._apply_channel_defaults()
+assert app.scopech_var.get() == "3" and app.moncol_var.get() == "CH3", (
+    app.scopech_var.get(), app.moncol_var.get())
+assert app._drive_scope_ch(1) == 2 and app._drive_scope_ch(2) is None
+assert ilc_gui.pd_channel(app.cfg) == 1
+assert app._wiring_ok(1, 3, "smoke") is True
+# monitor X1 moved to CH2 and the command to CH3: the numbers follow the map
+app.chan_role["2"].set("MonX1"); app.chan_role["3"].set("CmdX1")
+app._channels_changed(); root.update()
+assert app.scopech_var.get() == "2" and app._drive_scope_ch(1) == 3, app.scopech_var.get()
+app.channel_var.set("EO2"); app._apply_channel_defaults()
+assert app.scopech_var.get() == "4"
+# a monitor number that contradicts the map is refused; so is an FRF with no
+# CmdX2 channel to read the drive from (the dialog is stubbed)
+_errs = []
+_real_err = ilc_gui.messagebox.showerror
+ilc_gui.messagebox.showerror = lambda *a, **k: _errs.append(a)
+try:
+    assert app._wiring_ok(2, 3, "smoke") is False and len(_errs) == 1
+    assert app._wiring_ok(2, 4, "smoke") is True
+    assert app._wiring_ok(2, 4, "smoke", need_drive=True) is False and len(_errs) == 2
+finally:
+    ilc_gui.messagebox.showerror = _real_err
+# GEN keeps the old convention: readback on scope CH<awg_ch>
+app.channel_var.set("GEN"); assert app._drive_scope_ch(1) == 1
+app.channel_var.set("EO1"); app._apply_channel_defaults()
+# copy from the polarimeter's config (a stand-in file)
+_pcfg = os.path.join(SCRATCH, "pol_config.json")
+with open(_pcfg, "w") as _fh:
+    _json.dump({"channels": {"1": {"role": "PD", "name": "Analyzer PD"},
+                             "2": {"role": "CmdX1", "name": "Trek input X1"},
+                             "3": {"role": "MonX1", "name": "Trek monitor X1"},
+                             "4": {"role": "MonX2", "name": "Trek monitor X2"}}}, _fh)
+_chm.POLARIMETER_CONFIG_PATH = _pcfg
+app.do_channels_from_polarimeter(); root.update()
+assert app.chan_role["2"].get() == "CmdX1" and app.chan_name["2"].get() == "Trek input X1"
+assert app.scopech_var.get() == "3" and app._drive_scope_ch(1) == 2
+# the map rides in the state, survives Load, and the CLI carries it through
+_s = app.session
+_s.scope_channels = _chm.record(app.cfg)
+ilc_gui.save_session(_s)
+_st = _run_ilc.load_state(_s.state_path)
+assert "scope_channels" in _run_ilc.passthrough(_st)
+assert _chm.from_record(_st["scope_channels"]) == _chm.channels_of(app.cfg)
+app.do_load(); root.update()
+assert _chm.from_record(app.session.scope_channels) == _chm.channels_of(app.cfg)
+_d = _chm.differences(app.cfg, {"scope_channels": {**_chm.channels_of(app.cfg), "2": {"role": "off", "name": ""}}})
+assert _d == ["CH2: CmdX1 -> off"], _d
+# the config round-trips the map
+app._save_config()
+with open(ilc_gui.CONFIG_PATH) as _fh:
+    assert _chm.channels_of(_json.load(_fh)) == _chm.channels_of(app.cfg)
+print("[54] scope channel roles: numbers follow the map (EO1 mon CH3 / readback "
+      "CH2 / PD CH1), map changes re-point them, a contradicting monitor number "
+      "and an FRF without CmdX are refused, GEN unchanged, polarimeter copy, "
+      "state + pass-through + config round trip")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the

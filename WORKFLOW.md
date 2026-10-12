@@ -365,8 +365,14 @@ refuses on a mismatch (OFST up to ±60 mV is allowed for the idle trim).
 
 `ilc_batch.py` trains a list of target pairs one after another. Each pair
 (`target_<stem>X1.csv`, `target_<stem>X2.csv`) is one campaign: both drives
-play at once, both monitors (CH3, CH4) are read from the same frozen shots,
-and each channel's loop learns from its own monitor. It uses the GUI's
+play at once, both monitors are read from the same frozen shots, and each
+channel's loop learns from its own monitor. Which scope channel is which
+comes from the panel's *Scope channels* map (Measure tab; the polarimeter's
+role names, kept in the panel's config.json): the MonXn channel is the
+monitor, the CmdXn channel the drive readback for the alignment check — with
+no CmdXn assigned that channel's alignment is not verified and the log says
+so. A plan's `"wiring": {"X1": {"drive_ch": 2}}` block overrides the map per
+channel; `--dry-run` prints the wiring in force. It uses the GUI's
 capture scheme (HRES singles with the 3-code offset dither) and writes the
 GUI's state files, so any campaign can be opened with **Load state**
 afterwards and continued by hand.

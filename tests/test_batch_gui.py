@@ -130,7 +130,7 @@ def main():
 
         def fake_pair():
             frfs = {1: os.path.join(HERE, "run", "frf_WIDE_X1.csv"), 2: os.path.join(HERE, "run", "frf_WIDE_X2.csv")}
-            awg, scope, mod = simbench.make_bench(frfs)
+            awg, scope, mod = simbench.make_bench(frfs, channels=app.cfg)   # cabled as the panel's map
             ilc_bench._AWGMOD = mod
             opened.append(awg)
             return awg, scope

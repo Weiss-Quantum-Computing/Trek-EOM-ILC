@@ -68,6 +68,7 @@ from matplotlib.figure import Figure
 from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
 from eomilc import corrections as corrmod, mains
 from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
+from eomilc import channels as chanmap   # scope channel ROLES, shared with the polarimeter
 import ilc_bench            # the debugged bench helpers; main() is guarded
 import ilc_batch            # batch runs: X1 + X2 together, a list of targets
 import run_ilc              # load_target and the state-file conventions
@@ -75,11 +76,7 @@ import run_ilc              # load_target and the state-file conventions
 # Remembered between sessions, kept out of the repo so a git pull cannot
 # clobber it -- same convention as the sibling panels. Off Windows there is
 # no APPDATA: macOS gets its native equivalent, anything else the home dir.
-CONFIG_PATH = os.path.join(
-    os.environ.get("APPDATA")
-    or (os.path.expanduser("~/Library/Application Support")
-        if sys.platform == "darwin" else os.path.expanduser("~")),
-    "EOM-ILC-GUI", "config.json")
+CONFIG_PATH = chanmap.PANEL_CONFIG_PATH      # ...\EOM-ILC-GUI\config.json
 
 # Consolas is a Windows font; Tk elsewhere would silently substitute a
 # PROPORTIONAL face and wreck the log/summary column alignment.
@@ -221,6 +218,8 @@ class Session:
         self.corr_total = None
         self.corr_layers = []        # [{path, slot, gain, on, ...}] as applied
         self.line_fit = None         # {"fit": mains record, "meta": {...}}
+        self.scope_channels = ""     # chanmap.record() of the scope map in
+                                     # force when this state was measured
 
     @property
     def channel(self):
@@ -241,6 +240,7 @@ def load_session(path) -> Session:
     s.frf_max = float(st["frf_max"]) if "frf_max" in st else 0.0
     s.seed_path = str(st["seed_path"]) if "seed_path" in st else ""
     s.target_path = str(st["target_path"]) if "target_path" in st else ""
+    s.scope_channels = str(st["scope_channels"]) if "scope_channels" in st else ""
     if "base_target" in st:
         s.base_target = np.asarray(st["base_target"], float)
         if "corr_total" in st:
@@ -286,6 +286,8 @@ def save_session(s: Session):
                                         "meta": s.line_fit.get("meta", {})})
     if lp.line is not None:
         extra["line_ref"] = np.asarray(lp.line, float)
+    if s.scope_channels:
+        extra["scope_channels"] = str(s.scope_channels)
     np.savez(s.state_path, t=s.t, target=lp.target, u=s.u, dt=lp.dt,
              channel=lp.channel.name, gain=lp.plant.gain, tau=lp.plant.tau,
              offset=lp.plant.offset, tau2=lp.plant.tau2, fn=lp.plant.fn,
@@ -366,15 +368,19 @@ def pd_channel(cfg=None):
     """Scope channel carrying the photodiode, or None if there is no optical
     readout wired.
 
-    A config key rather than a panel field on purpose: the optical campaign
-    comes and goes, and adding a widget would move the notebook's frames for
-    everyone else. Set it in config.json as "pd_channel", or override for one
-    session with EOMILC_PD_CH. When set, Measure FRF reads it alongside the
-    monitor and writes frf_<name>_PD.csv next to the usual one.
+    The channel with the PD role on the Measure tab's Scope channels (the
+    same map the polarimeter uses); EOMILC_PD_CH overrides it for one
+    session, and a config written before the roles existed may still carry
+    the old "pd_channel" key, honoured when no map says otherwise. When set,
+    Measure FRF reads it alongside the monitor and writes frf_<name>_PD.csv
+    next to the usual one.
     """
     v = os.environ.get("EOMILC_PD_CH")
     if v is None and cfg is not None:
-        v = cfg.get("pd_channel")
+        if cfg.get("scope_channels"):
+            v = chanmap.channel_for(cfg, "PD")
+        else:
+            v = cfg.get("pd_channel")
     if v in (None, "", "none", "None"):
         return None
     ch = int(v)
@@ -815,7 +821,7 @@ class BatchWindow:
             self.status.configure(text="no plan -- pick one or make one")
             return
         try:
-            self.plan = ilc_batch.load_plan(path)
+            self.plan = ilc_batch.load_plan(path, cfg=self.app.cfg)
         except (OSError, ValueError, KeyError, SystemExit) as e:
             self.status.configure(text=f"cannot read the plan: {e}")
             return
@@ -1365,6 +1371,7 @@ class App:
         # Settings that shape how a MEASUREMENT is turned into an error --
         # nothing here touches the first shot, which is a pure flat
         # conversion. Applies to both Step and the bench loop.
+        self._build_channels_frame(tab_measure)
         pf = ttk.LabelFrame(tab_measure, text="Capture post-processing "
                                               "(Step + Bench)", padding=3)
         pf.pack(fill="x", pady=(0, 2))
@@ -1681,6 +1688,96 @@ class App:
         ysb.pack(side="right", fill="y")
         tv.pack(side="left", fill="both", expand=True)
         self.table = tv
+
+    # ------------------------------------------------- scope channel roles
+    def _build_channels_frame(self, parent):
+        """What each scope channel carries, by ROLE -- the polarimeter's
+        vocabulary (eomilc.channels). The bench loop, Auto-set, Measure FRF
+        and the batch derive their channel numbers from this map: the
+        monitor from MonXn, the drive readback from CmdXn (none assigned =
+        no alignment check, said in the log), the PD from PD. The map is
+        written into every state file the bench measures."""
+        f = ttk.LabelFrame(parent, text="Scope channels (roles, as the polarimeter)",
+                           padding=3)
+        f.pack(fill="x", pady=(0, 2))
+        self.chan_role, self.chan_name = {}, {}
+        chans = chanmap.channels_of(self.cfg)
+        g = ttk.Frame(f)
+        g.pack(fill="x")
+        for ch in chanmap.CHANNEL_IDS:
+            i = int(ch)
+            row, col = (i - 1) // 2, 3 * ((i - 1) % 2)
+            ttk.Label(g, text=f"CH{ch}").grid(row=row, column=col, sticky="w",
+                                              padx=(0 if col == 0 else 10, 0), pady=1)
+            self.chan_role[ch] = tk.StringVar(value=chans[ch]["role"])
+            cb = ttk.Combobox(g, textvariable=self.chan_role[ch], values=chanmap.ROLES,
+                              width=7, state="readonly")
+            cb.grid(row=row, column=col + 1, padx=4, pady=1)
+            cb.bind("<<ComboboxSelected>>", lambda ev: self._channels_changed())
+            self.chan_name[ch] = tk.StringVar(value=chans[ch]["name"])
+            e = ttk.Entry(g, textvariable=self.chan_name[ch], width=16)
+            e.grid(row=row, column=col + 2, pady=1)
+            e.bind("<FocusOut>", lambda ev: self._channels_changed())
+        r = ttk.Frame(f)
+        r.pack(fill="x", pady=(3, 0))
+        ttk.Button(r, text="Copy from polarimeter",
+                   command=self.do_channels_from_polarimeter).pack(side="left")
+        ttk.Button(r, text="Defaults",
+                   command=lambda: self._set_channels(chanmap.DEFAULT_CHANNELS)).pack(
+            side="left", padx=(4, 0))
+        self.chan_note = ttk.Label(f, text="", foreground="#555555", justify="left",
+                                   wraplength=440, font=("TkFixedFont", 8))
+        self.chan_note.pack(fill="x", pady=(3, 0))
+        self._channels_changed(quiet=True)
+
+    def _channels_from_panel(self):
+        return {ch: {"role": self.chan_role[ch].get(),
+                     "name": self.chan_name[ch].get().strip()}
+                for ch in chanmap.CHANNEL_IDS}
+
+    def _set_channels(self, chans):
+        chans = chanmap.normalise(chans)
+        for ch in chanmap.CHANNEL_IDS:
+            self.chan_role[ch].set(chans[ch]["role"])
+            self.chan_name[ch].set(chans[ch]["name"])
+        self._channels_changed()
+
+    def _channels_changed(self, quiet=False):
+        """The panel's map into the config, the note, and the channel
+        numbers the selected chain uses."""
+        try:
+            chans = chanmap.normalise(self._channels_from_panel())
+            self.cfg["scope_channels"] = chans
+            note = chanmap.describe(self.cfg)
+        except ValueError as e:
+            note = str(e)
+        self.chan_note.configure(text=note)
+        if not quiet:
+            self._apply_channel_defaults()
+            self.log("scope channels: " + note.replace("\n", " | "))
+
+    def do_channels_from_polarimeter(self):
+        chans = chanmap.read_polarimeter()
+        if chans is None:
+            return messagebox.showerror(
+                "Scope channels", f"no polarimeter config at "
+                f"{chanmap.POLARIMETER_CONFIG_PATH}")
+        diff = chanmap.differences(self.cfg, chans)
+        self._set_channels(chans)
+        self.log("scope channels copied from the polarimeter's config"
+                 + (": " + ", ".join(diff) if diff else " (no change)"))
+
+    def _drive_scope_ch(self, awg_ch):
+        """The scope channel the AWG output is read back on, or None. For
+        the Trek chains it is the CmdXn role; GEN keeps the old convention
+        (scope channel <awg_ch>) because nothing in the role map is about
+        it."""
+        if self.channel_var.get() == "GEN":
+            return int(awg_ch)
+        try:
+            return chanmap.channel_for(self.cfg, f"CmdX{int(awg_ch)}")
+        except ValueError:
+            return None
 
     # ------------------------------------------------- line (mains) ripple
     def _build_line_frame(self, parent):
@@ -2755,9 +2852,20 @@ class App:
     def _apply_channel_defaults(self, channel=None):
         ch = channel or self.channel_var.get()
         d = CH_DEFAULTS[ch]
-        self.moncol_var.set(d["mon_col"])
-        self.awgch_var.set(str(d["awg_ch"]))
-        self.scopech_var.set(str(d["scope_ch"]))
+        mon_col, awg_ch, scope_ch = d["mon_col"], d["awg_ch"], d["scope_ch"]
+        if ch in ("EO1", "EO2"):
+            # the Trek chains follow the role map (Scope channels, Measure
+            # tab); a map without this chain's monitor falls back to the
+            # numbers above and the note on the Measure tab says why
+            try:
+                w = chanmap.wiring(self.cfg, "X" + ch[-1])
+                awg_ch, scope_ch = w["awg_ch"], w["mon_ch"]
+                mon_col = f"CH{scope_ch}"
+            except ValueError:
+                pass
+        self.moncol_var.set(mon_col)
+        self.awgch_var.set(str(awg_ch))
+        self.scopech_var.set(str(scope_ch))
         # Point at this channel's wide-probe FRF unless the user browsed to
         # something that is not just the other channel's default.
         cur = os.path.basename(self.frf_var.get())
@@ -3326,6 +3434,13 @@ class App:
             its = sorted({sn["it"] for sn in s.snapshots})
             self.log(f"  recalled {len(its)} stored measurement(s): "
                      f"iterations {', '.join(str(i) for i in its)}")
+        rec = chanmap.from_record(s.scope_channels) if s.scope_channels else None
+        if rec is not None:
+            diff = chanmap.differences(rec, self.cfg)
+            self.log("  scope channels when measured: "
+                     + chanmap.describe(rec).split("\n")[0]
+                     + ("" if not diff else " -- DIFFERS from the panel's now: "
+                        + ", ".join(diff)))
         # the Corrections box and the line-ripple switch follow the state
         self._corr_pending = [dict(L) for L in s.corr_layers]
         if s.line_fit is not None:
@@ -3498,6 +3613,7 @@ class App:
             s.line_fit = self._line_fit
             self._apply_line(s, self.line_on_var.get())
         self._corr_pending = []
+        s.scope_channels = chanmap.record(self.cfg)
         save_session(s)
         self.session = s
         self.state_var.set(state_path)
@@ -4010,14 +4126,16 @@ class App:
         u, v = s.u, s.loop.target
         wname = f"{s.stem}_i{s.iteration:02d}"
         keep_vert = bool(self.keepvert_var.get())
+        drive_ch = self._drive_scope_ch(f["awg_ch"])
         self.run_worker(lambda: self._autoset_work(
             period, float(u.min()), float(u.max()),
             float(v.min()), float(v.max()), s.full_scale,
-            int(f["awg_ch"]), int(f["scope_ch"]), wname, keep_vert),
+            int(f["awg_ch"]), int(f["scope_ch"]), wname, keep_vert, drive_ch),
             "auto-setting instruments...")
 
     def _autoset_work(self, period, u_lo, u_hi, v_lo, v_hi, fs,
-                      awg_ch, scope_ch, wname, keep_verticals=False):
+                      awg_ch, scope_ch, wname, keep_verticals=False,
+                      drive_ch=None):
         # Connect BOTH instruments before writing to either: a scope that
         # does not answer (first live test: Scope Grab held its VISA session)
         # must not leave a half-configured bench.
@@ -4080,8 +4198,14 @@ class App:
             scope.put(":TIMebase:RANGe", f"{rng:.6g}")
             scope.put(":TIMebase:POSition", f"{period/2:.6g}")
             scope.put(":ACQuire:TYPE", "HRES")
-            for ch, lo, hi, what in ((awg_ch, u_lo, u_hi, "drive"),
+            print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
+            if drive_ch is None:
+                print(f"  no CmdX{awg_ch} readback channel: only the monitor's "
+                      f"verticals are set")
+            for ch, lo, hi, what in ((drive_ch, u_lo, u_hi, "drive"),
                                      (scope_ch, v_lo, v_hi, "monitor")):
+                if ch is None:
+                    continue
                 scope.put(f":CHANnel{ch}:DISPlay", "1")
                 # DC, always -- and before the verticals, and regardless of
                 # 'keep verticals'. The ILC error is an absolute level, so AC
@@ -4286,6 +4410,8 @@ class App:
                wait_s, keep_native=False, it_hold=None, u_hold=None,
                src="the current drive"):
         s = self.session
+        s.scope_channels = chanmap.record(self.cfg)
+        print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
         # the drive to play and the iteration its runs are tagged to: the
         # session's current one, or an earlier stored one (see _hold_drive)
         it = s.iteration if it_hold is None else int(it_hold)
@@ -4395,12 +4521,14 @@ class App:
             return messagebox.showerror("Bench", str(e))
         if not self._wiring_ok(f["awg_ch"], f["scope_ch"], "Bench"):
             return
+        drive_ch = self._drive_scope_ch(f["awg_ch"])
         self.run_worker(lambda: self._bench_work(cfg, int(f["awg_ch"]),
                                                  int(f["scope_ch"]),
                                                  int(f["iterations"]),
                                                  int(f["repeats"]), f["wait"],
                                                  self.skip_var.get(),
-                                                 self.keepnative_var.get()),
+                                                 self.keepnative_var.get(),
+                                                 drive_ch),
                         "bench loop running...")
 
     def _bench_modules(self):
@@ -4420,19 +4548,38 @@ class App:
         ilc_bench._AWGMOD = self._modules[1]
         return self._modules
 
-    def _wiring_ok(self, awg_ch, scope_ch, what):
-        """The bench reads the DRIVE from scope channel <awg_ch> and the
-        monitor from <scope_ch>: Auto-set sets both verticals, the alignment
-        check correlates the drive channel against the record, Measure FRF
-        divides monitor by drive. The same channel for both is not a
-        configuration, so refuse it with the reason rather than let the
-        alignment check pass on a monitor or an FRF come out as Y/Y."""
-        if int(awg_ch) == int(scope_ch):
+    def _wiring_ok(self, awg_ch, scope_ch, what, need_drive=False):
+        """The bench reads the DRIVE back from the CmdXn channel of the role
+        map (GEN: scope channel <awg_ch>) and the monitor from <scope_ch>:
+        Auto-set sets both verticals, the alignment check correlates the
+        drive channel against the record, Measure FRF divides monitor by
+        drive. The same channel for both is not a configuration, so refuse
+        it with the reason rather than let the alignment check pass on a
+        monitor or an FRF come out as Y/Y. No readback channel at all is
+        allowed for the loop (the alignment check is then skipped, said in
+        the log) but not for an FRF (need_drive)."""
+        drive_ch = self._drive_scope_ch(awg_ch)
+        if drive_ch is not None and int(drive_ch) == int(scope_ch):
             messagebox.showerror(what, (
                 f"scope ch {scope_ch} is also the drive's channel: the bench "
-                f"reads the AWG's output back from scope CH{awg_ch} (same "
-                f"number as the AWG channel). Put the monitor on another "
-                f"channel and type it in 'scope ch'."))
+                f"reads the AWG's output back from scope CH{drive_ch} "
+                f"(CmdX{int(awg_ch)} in the Scope channels map; GEN: the "
+                f"AWG channel's number). Put the monitor on another channel, "
+                f"or change the map."))
+            return False
+        mon_role = {r: c for c, (r, _n) in chanmap.roles(self.cfg).items()}
+        want = f"MonX{int(awg_ch)}"
+        if self.channel_var.get() != "GEN" and mon_role.get(want) not in (None, int(scope_ch)):
+            messagebox.showerror(what, (
+                f"scope ch {scope_ch} is not the channel the Scope channels "
+                f"map gives {want} (CH{mon_role[want]}). Fix one of them."))
+            return False
+        if drive_ch is None and need_drive:
+            messagebox.showerror(what, (
+                f"no scope channel carries CmdX{int(awg_ch)}: an FRF is "
+                f"monitor / drive and needs the drive read back. Assign the "
+                f"role on the Measure tab (tee the AWG output to that "
+                f"channel)."))
             return False
         return True
 
@@ -4464,9 +4611,15 @@ class App:
         return awg, scope
 
     def _bench_work(self, cfg, awg_ch, scope_ch, iterations, repeats, wait_s,
-                    skip, keep_native=False):
+                    skip, keep_native=False, drive_ch=None):
         s = self.session
         self._apply_settings(cfg)
+        # the map in force travels with the data: into the state, and the log
+        s.scope_channels = chanmap.record(self.cfg)
+        print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
+        if drive_ch is None:
+            print(f"  NOTE: no CmdX{awg_ch} readback channel -- the trigger "
+                  f"alignment is not verified on this run")
         _, awgmod = self._bench_modules()
         # One id per bench run. The first measurement of a run differs from
         # the last one of the previous run by whatever the chain did while
@@ -4530,9 +4683,9 @@ class App:
                       f"{100*frac:.1f}% of DAC range, peak {np.abs(u).max():.4f} V)")
                 s.u = u
                 self._write_iteration(wname)
-                if k == k0:
+                if k == k0 and drive_ch is not None:
                     time.sleep(0.5)
-                    ilc_bench.verify_alignment(scope, awg_ch, u, s.t, s.t_off,
+                    ilc_bench.verify_alignment(scope, drive_ch, u, s.t, s.t_off,
                                                wait_s)
                 nat = (os.path.join(RUN_DIR, f"meas_{wname}_native.npz")
                        if keep_native else None)
@@ -4603,7 +4756,7 @@ class App:
                                         parent=w.win)
         try:
             over = w.loop_overrides()
-            plan = ilc_batch.load_plan(path)
+            plan = ilc_batch.load_plan(path, cfg=self.cfg)
         except (ValueError, OSError, SystemExit) as e:
             return messagebox.showerror("Batch", str(e), parent=w.win)
         # The plan file is the record of how a batch was trained: numbers
@@ -4617,7 +4770,7 @@ class App:
                 json.dump(raw, f, indent=1)
             self.log("plan updated: " + ", ".join(
                 f"{k} {plan['loop'].get(k)} -> {v}" for k, v in changed.items()))
-            plan = ilc_batch.load_plan(path)
+            plan = ilc_batch.load_plan(path, cfg=self.cfg)
         redo, gui = self.batchredo_var.get(), self.batchgui_var.get()
         if mode == "bench":
             man = ilc_batch.read_manifest(plan)
@@ -4648,7 +4801,7 @@ class App:
 
     def _batch_work(self, path, mode, redo, gui_names, over):
         import types
-        plan = ilc_batch.load_plan(path)
+        plan = ilc_batch.load_plan(path, cfg=self.cfg)
         plan["loop"].update(over)       # Check plan: the numbers in the window
         if mode == "check":
             rows = ilc_batch.plan_rows(plan)
@@ -4806,6 +4959,10 @@ class App:
             except (RuntimeError, ValueError) as e:
                 return messagebox.showerror("Measure FRF", str(e),
                                             parent=dlg)
+            if not self._wiring_ok(f["awg_ch"], f["scope_ch"], "Measure FRF",
+                                   need_drive=True):
+                return
+            drive_ch = self._drive_scope_ch(f["awg_ch"])
             if (slew > lim.slew_hv or i_pk > lim.current) and \
                     not messagebox.askyesno(
                         "Probe demand", parent=dlg, message=(
@@ -4831,7 +4988,8 @@ class App:
                                                int(f["awg_ch"]),
                                                int(f["scope_ch"]),
                                                int(f["repeats"]), f["wait"],
-                                               fmax_now, mode, dt_p, window),
+                                               fmax_now, mode, dt_p, window,
+                                               drive_ch=int(drive_ch)),
                 "measuring FRF...")
 
         bb = ttk.Frame(fr)
@@ -4844,9 +5002,13 @@ class App:
 
     def _measure_frf_work(self, u, bins, name, awg_ch, scope_ch, repeats,
                           wait_s, fmax_now, mode="session", dt_p=None,
-                          window=None):
+                          window=None, drive_ch=None):
         s = self.session
         dt_p = dt_p or s.loop.dt
+        # the drive is read back on the CmdXn channel of the role map
+        # (callers before the map passed none: then scope CH<awg_ch>)
+        drive_ch = int(awg_ch) if drive_ch is None else int(drive_ch)
+        print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
         n_p = len(u)
         rec = n_p * dt_p                     # the PROBE's record
         # The tones are integer bins of whatever is ANALYSED: the whole
@@ -4938,13 +5100,13 @@ class App:
             # window -- the session verticals leave the probe in 1-2 of the
             # 8 divisions and burn bits the 8-bit codes cannot spare
             vert_saved = {}
-            for chn in (awg_ch, scope_ch):
+            for chn in (drive_ch, scope_ch):
                 vert_saved[chn] = (
                     float(scope.get(f":CHANnel{chn}:SCALe")),
                     float(scope.get(f":CHANnel{chn}:OFFSet")))
             pk = float(np.abs(u).max())
             mon_pk = 2.0 * pk * s.loop.plant.gain
-            for chn, span in ((awg_ch, 2 * pk), (scope_ch, 2 * mon_pk)):
+            for chn, span in ((drive_ch, 2 * pk), (scope_ch, 2 * mon_pk)):
                 scale = nice_setting(1.25 * span / 8)
                 scope.put(f":CHANnel{chn}:SCALe", f"{scale:.6g}")
                 scope.put(f":CHANnel{chn}:OFFSet", "0")
@@ -4955,7 +5117,7 @@ class App:
             if not ok:
                 return
             pd_ch = pd_channel(self.cfg)
-            res = self._frf_capture(scope, awg_ch, scope_ch, bins,
+            res = self._frf_capture(scope, drive_ch, scope_ch, bins,
                                     t_grid, s.t_off, repeats, wait_s,
                                     f_top=bins[-1] / rec_a, aux_ch=pd_ch,
                                     window=window)

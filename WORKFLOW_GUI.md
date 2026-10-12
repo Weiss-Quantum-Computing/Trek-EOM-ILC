@@ -463,6 +463,14 @@ filed.
 - **The first shot is deliberately uncorrected.** Expect the raw tracking
   error of the chain (~2.4 % on the Trek ramps) on iteration 0 — that is
   the point: it is the baseline every later iteration is judged against.
+- **The scope channels are ROLES, not numbers (12 Oct 2026).** The bench
+  loop reads the monitor from the channel with the MonXn role and the
+  drive back from the CmdXn channel of the *Scope channels* map on the
+  Measure tab — the same map the polarimeter uses. No CmdXn channel means
+  the trigger alignment is NOT verified on that run (the log says so) and
+  Measure FRF refuses (it is monitor / drive). The map is written into every
+  state the bench measures, and Load state says when it differs from the
+  panel's now.
 
 ## 10. Every field, what it does
 
@@ -511,6 +519,14 @@ and it behaves like any entry again.
 | **taper to zero at Hz** *(config)* | `f_max`: a raised cosine takes the correction from full strength at `f_use` to zero here; the error is also smoothed at `f_max` so out-of-band noise cannot alias into the correction. Nothing above `f_max` is ever corrected. Both edges are checked against the loaded file: `f_use` past its top coherent tone is refused outright, `f_max` past it warns and names how much of the band is extrapolated. The campaign ended at 50/75 kHz; stepping one FRF through widening tapers is the frequency-ranged demo. |
 | **Show FRF** | Plots the FRF file (magnitude / unwrapped phase / coherence, taper band shaded, dropped tones flagged) with the current parametric model overlaid for comparison. |
 
+### Scope channels (Measure tab)
+
+| field | what it does |
+|---|---|
+| **CH1–CH4 role / name** *(config)* | What each scope channel carries, in the polarimeter's vocabulary: `PD` (analyzer photodiode), `MonX1`/`MonX2` (Trek monitors), `CmdX1`/`CmdX2` (the Trek input = the AWG output teed to the scope), `Ref`, `Marker`, `Other`, `off`. The Trek chains take their numbers from here: **scope ch** = the MonXn channel, the drive readback (alignment check, Auto-set's drive verticals, Measure FRF's denominator) = the CmdXn channel or none, the PD for Measure FRF = the PD channel. GEN keeps the old fixed numbers. The map is written into every state the bench measures (`scope_channels`), printed at the start of every bench run, and the batch runner reads it from the same config. A role on two channels is refused. |
+| **Copy from polarimeter** | Reads `%APPDATA%\RampPolarimeter\config.json` and takes its channel map, logging what changed — the one way to keep the two programs' views of the rack identical. |
+| **Defaults** | The bench as wired 5–12 Oct 2026: CH1 PD, CH2 CmdX1, CH3 MonX1, CH4 MonX2. |
+
 ### Capture post-processing (Step + Bench)
 
 | field | what it does |
@@ -554,7 +570,7 @@ leave this off there.
 | field | what it does |
 |---|---|
 | **AWG ch** | Generator channel (1 or 2) the drive is uploaded to and selected on. 1 drives EO1, 2 drives EO2. |
-| **scope ch** | Scope channel carrying the **monitor** for this chain: 3 for EO1, 4 for EO2. |
+| **scope ch** | Scope channel carrying the **monitor** for this chain. Filled from the *Scope channels* map (the MonXn channel) when EO1/EO2 is selected; a number that contradicts the map is refused at Run / Auto-set / Hold. |
 | **iterations** *(config)* | Number of updates to run. The loop measures `iterations + 1` times — the last measurement documents the final drive without updating past it. |
 | **repeats** *(config)* | HRES single shots averaged in software per iteration. 64 is the campaign standard (~25 s at the 20 Hz trigger, dithers the scope's 2.5 mV word lattice to its 0.16 mV floor); 16 is a usable quick check; below 16 is refused. |
 | **trigger timeout s** | Per-shot trigger stall limit — it only fires if triggers stop arriving. Raise it for slower burst rates. |

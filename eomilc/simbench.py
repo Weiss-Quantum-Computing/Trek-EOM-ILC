@@ -117,7 +117,11 @@ class SimChain:
 
 
 class SimScope:
-    """Four channels: CH1/CH2 read the AWG outputs, CH3/CH4 the chain monitors."""
+    """Four channels. By default CH1/CH2 read the AWG outputs and CH3/CH4 the
+    chain monitors; given a role map (eomilc.channels) the scope is cabled
+    the way the map says -- CmdXn reads AWG n, MonXn its monitor, any other
+    role a flat line -- so a simulated run agrees with the panel's map the
+    way the bench has to."""
 
     def __init__(self, awg, chains, wiring=None):
         self.awg, self.chains = awg, chains          # chains: {awg_ch: SimChain}
@@ -158,7 +162,7 @@ class SimScope:
     def single(self, wait_s=10.0):
         """One trigger: every channel's record, frozen until run()."""
         rng = float(self.settings[":TIMebase:RANGe"])
-        out = {}
+        out = {c: (rng, None, None) for c in (1, 2, 3, 4)}
         for c, (kind, awg_ch) in self.wiring.items():
             u, period = self.awg.playing(awg_ch)
             if u is None:
@@ -186,9 +190,29 @@ class SimScope:
         return t, np.interp(t, tv, v, left=v[0], right=v[-1])
 
 
-def make_bench(frf_paths, full_scale=10.0, gain_err=(0.01, -0.015), delay=(2e-6, 3e-6)):
-    """frf_paths: {awg_ch: path}. Returns (awg, scope, module)."""
+def wiring_from_roles(channels):
+    """{scope ch: ("drive"|"mon", awg_ch)} from a role map (a config dict,
+    a channel map, or a channels.record() string); roles that are neither a
+    command nor a monitor are left out, so those channels read flat."""
+    from . import channels as chm
+    chans = chm.from_record(channels) if isinstance(channels, str) else chm.channels_of(channels)
+    out = {}
+    for ch, c in (chans or {}).items():
+        r = c["role"]
+        if r in ("CmdX1", "CmdX2"):
+            out[int(ch)] = ("drive", int(r[-1]))
+        elif r in ("MonX1", "MonX2"):
+            out[int(ch)] = ("mon", int(r[-1]))
+    return out
+
+
+def make_bench(frf_paths, full_scale=10.0, gain_err=(0.01, -0.015), delay=(2e-6, 3e-6),
+               channels=None):
+    """frf_paths: {awg_ch: path}. Returns (awg, scope, module). `channels`:
+    a role map the scope is cabled by (see SimScope); None = the fixed
+    CH1/CH2 drives, CH3/CH4 monitors."""
     awg = SimAWG(full_scale)
     chains = {c: SimChain(p, gain_err=gain_err[i % 2], delay=delay[i % 2], seed=c)
               for i, (c, p) in enumerate(sorted(frf_paths.items()))}
-    return awg, SimScope(awg, chains), SimModule
+    wiring = wiring_from_roles(channels) if channels is not None else None
+    return awg, SimScope(awg, chains, wiring), SimModule

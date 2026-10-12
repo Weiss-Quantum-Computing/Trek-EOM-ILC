@@ -11,10 +11,14 @@ import numpy as np
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 import ilc_batch, ilc_bench                                     # noqa: E402
-from eomilc import simbench                                      # noqa: E402
+from eomilc import simbench, channels as chm                     # noqa: E402
 
 TARGETS = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else None
 fails = []
+# The role map every plan here loads without a cfg (the panel's config is
+# redirected to it in main) and the simulated scope is cabled by.
+SIM_MAP = {"1": {"role": "CmdX1", "name": "AWG CH1"}, "2": {"role": "CmdX2", "name": "AWG CH2"},
+           "3": {"role": "MonX1", "name": ""}, "4": {"role": "MonX2", "name": ""}}
 
 
 def check(cond, what):
@@ -23,9 +27,10 @@ def check(cond, what):
         fails.append(what)
 
 
-def bench():
+def bench(channels=None):
+    """A simulated bench cabled by `channels` (default: SIM_MAP)."""
     frfs = {1: os.path.join(HERE, "run", "frf_WIDE_X1.csv"), 2: os.path.join(HERE, "run", "frf_WIDE_X2.csv")}
-    awg, scope, mod = simbench.make_bench(frfs)
+    awg, scope, mod = simbench.make_bench(frfs, channels=channels if channels is not None else SIM_MAP)
     ilc_bench._AWGMOD = mod
     return awg, scope
 
@@ -49,6 +54,8 @@ def main():
     if not TARGETS:
         sys.exit(__doc__)
     tmp = tempfile.mkdtemp(prefix="ilcbatch_")
+    chm.PANEL_CONFIG_PATH = os.path.join(tmp, "config.json")
+    json.dump({"scope_channels": SIM_MAP}, open(chm.PANEL_CONFIG_PATH, "w"))
     try:
         print("[1] two campaigns, parallel and series")
         path = write_plan(tmp, ["S25", "SW50"])
@@ -169,6 +176,45 @@ def main():
                 check(False, f"refuses a stem list with a {why} stem")
             except ValueError:
                 check(True, f"refuses a stem list with a {why} stem")
+
+        print("[9] wiring from the panel's scope channel roles (eomilc.channels)")
+        sim_cfg = {"scope_channels": SIM_MAP}
+        path = write_plan(tmp, ["S25"], name="t9")
+        plan = ilc_batch.load_plan(path, cfg=sim_cfg)
+        w = plan["wiring"]
+        check(w["X1"]["mon_ch"] == 3 and w["X1"]["drive_ch"] == 1 and w["X2"]["mon_ch"] == 4
+              and w["X2"]["drive_ch"] == 2, "the sim's wiring from roles")
+        check(chm.from_record(plan["_scope_channels"]) == chm.channels_of(sim_cfg),
+              "the map is recorded on the plan")
+        bench_cfg = {"scope_channels": chm.DEFAULT_CHANNELS}      # PD on CH1, CmdX1 on CH2
+        w = ilc_batch.load_plan(path, cfg=bench_cfg)["wiring"]
+        check(w["X1"]["drive_ch"] == 2 and w["X2"]["drive_ch"] is None and w["X2"]["mon_ch"] == 4,
+              "the bench's map: X1 reads back on CH2, X2 has no readback")
+        raw = json.load(open(path))
+        raw["wiring"] = {"X2": {"drive_ch": 1}}
+        json.dump(raw, open(path, "w"))
+        w = ilc_batch.load_plan(path, cfg=bench_cfg)["wiring"]
+        check(w["X2"]["drive_ch"] == 1 and w["X1"]["drive_ch"] == 2, "a plan's wiring block overrides per channel")
+        no_mon = {"scope_channels": {"1": {"role": "PD"}, "3": {"role": "MonX1"}}}
+        w = ilc_batch.load_plan(path, cfg=no_mon)
+        check(w["wiring"]["X2"]["mon_ch"] == 4 and w["_wiring_notes"], "no MonX2 in the map: old numbers, with a note")
+        # a run with no readback on either channel: the alignment check is skipped and
+        # the campaign still learns; the state records the map
+        off_cfg = {"scope_channels": {"1": {"role": "PD"}, "3": {"role": "MonX1"}, "4": {"role": "MonX2"}}}
+        path = write_plan(tmp, ["S25"], name="t9b")
+        plan = ilc_batch.load_plan(path, cfg=off_cfg)
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=bench(off_cfg))
+        check(man["campaigns"]["S25"]["status"] == "done", "no-readback campaign done")
+        # the bench's real map against a scope cabled by it: X1 reads back on
+        # CH2, X2 not at all, and a series shape still trains
+        path = write_plan(tmp, ["SW50"], name="t9c")
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        man = ilc_batch.run_batch(plan, args(), log=lambda s: None, bench=bench(bench_cfg))
+        check(man["campaigns"]["SW50"]["status"] == "done", "the bench's map (CmdX1 on CH2, no CmdX2) trains a series shape")
+        check(any("NOT verified" in m for m in msgs), "the log says the alignment was not verified")
+        st = np.load(os.path.join(plan["_run_dir"], "drive_S25X1.state.npz"), allow_pickle=True)
+        check(chm.from_record(str(st["scope_channels"])) == chm.channels_of(off_cfg), "state carries the map")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

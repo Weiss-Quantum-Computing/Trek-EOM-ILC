@@ -27,7 +27,10 @@ plotting helpers — the repo has them, use them.
   conversion `target/gain`, no model involved. States written from 27 Aug
   also carry the CURRENT model record: `model`
   (`static`/`one_pole`/`resonant`/`frf`) and, in frf mode,
-  `frf_path`/`frf_use`/`frf_max`. From 5 Oct 2026, optionally:
+  `frf_path`/`frf_use`/`frf_max`. From 12 Oct 2026, `scope_channels` (JSON:
+  the scope channel role map in force when the bench measured it — which
+  channel was MonX1, CmdX1, PD; `eomilc.channels.from_record`). From 5 Oct
+  2026, optionally:
   `base_target` + `corr_total` (monitor V; `target` = base + learned target
   corrections, `corrections` a JSON list of the files applied — so errors
   measured before the `history` entry tagged `target_changed` were against

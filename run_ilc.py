@@ -123,7 +123,7 @@ def state_notches(state) -> tuple:
 # (eomilc.mains). Absent = none. `target` is always the target the loop
 # follows, so a CLI step on a corrected campaign keeps the correction.
 PASS_THROUGH = ("base_target", "corr_total", "corrections", "line_fit",
-                "line_ref")
+                "line_ref", "scope_channels")
 
 
 def passthrough(state) -> dict:

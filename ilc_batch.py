@@ -14,8 +14,14 @@ checks, simulates and runs the same plans through run_batch() below.
 A plan names target pairs (target_<stem>X1.csv, target_<stem>X2.csv, the layout
 the ramp suites use) and how to train them. Each pair is ONE campaign: both
 drives play at once from the two AWG channels, both monitors are read from the
-same frozen acquisitions (CH3 and CH4), and each channel's loop updates from its
-own monitor. That halves the bench time against running X1 and X2 separately,
+same frozen acquisitions, and each channel's loop updates from its own monitor.
+Which scope channel is which comes from the panel's Scope channels map
+(eomilc.channels, the polarimeter's role vocabulary, in the panel's
+config.json): the monitor is the MonXn channel, the drive readback for the
+alignment check the CmdXn channel -- none assigned means that channel's
+alignment is not verified, and the log says so. A plan's "wiring" block
+overrides the map per channel; the map in force is written into every state
+file. That halves the bench time against running X1 and X2 separately,
 and it is how the ramps play in the experiment -- the series and shared ramps
 only make sense with both channels moving.
 
@@ -80,6 +86,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from eomilc import channels                                     # noqa: E402
 from eomilc.config import CHANNELS                              # noqa: E402
 
 RUN_DIR = os.path.join(HERE, "run")
@@ -124,7 +131,9 @@ def _stopped(stop):
 
 
 # ------------------------------------------------------------------ the plan
-def load_plan(path):
+def load_plan(path, cfg=None):
+    """`cfg`: the panel's config (its Scope channels map); None reads the
+    panel's config.json from disk, so the CLI and the window agree."""
     with open(path) as f:
         plan = json.load(f)
     base = os.path.dirname(os.path.abspath(path))
@@ -133,8 +142,21 @@ def load_plan(path):
     plan["_run_dir"] = os.path.normpath(os.path.join(HERE, plan.get("run_dir", "run")))
     plan["loop"] = {**DEFAULT_LOOP, **plan.get("loop", {})}
     plan["timing"] = {**DEFAULT_TIMING, **plan.get("timing", {})}
-    wiring = {k: {**DEFAULT_WIRING[k], **plan.get("wiring", {}).get(k, {})} for k in DEFAULT_WIRING}
+    if cfg is None:
+        cfg = channels.load_panel_config()
+    wiring, notes = {}, []
+    for k in DEFAULT_WIRING:
+        try:
+            w = channels.wiring(cfg, k)
+            base_w = dict(channel=w["channel"], awg_ch=w["awg_ch"], drive_ch=w["drive_ch"],
+                          mon_ch=w["mon_ch"])
+        except ValueError as e:
+            base_w = dict(DEFAULT_WIRING[k])
+            notes.append(f"{k}: {e}; using the old fixed numbers")
+        wiring[k] = {**base_w, **plan.get("wiring", {}).get(k, {})}
     plan["wiring"] = wiring
+    plan["_wiring_notes"] = notes
+    plan["_scope_channels"] = channels.record(cfg)
     plan["settings"] = {k: plan.get("settings", {}).get(k) or DEFAULT_SETTINGS[k] for k in DEFAULT_WIRING}
     if not plan.get("campaigns"):
         raise SystemExit(f"{path}: no campaigns")
@@ -220,6 +242,7 @@ class ChannelRun:
     drives: dict = field(default_factory=dict)     # it -> u
     run_id: float = 0.0
     bad_streak: int = 0
+    scope_channels: str = ""     # eomilc.channels.record() of the map in force
 
     @property
     def channel(self):
@@ -310,6 +333,7 @@ def build_run(plan, camp, key, log=print):
                     full_scale=float(lp["full_scale"]), t_off=float(lp["t_offset_us"]) * 1e-6,
                     state_path=state_path, target_path=os.path.abspath(tpath),
                     model_key=rec["model"], frf_path=rec["frf"], frf_use=rec["f_use"], frf_max=rec["f_max"])
+    cr.scope_channels = plan.get("_scope_channels", "")
     if resumed:
         restore_measured(cr, plan["_run_dir"])
     return cr
@@ -364,7 +388,8 @@ def _savez_state(f, cr, lp):
              t_offset=cr.t_off, history=np.array(lp.history, dtype=object),
              model=cr.model_key, frf_path=cr.frf_path, frf_use=cr.frf_use,
              frf_max=cr.frf_max, seed_path="", target_path=cr.target_path,
-             notches=np.asarray(lp.notches, float).reshape(-1, 2))
+             notches=np.asarray(lp.notches, float).reshape(-1, 2),
+             scope_channels=str(getattr(cr, "scope_channels", "") or ""))
 
 
 def write_iteration(cr, run_dir):
@@ -428,9 +453,14 @@ def prepare_campaign(awg, scope, runs, plan, gui_names, allow_on, log=print):
     rng = nice_setting(1.3 * period)
     scope.put(":TIMebase:RANGe", f"{rng:.6g}")
     scope.put(":TIMebase:POSition", f"{period/2:.6g}")
+    log("  scope channels: " + channels.describe(plan.get("_scope_channels") and
+                                                  channels.from_record(plan["_scope_channels"])
+                                                  ).replace("\n", " | "))
     for cr in runs:
         for ch, lo, hi, what in ((cr.wiring["drive_ch"], cr.u.min(), cr.u.max(), "drive"),
                                  (cr.wiring["mon_ch"], cr.loop.target.min(), cr.loop.target.max(), "monitor")):
+            if ch is None:
+                continue
             scope.put(f":CHANnel{ch}:DISPlay", "1")
             scope.put(f":CHANnel{ch}:COUPling", "DC")
             span = max(float(hi - lo), 1e-3)
@@ -473,10 +503,16 @@ def check_alignment(scope, runs, plan, log=print):
         raise BatchError("alignment check: no trigger -- is the burst running?")
     got = {}
     for cr in runs:
+        if cr.wiring["drive_ch"] is None:
+            log(f"  alignment {cr.key}: NOT verified -- no Cmd{cr.key} scope channel in the "
+                f"Scope channels map (the drive is not read back)")
+            continue
         pts = scopeio.scope_points_for(2.2 * len(cr.t))
         got[cr.key] = scope.waveform(cr.wiring["drive_ch"], points=pts)
     scope.run()
     for cr in runs:
+        if cr.key not in got:
+            continue
         ts, vs = got[cr.key]
         if float(np.ptp(vs)) < 0.5:
             raise BatchError(f"alignment check: scope CH{cr.wiring['drive_ch']} is flat -- "
@@ -733,6 +769,11 @@ def dry_run(plan, log=print):
     log(f"plan {plan.get('name', '')}: {len(plan['campaigns'])} campaigns, targets in {plan['_targets_dir']}")
     log(f"loop: {lp['max_iterations']} iterations max (min {lp['min_iterations']}), stop at rms <= {lp['stop_rms_v']} V, "
         f"{lp['repeats']} shots per measurement")
+    for k, w in plan["wiring"].items():
+        rb = f"readback CH{w['drive_ch']}" if w.get("drive_ch") else "no readback: alignment not verified"
+        log(f"wiring {k}: AWG CH{w['awg_ch']} -> monitor CH{w['mon_ch']}, {rb}")
+    for n in plan.get("_wiring_notes", []):
+        log(f"  note: {n}")
     rows = plan_rows(plan)
     for r in rows:
         if not r["n"]:
@@ -765,7 +806,8 @@ def open_bench(plan, simulate, log=print):
     if simulate:
         from eomilc import simbench
         frfs = {plan["wiring"][k]["awg_ch"]: os.path.join(HERE, "run", f"frf_WIDE_{k}.csv") for k in ("X1", "X2")}
-        awg, scope, mod = simbench.make_bench(frfs, full_scale=plan["loop"]["full_scale"])
+        awg, scope, mod = simbench.make_bench(frfs, full_scale=plan["loop"]["full_scale"],
+                                              channels=plan.get("_scope_channels") or None)
         ilc_bench._AWGMOD = mod
         log("SIMULATED bench: " + awg.connect() + " / " + scope.connect())
         return awg, scope
