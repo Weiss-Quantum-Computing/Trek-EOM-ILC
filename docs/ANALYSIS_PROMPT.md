@@ -42,6 +42,18 @@ plotting helpers — the repo has them, use them.
   state's `t` grid, already the average of 64 HRES scope repeats).
   `meas_<stem>_iNN_rMM.npy` — hold-mode re-measurement MM of the SAME
   drive (thermal-drift studies); the file mtime IS the measurement time.
+- `meas_<stem>_iNN[_rMM]_stats.npz` — from 12 Oct 2026, beside every bench,
+  hold and step measurement: the shots' statistics (`eomilc.diagnostics`,
+  `load_stats`): `sem_t` (per-sample standard error of the mean, monitor
+  V), `f`/`err_spec`/`sem_spec` (Hann spectra of the mean's error and of
+  its standard error), `bands`/`bands_rms`/`bands_floor` (campaign bands),
+  `floor_rms`, `vdiv`/`offset`/`code_V` (the monitor channel's scope
+  setting and one ADC display code), `fold_*` (the residual folded on that
+  code: centres, mean, sem, n, amp = pk-pk, sig = its sigma). The history
+  entry of the same iteration carries `bands_rms`, `bands_floor`,
+  `floor_rms`, `vdiv`, `fold_amp`, `fold_sig`, `update_below_lsb` (fraction
+  of the next update under one 0.31 mV DAC step) and `model_bands` (the
+  model check per band: lo, hi, verdict, ratio_local, lam, corr).
 - `meas_<stem>_iNN[_rMM]_native.npz` — optional (GUI 'keep native-rate
   avg'): the same repeat average at the SCOPE's own sample rate, keys
   `t` (waveform time, s) and `y` (monitor V). The only record of content

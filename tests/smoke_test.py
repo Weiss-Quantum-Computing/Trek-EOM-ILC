@@ -1953,6 +1953,93 @@ print("[54] scope channel roles: numbers follow the map (EO1 mon CH3 / readback 
       "and an FRF without CmdX are refused, GEN unchanged, polarimeter copy, "
       "state + pass-through + config round trip")
 
+# [55] Diagnostics (12 Oct 2026): a stats sidecar per measurement (standard
+# errors, campaign bands and their floors, the residual folded on the ADC
+# code), recalled with the measurement; the Diagnostics tab's six views, the
+# wall-clock convergence view, and the noise bands on Error / Spectrum /
+# Convergence all draw from it. Synthetic shots: an injected per-code pattern
+# on the early iterations, none later.
+from eomilc import diagnostics as _dg
+_s = app.session
+_rng = np.random.default_rng(5)
+_code = _dg.ADC_CODE_PER_VDIV
+for _sn in _s.snapshots:
+    if _sn.get("run") is not None:
+        continue
+    _pat = (2.0e-3 if _sn["it"] < 3 else 0.0) * np.sin(2 * np.pi * np.mod(_s.loop.target, _code) / _code)
+    _stack = _sn["y"] + _pat + _rng.normal(0, 0.8e-3, (12, len(_s.t)))
+    _sn["stats"] = _dg.measurement_stats(_s.loop.target, _stack, _s.loop.dt, vdiv=1.0, offset=2.7)
+    _sn["run_id"] = 1 if _sn["it"] < 8 else 2
+_late = [sn for sn in _s.snapshots if sn.get("run") is None and sn["it"] >= 6]
+# the fold's verdict, on records that are the target plus noise (a real
+# iteration's own corner content folds to a few sigma on its own; the
+# unit test and this check keep the pure cases apart): a 2 mV per-code
+# pattern stands many sigma up, none reads under 4
+_tgt = _s.loop.target
+_st_pat = _dg.measurement_stats(
+    _tgt, _tgt + 2.0e-3 * np.sin(2 * np.pi * np.mod(_tgt, _code) / _code)
+    + _rng.normal(0, 0.8e-3, (12, len(_s.t))), _s.loop.dt, vdiv=1.0)
+_st_none = _dg.measurement_stats(_tgt, _tgt + _rng.normal(0, 0.8e-3, (12, len(_s.t))),
+                                 _s.loop.dt, vdiv=1.0)
+assert _st_pat["fold_amp"] / _st_pat["fold_sig"] > 6 and \
+    _st_none["fold_amp"] / _st_none["fold_sig"] < 4, \
+    (_st_pat["fold_amp"] / _st_pat["fold_sig"], _st_none["fold_amp"] / _st_none["fold_sig"])
+for _i, _m in enumerate(_s.loop.history):
+    _m["floor_rms"] = 0.05e-3
+    _m["update_below_lsb"] = 0.1 + 0.05 * _i
+    _m["model_bands"] = [dict(lo=lo, hi=hi, verdict="ok", ratio_local=1.1, lam=0.34, corr=0.9,
+                              update_rms=1e-3) for lo, hi in ((0, 5e3), (5e3, 10e3))]
+# the sidecar round-trips through recall: write one beside a stored measurement
+_f = sorted(glob.glob(os.path.join(os.path.dirname(_s.state_path), f"meas_{_s.stem}_i*.npy")))[-1]
+_dg.save_stats(_dg.stats_path(_f), _late[-1]["stats"])
+_s2 = ilc_gui.load_session(_s.state_path)
+ilc_gui.recall_snapshots(_s2)
+_with = [sn for sn in _s2.snapshots if sn.get("stats") is not None]
+assert len(_with) == 1 and abs(_with[0]["stats"]["fold_amp"] - _late[-1]["stats"]["fold_amp"]) < 1e-12
+os.remove(_dg.stats_path(_f))
+# _measurement_stats writes the sidecar and reads the scope's V/div when it can
+class _VdivScope:
+    def get(self, q):
+        return {":CHANnel3:SCALe": "1.0", ":CHANnel3:OFFSet": "2.7"}[q]
+_tmpm = os.path.join(SCRATCH, "meas_SMOKE_i00.npy")
+_st = app._measurement_stats(_late[-1]["y"] + _rng.normal(0, 1e-3, (6, len(_s.t))), _tmpm,
+                             _VdivScope(), 3)
+assert _st is not None and _st["vdiv"] == 1.0 and os.path.exists(_dg.stats_path(_tmpm))
+assert set(app._stats_metrics(_st)) == {"bands_rms", "bands_floor", "floor_rms", "vdiv", "fold_amp", "fold_sig"}
+assert app._measurement_stats(_late[-1]["y"] + _rng.normal(0, 1e-3, (6, len(_s.t))),
+                              os.path.join(SCRATCH, "meas_SMOKE_i01.npy"))["vdiv"] != _st["vdiv"]  # nan without a scope
+# every view draws
+app.itersel_var.set("all"); app._redraw_iterations(); root.update()
+assert [app.nb.tab(t, "text") for t in app.nb.tabs()] == \
+    ["Waveforms", "Error", "Convergence", "Drive", "Diagnostics", "Table", "Inputs"]
+assert len(app.ax_fold.lines) > 10 and len(app.ax_foldamp.lines) >= 1
+assert len(app.ax_bands.lines) >= 8                       # 4 bands x (rms + floor)
+assert len(app.ax_lam.lines) >= 2 and any(l.get_ydata().size == 1 for l in app.ax_lam.lines)
+assert len(app.ax_heat.images) == 1 and app._heat_cbar is not None
+assert any(p.get_height() > 0 for p in app.ax_dac.patches) or \
+    any("needs the selected" in t.get_text() for t in app.ax_dac.texts)   # no drive pair in this fixture
+assert len(app.ax_dac.child_axes) == 1                    # the inset: % under one step per iteration
+assert any("noise floor" in (c.get_label() or "") for c in app.ax_spec.collections) and \
+    any("learnable above" in (l.get_label() or "") for l in app.ax_spec.lines)
+assert len(app.ax_err.collections) == 1                   # the +/- 1 SEM band
+assert any("noise floor" in (l.get_label() or "") for l in app.ax_conv.lines)
+assert len(app.ax_convt.lines) >= 2
+# the lattice view says what it needs when there is no native file
+assert any("native-rate" in t.get_text() for t in app.ax_latt.texts)
+app._show_fig(app.fig_heat); root.update()
+assert app._views["Diagnostics"]["var"].get() == "heatmap"
+app._redraw_iterations(); root.update()                   # a second draw replaces the colorbar
+assert len(app.fig_heat.axes) == 2
+for _sn in _s.snapshots:
+    _sn.pop("stats", None)
+for _m in _s.loop.history:
+    for _k in ("floor_rms", "update_below_lsb", "model_bands"):
+        _m.pop(_k, None)
+app._redraw_iterations(); root.update()
+print("[55] diagnostics: fold finds the injected per-code pattern on i0-i2 (>6 sigma) and not later; "
+      "sidecar written, read back through recall, V/div from the scope; six Diagnostics views, the "
+      "wall-clock convergence, the SEM band, the spectrum floor and the convergence floor all drew")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the

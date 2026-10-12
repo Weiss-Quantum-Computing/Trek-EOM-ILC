@@ -69,6 +69,8 @@ from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
 from eomilc import corrections as corrmod, mains
 from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
 from eomilc import channels as chanmap   # scope channel ROLES, shared with the polarimeter
+from eomilc import diagnostics as dg     # per-measurement stats, folds, floors
+import matplotlib.dates as mdates
 import ilc_bench            # the debugged bench helpers; main() is guarded
 import ilc_batch            # batch runs: X1 + X2 together, a list of targets
 import run_ilc              # load_target and the state-file conventions
@@ -564,6 +566,9 @@ def recall_snapshots(s: Session):
         # write the array the moment the capture average completes
         snap = dict(it=it, y=y, m=s.loop.metrics(y), run=run,
                     t_wall=os.path.getmtime(f))
+        st = dg.load_stats(dg.stats_path(f))      # the shots' statistics, when kept
+        if st is not None:
+            snap["stats"] = st
         # pair it with the drive that played it, so Fit uses a true pair
         dcsv = os.path.join(run_dir, f"drive_{s.stem}_i{it:02d}.csv")
         if it == 0 and not os.path.exists(dcsv):
@@ -1625,13 +1630,32 @@ class App:
         self.fig_err, (self.ax_err,) = self._tab("Error", 1, tab="Error", view="error")
         self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1, tab="Error",
                                                    view="spectrum")
-        self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1)
+        self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1, tab="Convergence",
+                                                   view="by iteration")
+        self.fig_convt, (self.ax_convt,) = self._tab("Convergence (wall clock)", 1,
+                                                     tab="Convergence", view="by wall clock")
         self.fig_dcor, (self.ax_dcor,) = self._tab("Drive corrections", 1, tab="Drive",
                                                    view="corrections")
         self.fig_dspec, (self.ax_dspec,) = self._tab("Drive spectrum", 1, tab="Drive",
                                                      view="spectrum")
         self.fig_ddel, (self.ax_ddel,) = self._tab("Drive updates", 1, tab="Drive",
                                                    view="updates")
+        # Diagnostics: the repeatable part of the error against its noise,
+        # the two quantizers, and each band's movement across iterations
+        self.fig_fold, (self.ax_fold, self.ax_foldamp) = self._tab(
+            "Code fold", 2, tab="Diagnostics", view="code fold")
+        self.fig_latt, (self.ax_latt,) = self._tab("Lattice", 1, tab="Diagnostics",
+                                                   view="lattice")
+        self.fig_bands, (self.ax_bands,) = self._tab("Bands", 1, tab="Diagnostics",
+                                                     view="bands")
+        self.fig_lam, (self.ax_lam,) = self._tab("Contraction", 1, tab="Diagnostics",
+                                                 view="contraction")
+        self.fig_heat, (self.ax_heat,) = self._tab("Heatmap", 1, tab="Diagnostics",
+                                                   view="heatmap")
+        self._heat_cbar = None
+        self.fig_dac, (self.ax_dac,) = self._tab("DAC step", 1, tab="Diagnostics",
+                                                 view="DAC step")
+        self._dac_inset = None
         self._table_tab()
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True, tab="Inputs",
                                               view="FRF")
@@ -4066,6 +4090,50 @@ class App:
                                   for d in lines]
         return out
 
+    def _measurement_stats(self, stack, path, scope=None, scope_ch=None):
+        """The shots' statistics for one measurement (eomilc.diagnostics):
+        the standard error per sample and per bin, the campaign bands and
+        their floors, and the residual folded on the ADC code when the
+        monitor's V/div is known. Written beside the measurement as
+        meas_..._stats.npz so every stored iteration can be drawn later.
+        Returns the dict, or None when there was nothing to compute from."""
+        s = self.session
+        vdiv = offset = None
+        if scope is not None and scope_ch is not None:
+            try:
+                g = getattr(scope, "try_get", None) or scope.get
+                vdiv = float(g(f":CHANnel{scope_ch}:SCALe"))
+                offset = float(g(f":CHANnel{scope_ch}:OFFSet"))
+            except Exception:
+                vdiv = offset = None
+        tgt = s.loop.target + (s.loop.line if s.loop.line is not None
+                               and len(s.loop.line) == len(s.loop.target) else 0.0)
+        try:
+            st = dg.measurement_stats(tgt, stack, s.loop.dt, vdiv=vdiv, offset=offset)
+        except ValueError as e:
+            print(f"         stats: not kept -- {e}")
+            return None
+        try:
+            dg.save_stats(dg.stats_path(path), st)
+        except OSError as e:
+            print(f"         stats: could not write the sidecar ({e})")
+        if np.isfinite(st.get("fold_amp", float("nan"))):
+            amp, sig = st["fold_amp"], st["fold_sig"]
+            print(f"         code fold: {amp*1e3:.2f} mV pk-pk per {st['code_V']*1e3:.2f} mV code "
+                  f"({amp/max(sig, 1e-12):.1f} sigma; the dithered scope reads ~1-3)")
+        return st
+
+    @staticmethod
+    def _stats_metrics(st):
+        """The few numbers of a stats dict that go into the history."""
+        if not st:
+            return {}
+        return dict(bands_rms=[float(v) for v in st["bands_rms"]],
+                    bands_floor=[float(v) for v in st["bands_floor"]],
+                    floor_rms=float(st["floor_rms"]), vdiv=float(st["vdiv"]),
+                    fold_amp=float(st.get("fold_amp", float("nan"))),
+                    fold_sig=float(st.get("fold_sig", float("nan"))))
+
     def _model_check_line(self, it, u_now, y_now):
         """After a measurement of iteration `it`: did the chain answer the
         update that made this drive the way the model predicted? Needs the
@@ -4122,7 +4190,11 @@ class App:
                       f"the monitor's change has nothing to do with what was pushed "
                       f"(corr < 0.3) -- noise, or something the drive cannot reach")
         return dict(model_ratio_worst=float(worst["ratio_local"]),
-                    model_band_worst=float(worst["lo"]))
+                    model_band_worst=float(worst["lo"]),
+                    model_bands=[dict(lo=r["lo"], hi=r["hi"], verdict=r["verdict"],
+                                      ratio_local=r["ratio_local"], lam=r["lam"],
+                                      corr=r["corr"], update_rms=r["update_rms"])
+                                 for r in rows])
 
     def _plateau_line(self):
         """When the history says the loop is re-learning noise, say so --
@@ -4201,6 +4273,9 @@ class App:
         print(f"iteration {it}: error peak {m['peak_err_hv']:7.1f} V   "
               f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
         m.update(self._noise_floor(stk["stack"]))
+        st = self._measurement_stats(stk["stack"], os.path.join(
+            os.path.dirname(s.state_path), f"meas_{s.stem}_i{it:02d}.npy"))
+        m.update(self._stats_metrics(st))
         self._run_id = None                  # a Step from files is not a bench run
         m.update(self._model_check_line(it, s.u, y))
         if refit:
@@ -4219,14 +4294,17 @@ class App:
         print(f"limit check: {rep}")
         if not rep and not force:
             s.loop.history.pop()      # the refused update never happened
-            s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev, t_wall=time.time()))
+            s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev, t_wall=time.time(),
+                                    stats=st))
             self.msgs.put(("call", lambda: self._show_iteration(u_prev, y, m, it)))
             print("REFUSED to write a drive that violates a hard limit "
                   "(tick 'force' to override)")
             return
+        s.loop.history[-1]["update_below_lsb"] = dg.update_vs_step(u_next - u_prev)["below"]
         s.u = u_next
         s.iteration = it + 1
-        s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev, t_wall=time.time()))
+        s.snapshots.append(dict(it=it, y=y, m=m, u=u_prev, t_wall=time.time(),
+                                stats=st))
         self._plateau_line()
         self._write_iteration(f"{s.stem}_i{s.iteration:02d}")
         save_session(s)
@@ -4692,6 +4770,13 @@ class App:
                       f"rms {m['rms_err_hv']:6.2f} V")
                 m.update(self._noise_floor(
                     stk["capture"].grid[f"CH{scope_ch}"]))
+                st = self._measurement_stats(
+                    stk["capture"].grid[f"CH{scope_ch}"],
+                    os.path.join(os.path.dirname(s.state_path),
+                                 f"meas_{s.stem}_i{it:02d}_r{r:02d}.npy"),
+                    scope, scope_ch)
+                m.update(self._stats_metrics(st))
+                sn["stats"] = st
                 self.msgs.put(("call", lambda it=it: self._show_held(it)))
                 if j < runs - 1 and gap_s > 0:
                     # sleep in slices so Stop stays responsive
@@ -4905,9 +4990,13 @@ class App:
                       f"rms {m['rms_err_hv']:6.2f} V   ({m['peak_pct']:.2f}% FS)")
                 m.update(self._noise_floor(
                     stk["capture"].grid[f"CH{scope_ch}"]))
+                st = self._measurement_stats(stk["capture"].grid[f"CH{scope_ch}"],
+                                             os.path.join(RUN_DIR, f"meas_{wname}.npy"),
+                                             scope, scope_ch)
+                m.update(self._stats_metrics(st))
                 m.update(self._model_check_line(k, u, y))
                 s.snapshots.append(dict(it=k, y=y, m=m, u=u, t_wall=time.time(),
-                                        run_id=self._run_id))
+                                        run_id=self._run_id, stats=st))
                 u_now = u
                 self.msgs.put(("call",
                                lambda u=u_now, y=y, m=m, k=k:
@@ -4918,6 +5007,7 @@ class App:
                     s.loop.history[-1]["model"] = cfg["desc"]
                     s.loop.history[-1]["update_rms"] = ilc.update_rms(u, u_new)
                     s.loop.history[-1]["run_id"] = self._run_id
+                    s.loop.history[-1]["update_below_lsb"] = dg.update_vs_step(u_new - u)["below"]
                     self._plateau_line()
                     u = u_new
                     s.u = u
@@ -6194,6 +6284,8 @@ class App:
         self._plot_dspec(snaps, cmp)
         self._plot_ddelta(snaps, cmp)
         self._plot_convergence(cmp)
+        self._plot_convergence_time()
+        self._plot_diagnostics(snaps)
         self._fill_table(cmp)
         if self._wave_redraw is not None:     # a pinned view (fit, target preview)
             self._wave_redraw()
@@ -6423,6 +6515,13 @@ class App:
             ax.set_title(f"target - measured:  iter {snaps[-1]['it']} peak "
                          f"{m['peak_err_hv']:.1f} V, rms {m['rms_err_hv']:.2f} V"
                          f"  ({m['peak_pct']:.3f}% FS)")
+            st = snaps[-1].get("stats")
+            if st is not None and len(st["sem_t"]) == len(tms):
+                e = (s.loop.target - s.loop._seen(snaps[-1]["y"])) * sc
+                band = st["sem_t"] * sc
+                ax.fill_between(tms, e - band, e + band, color=self._iter_colour(n - 1, n),
+                                alpha=0.22, lw=0,
+                                label=f"+/-1 standard error of the {st['n_shots']}-shot mean")
         if total:
             ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
         else:
@@ -6489,6 +6588,29 @@ class App:
         else:
             ax.axvline(s.loop.f_cut, color="#c68000", lw=0.7, ls="--",
                        label=f"f_cut {s.loop.f_cut/1e3:g} kHz")
+        if n and snaps[-1].get("stats") is not None:
+            # the newest measurement's noise floor, in the plot's own units:
+            # the drawn spectrum scaled by the stats' sem/error ratio per bin
+            # (both Hann spectra of the same record, so the ratio holds
+            # whatever the normalisation above; Welch smoothing makes it a
+            # proxy, still fair). Error inside the band is the shots'
+            # scatter; the loop can only learn what sits well above it.
+            st = snaps[-1]["stats"]
+            fe, ae = asd(s.loop.target - s.loop._seen(snaps[-1]["y"]), s.loop.dt, sc)
+            ratio = st["sem_spec"] / np.maximum(st["err_spec"], 1e-30)
+            floor = ae * np.interp(fe, st["f"], ratio)
+            # the per-bin standard error is itself a noisy estimate (a few
+            # dozen shots): smoothed over 15 bins in the log domain for the
+            # eye; the bands view carries the exact numbers
+            k = 15
+            lf = np.log(np.maximum(floor, 1e-30))
+            pad = np.r_[np.full(k, lf[0]), lf, np.full(k, lf[-1])]
+            floor_s = np.exp(np.convolve(pad, np.ones(k) / k, mode="same")[k:-k])
+            ax.fill_between(fe, floor_s * 1e-3, floor_s, color="#999999", alpha=0.12, lw=0,
+                            label=f"noise floor: standard error of the {st['n_shots']}-shot "
+                                  f"mean (smoothed)")
+            ax.loglog(fe, 2 * floor_s, color="#777777", lw=0.8, ls=":",
+                      label="2x floor: learnable above")
         ax.set_xlabel("frequency (Hz)")
         ax.set_ylabel(f"error amplitude at the {self._out_name()} (V)")
         ax.set_title("error spectrum, target - measured"
@@ -6821,6 +6943,14 @@ class App:
                 xs, ys = zip(*run_pts)
                 ax.semilogy(xs, ys, "o", ms=4, mfc="none", color="#c68000",
                             label="hold runs (same drive)")
+            # the measurement's own noise floor, rms: nothing under it is
+            # learnable, so an rms curve that reaches it has converged
+            fl = [(i, m["floor_rms"] * self._out_scale()) for i, m in enumerate(hist)
+                  if isinstance(m, dict) and np.isfinite(m.get("floor_rms", np.nan))]
+            if fl:
+                xs, ys = zip(*fl)
+                ax.semilogy(xs, ys, ":", color="#999999", lw=1.0,
+                            label="noise floor rms (standard error of the mean)")
         # compare stems: their WHOLE campaign's peak-error curve (the
         # Compare box's iteration selection only affects the time plots)
         for stem, cs, csnaps, col in cmp:
@@ -6863,6 +6993,363 @@ class App:
         ax.set_title(f"{s.channel} '{s.stem}' -- convergence")
         ax.grid(True, which="both", alpha=0.3)
         self.fig_conv._canvas.draw_idle()
+
+    def _plot_convergence_time(self):
+        """The same errors against the clock: thermal transients after an
+        output was off, the slow floor changes of September, and how long a
+        hold series ran all read from the time axis, not the iteration
+        count. Restarts (a new run id) are marked; hold runs hollow."""
+        s, c = self.session, self._colour()
+        ax = self.ax_convt
+        ax.clear()
+        sc = self._out_scale()
+        base = sorted([sn for sn in s.snapshots if sn.get("run") is None and sn.get("t_wall")],
+                      key=lambda sn: sn["t_wall"])
+        runs = [sn for sn in s.snapshots if sn.get("run") is not None and sn.get("t_wall")]
+        if not base and not runs:
+            ax.text(0.5, 0.5, "no timestamped measurements", ha="center", va="center",
+                    transform=ax.transAxes, color="#888888")
+            self.fig_convt._canvas.draw_idle()
+            return
+
+        def when(sn):
+            return mdates.date2num(datetime.datetime.fromtimestamp(sn["t_wall"]))
+        if base:
+            xs = [when(sn) for sn in base]
+            ax.semilogy(xs, [sn["m"]["peak_err_hv"] for sn in base], "o-", color=c, lw=1.0,
+                        ms=4, label="peak error")
+            ax.semilogy(xs, [sn["m"]["rms_err_hv"] for sn in base], "s--", color=c, lw=0.8,
+                        ms=3, alpha=0.6, label="rms error")
+            for x, sn in zip(xs, base):
+                ax.annotate(str(sn["it"]), (x, sn["m"]["peak_err_hv"]), fontsize=6,
+                            color="#666666", xytext=(0, 4), textcoords="offset points",
+                            ha="center")
+            prev = None
+            for x, sn in zip(xs, base):
+                rid = sn.get("run_id")
+                if prev is not None and rid != prev:
+                    ax.axvline(x, color="#8a8a8a", lw=0.7, ls=":")
+                prev = rid
+            fl = [(x, sn["stats"]["floor_rms"] * sc) for x, sn in zip(xs, base)
+                  if sn.get("stats") is not None]
+            if fl:
+                fx, fy = zip(*fl)
+                ax.semilogy(fx, fy, ":", color="#999999", lw=1.0, label="noise floor rms")
+        if runs and self.showruns_var.get():
+            ax.semilogy([when(sn) for sn in runs], [sn["m"]["peak_err_hv"] for sn in runs],
+                        "o", ms=4, mfc="none", color="#c68000", label="hold runs (same drive)")
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        ax.set_xlabel("wall clock")
+        ax.set_ylabel(f"error at the {self._out_name()} (V)")
+        ax.set_title(f"{s.channel} '{s.stem}' -- convergence against the clock")
+        self._plot_note(ax, "dotted verticals: a new run (the output was off in between)")
+        ax.legend(loc="best", fontsize=7)
+        ax.grid(True, which="both", alpha=0.3)
+        self.fig_convt._canvas.draw_idle()
+
+    # ------------------------------------------------------------ diagnostics
+    def _plot_diagnostics(self, snaps):
+        self._plot_fold(snaps)
+        self._plot_lattice(snaps)
+        self._plot_bands()
+        self._plot_contraction()
+        self._plot_heatmap()
+        self._plot_dacstep(snaps)
+
+    def _with_stats(self, snaps=None, base_only=True):
+        s = self.session
+        pool = s.snapshots if snaps is None else snaps
+        out = [sn for sn in pool if sn.get("stats") is not None
+               and not (base_only and sn.get("run") is not None)]
+        return sorted(out, key=lambda sn: (sn["it"], sn.get("run") or 0))
+
+    def _plot_fold(self, snaps):
+        """The residual folded on one ADC display code, for the selected
+        iterations (top, with each bin's standard error), and the fold's
+        peak-to-peak against iteration (bottom, one sigma bars). A pattern
+        reads many sigma above its bars; the dithered scope reads one to
+        three. Hollow markers: amplitude under 3 sigma (nothing resolved)."""
+        s = self.session
+        sc = self._out_scale()
+        ax, axa = self.ax_fold, self.ax_foldamp
+        ax.clear(); axa.clear()
+        sel = [sn for sn in self._with_stats(snaps, base_only=False)
+               if np.isfinite(sn["stats"].get("fold_amp", np.nan))]
+        n = len(sel)
+        for idx, sn in enumerate(sel):
+            st = sn["stats"]
+            ax.errorbar(st["fold_centres"], st["fold_mean"] * sc * 1e3,
+                        yerr=st["fold_sem"] * sc * 1e3,
+                        fmt="o--" if sn.get("run") is not None else "o-", ms=3,
+                        lw=0.9, capsize=2, color=self._iter_colour(idx, n),
+                        label=f"{self._snap_label(sn)}: {st['fold_amp']*sc:.2f} V pk-pk, "
+                              f"{st['fold_amp']/max(st['fold_sig'], 1e-12):.1f} sigma")
+        if sel:
+            code = sel[-1]["stats"]["code_V"]
+            ax.set_xlabel(f"position within one ADC code (fraction of {code*1e3:.2f} mV at "
+                          f"{sel[-1]['stats']['vdiv']:g} V/div)")
+            ax.legend(loc="best", fontsize=6, ncols=2 if n > 6 else 1)
+        else:
+            ax.text(0.5, 0.5, "no fold: measurements before 12 Oct 2026 have no stats "
+                              "sidecar, or the scope's V/div was not read",
+                    ha="center", va="center", transform=ax.transAxes, color="#888888")
+            ax.set_xlabel("position within one ADC code")
+        ax.set_ylabel(f"mean residual (mV at the {self._out_name()})")
+        ax.set_title("residual folded on the scope's display code (the 8-bit converter's pattern)")
+        ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
+        ax.grid(True, alpha=0.3)
+        self._plot_note(ax, "flat within the bars = the dither is doing its job")
+        allst = [sn for sn in self._with_stats() if np.isfinite(sn["stats"].get("fold_amp", np.nan))]
+        if allst:
+            its = [sn["it"] for sn in allst]
+            amp = np.array([sn["stats"]["fold_amp"] for sn in allst]) * sc * 1e3
+            sig = np.array([sn["stats"]["fold_sig"] for sn in allst]) * sc * 1e3
+            axa.errorbar(its, amp, yerr=np.minimum(sig, 0.999 * amp), fmt="o", ms=4,
+                         capsize=2, color=self._colour(), lw=0.9,
+                         label="fold pk-pk, 1 sigma (slow error removed before folding)")
+            axa.set_yscale("log")
+            weak = amp < 3 * sig
+            if weak.any():
+                axa.plot(np.array(its)[weak], amp[weak], "o", ms=4, mfc="white",
+                         color=self._colour(), label="under 3 sigma: not resolved")
+            axa.plot(its, 3 * sig, ":", color="#999999", lw=0.9, label="3 sigma of the bins")
+            axa.set_xticks(its)
+            axa.legend(loc="best", fontsize=7)
+        axa.set_xlabel("iteration")
+        axa.set_ylabel(f"fold pk-pk (mV at the {self._out_name()})")
+        axa.grid(True, alpha=0.3)
+        self.fig_fold._canvas.draw_idle()
+
+    def _plot_lattice(self, snaps):
+        """Histogram of the newest selected measurement's RAW-rate residual
+        in units of the scope's word (HRES: 10.24 V / 4096 per V/div). Values
+        piling up on integer words say the converter's lattice is in the
+        data undithered; a dithered record spreads out. Needs the
+        native-rate file the 'keep native-rate avg' tick writes."""
+        s = self.session
+        ax = self.ax_latt
+        ax.clear()
+        sel = [sn for sn in snaps if sn.get("run") is None] or list(snaps)
+        done = False
+        if sel:
+            sn = sel[-1]
+            suffix = f"_r{sn['run']:02d}" if sn.get("run") is not None else ""
+            path = os.path.join(os.path.dirname(s.state_path),
+                                f"meas_{s.stem}_i{sn['it']:02d}{suffix}_native.npz")
+            st = sn.get("stats")
+            vdiv = st["vdiv"] if st is not None and np.isfinite(st.get("vdiv", np.nan)) else None
+            if os.path.exists(path):
+                z = np.load(path)
+                tn, yn = np.asarray(z["t"], float), np.asarray(z["y"], float)
+                tgt = np.interp(tn, s.t, s.loop.target, left=np.nan, right=np.nan)
+                ok = np.isfinite(tgt)
+                word = 10.24 / 4096 * (vdiv if vdiv else 1.0)
+                h = dg.lattice_hist(tgt[ok] - yn[ok], word)
+                centres = 0.5 * (h["edges"][1:] + h["edges"][:-1])
+                ax.bar(centres, h["counts"], width=np.diff(h["edges"]), color=self._colour(),
+                       alpha=0.8, label=f"{self._snap_label(sn)}: {h['n_distinct']} distinct "
+                                        f"values in {h['n']} samples")
+                ax.axhline(h["flat"], color="#999999", lw=0.8, ls=":",
+                           label="even spread over this span")
+                for k in range(-4, 5):
+                    ax.axvline(k, color="#cccccc", lw=0.5)
+                ax.set_xlabel(f"raw residual (scope words of {word*1e3:.2f} mV"
+                              + (f" at {vdiv:g} V/div)" if vdiv else ", 1 V/div assumed)"))
+                ax.legend(loc="best", fontsize=7)
+                done = True
+        if not done:
+            ax.text(0.5, 0.5, "no native-rate capture for the newest selected iteration\n"
+                              "(tick 'keep native-rate avg' in Bench settings before a run)",
+                    ha="center", va="center", transform=ax.transAxes, color="#888888")
+            ax.set_xlabel("raw residual (scope words)")
+        ax.set_ylabel("samples")
+        ax.set_title("raw-rate residual on the converter's word lattice")
+        self._plot_note(ax, "spikes on the integer words = undithered quantisation")
+        ax.grid(True, alpha=0.3)
+        self.fig_latt._canvas.draw_idle()
+
+    def _plot_bands(self):
+        """Rms error per campaign band against iteration, with each band's
+        noise floor dotted in its own colour (the bound nothing under it is
+        learnable) and the growth factor per iteration over the last five
+        points in the legend, with its one sigma: above 1.02 the band is
+        pumping, the gate the September plans used."""
+        s = self.session
+        ax = self.ax_bands
+        ax.clear()
+        sc = self._out_scale()
+        sel = self._with_stats()
+        if not sel:
+            ax.text(0.5, 0.5, "no band statistics stored yet", ha="center", va="center",
+                    transform=ax.transAxes, color="#888888")
+        else:
+            bands = sel[-1]["stats"]["bands"]
+            its = np.array([sn["it"] for sn in sel])
+            cols = matplotlib.colormaps["tab10"]
+            for b, (lo, hi) in enumerate(bands):
+                rms = np.array([sn["stats"]["bands_rms"][b] for sn in sel]) * sc
+                fl = np.array([sn["stats"]["bands_floor"][b] for sn in sel]) * sc
+                g, sg = dg.growth_factor(rms)
+                lab = f"{lo/1e3:g}-{hi/1e3:g} kHz"
+                if np.isfinite(g):
+                    lab += f": x{g:.3f} +/- {sg:.3f} per iteration"
+                ax.semilogy(its, rms, "o-", ms=3.5, lw=1.0, color=cols(b), label=lab)
+                ax.semilogy(its, fl, ":", lw=1.0, color=cols(b))
+            ax.semilogy([], [], ":", color="#999999", label="dotted: the band's noise floor")
+            ax.set_xticks(its)
+            ax.legend(loc="best", fontsize=7)
+        ax.set_xlabel("iteration")
+        ax.set_ylabel(f"rms error in band (V at the {self._out_name()})")
+        ax.set_title("error per campaign band, with each band's noise floor")
+        self._plot_note(ax, "a band at its floor is done; a factor above 1.02 is pumping")
+        ax.grid(True, which="both", alpha=0.3)
+        self.fig_bands._canvas.draw_idle()
+
+    def _plot_contraction(self):
+        """The contraction the loop actually had per band, |1 - gamma x
+        (achieved / predicted)|, from the model check that follows every
+        bench iteration. Under 1 the band converges; at or above it the
+        next update overshoots. Hollow markers: the band's update did not
+        correlate with what the monitor did (corr < 0.3), so the ratio is
+        noise. Nothing drawn for iterations measured before the record
+        existed, or for the first iteration after a restart."""
+        s = self.session
+        ax = self.ax_lam
+        ax.clear()
+        rows = [(i, m["model_bands"]) for i, m in enumerate(s.loop.history)
+                if isinstance(m, dict) and m.get("model_bands")]
+        if not rows:
+            ax.text(0.5, 0.5, "no model-check bands in the history yet\n"
+                              "(recorded from the second bench iteration of a run)",
+                    ha="center", va="center", transform=ax.transAxes, color="#888888")
+        else:
+            cols = matplotlib.colormaps["tab10"]
+            labels = {}
+            for i, mb in rows:
+                for b, r in enumerate(mb):
+                    if r.get("lam") is None:
+                        continue
+                    key = (r["lo"], r["hi"])
+                    if key not in labels:
+                        labels[key] = len(labels)
+                    k = labels[key]
+                    weak = r.get("verdict") == "unresponsive"
+                    ax.plot([i], [r["lam"]], "o", ms=5, color=cols(k),
+                            mfc="white" if weak else cols(k),
+                            label=(f"{r['lo']/1e3:g}-{r['hi']/1e3:g} kHz" if i == rows[-1][0]
+                                   or not any(rr.get("lam") is not None and (rr["lo"], rr["hi"]) == key
+                                              for _j, mbb in rows[rows.index((i, mb)) + 1:] for rr in mbb)
+                                   else None))
+            for key, k in labels.items():
+                pts = [(i, r["lam"]) for i, mb in rows for r in mb
+                       if (r["lo"], r["hi"]) == key and r.get("lam") is not None]
+                if len(pts) > 1:
+                    xs, ys = zip(*pts)
+                    ax.plot(xs, ys, "-", lw=0.7, color=cols(k), alpha=0.6)
+            ax.axhline(1.0, color="#a93a2c", lw=0.9)
+            ax.axhspan(1.0, max(1.5, ax.get_ylim()[1]), color="#a93a2c", alpha=0.08)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks([i for i, _ in rows])
+            h, l = ax.get_legend_handles_labels()
+            seen, hh, ll = set(), [], []
+            for a, b in zip(h, l):
+                if b and b not in seen:
+                    seen.add(b); hh.append(a); ll.append(b)
+            ax.legend(hh, ll, loc="best", fontsize=7)
+        ax.set_xlabel("iteration (the update that made it)")
+        ax.set_ylabel("|1 - gamma x achieved/predicted|")
+        ax.set_title("contraction per band from the model check")
+        self._plot_note(ax, "shaded: no contraction, the correction overshoots; hollow: corr < 0.3")
+        ax.grid(True, alpha=0.3)
+        self.fig_lam._canvas.draw_idle()
+
+    def _plot_heatmap(self):
+        """Every stored base iteration's error as one image: time across,
+        iteration down, colour the error at the output. Corner ripple, hold
+        creep and end effects separate at a glance, and a band growing at
+        the corners shows as a stripe getting brighter down the image."""
+        s = self.session
+        ax = self.ax_heat
+        ax.clear()
+        if self._heat_cbar is not None:
+            try:
+                self._heat_cbar.remove()
+            except Exception:
+                pass
+            self._heat_cbar = None
+        sc = self._out_scale()
+        base = sorted([sn for sn in s.snapshots if sn.get("run") is None and len(sn["y"]) == len(s.t)],
+                      key=lambda sn: sn["it"])
+        if len(base) < 2:
+            ax.text(0.5, 0.5, "needs at least two stored iterations", ha="center",
+                    va="center", transform=ax.transAxes, color="#888888")
+        else:
+            its = [sn["it"] for sn in base]
+            E = np.array([(s.loop.target - s.loop._seen(sn["y"])) * sc for sn in base])
+            vmax = float(np.nanpercentile(np.abs(E), 99)) or 1.0
+            tms = s.t * 1e3
+            im = ax.imshow(E, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax,
+                           extent=[tms[0], tms[-1], its[-1] + 0.5, its[0] - 0.5],
+                           interpolation="nearest")
+            ax.set_yticks(its)
+            self._heat_cbar = self.fig_heat.colorbar(im, ax=ax, pad=0.01)
+            self._heat_cbar.set_label(f"error at the {self._out_name()} (V), +/-99th percentile")
+        ax.set_xlabel("time (ms)")
+        ax.set_ylabel("iteration")
+        ax.set_title("error across the record, every stored iteration")
+        self.fig_heat._canvas.draw_idle()
+
+    def _plot_dacstep(self, snaps):
+        """The newest selected iteration's update against the generator's
+        DAC step (20 Vpp / 65536 = 0.31 mV): the histogram of |du| in steps,
+        the fraction under one step (rounded away by the generator), and
+        that fraction's history. Once most of an update is under a step the
+        loop can only limit-cycle on the quantizer."""
+        s = self.session
+        ax = self.ax_dac
+        if self._dac_inset is not None:
+            try:
+                self._dac_inset.remove()
+            except Exception:
+                pass
+            self._dac_inset = None
+        ax.clear()
+        by_it = self._snaps_by_it()
+        sel = [sn for sn in snaps if sn.get("run") is None and sn.get("u") is not None]
+        done = False
+        if sel:
+            sn = sel[-1]
+            prev = by_it.get(sn["it"] - 1)
+            if prev is not None and prev.get("u") is not None and len(prev["u"]) == len(sn["u"]):
+                r = dg.update_vs_step(np.asarray(sn["u"]) - np.asarray(prev["u"]))
+                centres = 0.5 * (r["edges"][1:] + r["edges"][:-1])
+                ax.bar(centres, r["counts"], width=np.diff(r["edges"]), color=self._colour(),
+                       alpha=0.8, label=f"update into iter {sn['it']}: {r['below']*100:.0f}% of "
+                                        f"samples under one step, rms {r['rms_steps']:.2f} steps"
+                                        + (f", {r['over']} off scale" if r["over"] else ""))
+                ax.axvline(1.0, color="#a93a2c", lw=0.9, label="one DAC step (rounded away below)")
+                done = True
+        hist_pts = [(i, m["update_below_lsb"]) for i, m in enumerate(s.loop.history)
+                    if isinstance(m, dict) and m.get("update_below_lsb") is not None]
+        if hist_pts:
+            ax2 = self._dac_inset = ax.inset_axes([0.55, 0.55, 0.42, 0.4])
+            xs, ys = zip(*hist_pts)
+            ax2.plot(xs, np.array(ys) * 100, "o-", ms=3, lw=0.8, color=self._colour())
+            ax2.set_ylim(0, 100)
+            ax2.set_xlabel("iteration", fontsize=7)
+            ax2.set_ylabel("% under one step", fontsize=7)
+            ax2.tick_params(labelsize=6)
+            ax2.grid(True, alpha=0.3)
+        if not done:
+            ax.text(0.5, 0.3, "needs the selected iteration's drive and the one before it",
+                    ha="center", va="center", transform=ax.transAxes, color="#888888")
+        else:
+            ax.legend(loc="upper left", fontsize=7)
+        ax.set_xlabel(f"|update| in DAC steps of {dg.AWG_LSB*1e3:.2f} mV")
+        ax.set_ylabel("samples")
+        ax.set_title("the drive update against the generator's quantizer")
+        ax.grid(True, alpha=0.3)
+        self.fig_dac._canvas.draw_idle()
 
     def _frf_paths(self):
         """The FRF field, expanded: semicolon-separated entries, each a
