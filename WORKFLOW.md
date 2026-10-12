@@ -468,6 +468,15 @@ Two tests exercise the simulated bench:
 
 None of that is evidence about the real chain.
 
+**Running every suite:** `tests/run_all.py -q [<targets>]` runs them all in
+three parallel lanes (smoke; the two batch suites one after the other; the
+library suites) and prints one line per suite, about 100 s of wall time on
+the bench PC. For a new smoke block, `tests/smoke_block.py 55` executes just
+that block against a freshly loaded S92PX1B session in about 20 s (blocks
+from [54] on are written to stand alone); run the whole suite once at the
+end. The suite is fast because the panel rasterises only the figure on
+screen; hidden figures draw when their tab or view is shown.
+
 ## Uploading by hand: two traps, one file
 
 `Awg.upload_arb(..., normalize=True)` divides the samples by their own peak.

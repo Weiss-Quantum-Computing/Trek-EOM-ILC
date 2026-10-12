@@ -1625,6 +1625,7 @@ class App:
         # brings any figure to the front.
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
+        self.nb.bind("<<NotebookTabChanged>>", self._draw_stale_visible)
         self._views = {}
         self.fig_wave, (self.ax_out, self.ax_drv) = self._tab("Waveforms", 2, sharex=True)
         self.fig_err, (self.ax_err,) = self._tab("Error", 1, tab="Error", view="error")
@@ -1709,7 +1710,47 @@ class App:
         fig._canvas = canvas
         fig._toolbar = tb
         fig._tab, fig._view = tab, view
+        fig._stale = False
         return fig, axes
+
+    # Drawing is lazy: a plot function fills its axes every time, but the
+    # canvas is rasterised only when the figure is on screen -- the rest are
+    # marked stale and drawn when their tab or view comes up. Rasterising 17
+    # canvases cost 5.3 s of a 5.9 s redraw (12 Oct 2026), every bench
+    # iteration and every one of the smoke suite's ~50 redraws.
+    def _fig_visible(self, fig):
+        grp = self._views.get(getattr(fig, "_tab", None))
+        if grp is None:
+            return True
+        try:
+            if self.nb.select() != str(grp["frame"]):
+                return False
+        except tk.TclError:
+            return True
+        return fig._view is None or grp["var"].get() == fig._view
+
+    def _draw(self, fig):
+        if self._fig_visible(fig):
+            fig._stale = False
+            fig._canvas.draw_idle()
+        else:
+            fig._stale = True
+
+    def _draw_stale_visible(self, *_):
+        for fig in self._all_figs():
+            if getattr(fig, "_stale", False) and self._fig_visible(fig):
+                fig._stale = False
+                fig._canvas.draw_idle()
+
+    def _all_figs(self):
+        return [v for k, v in vars(self).items() if k.startswith("fig_") and hasattr(v, "_canvas")]
+
+    def draw_all(self):
+        """Rasterise every stale figure now (saving PNGs of all of them)."""
+        for fig in self._all_figs():
+            if getattr(fig, "_stale", False):
+                fig._stale = False
+                fig._canvas.draw_idle()
 
     def _show_view(self, tab):
         grp = self._views[tab]
@@ -1719,6 +1760,7 @@ class App:
                 host.pack(fill="both", expand=True)
             else:
                 host.pack_forget()
+        self._draw_stale_visible()
 
     def _show_fig(self, fig):
         """Bring a figure to the front: its tab, and its view on that tab."""
@@ -2719,7 +2761,7 @@ class App:
         for ax in self.ax_corr:
             ax.clear()
         if s is None:
-            self.fig_corr._canvas.draw_idle()
+            self._draw(self.fig_corr)
             return
         sc = s.loop.channel.mon_scale
         tms = s.t * 1e3
@@ -2760,7 +2802,7 @@ class App:
         ax2.set_xlabel("time (ms)")
         for ax in self.ax_corr:
             ax.grid(True, alpha=0.3)
-        self.fig_corr._canvas.draw_idle()
+        self._draw(self.fig_corr)
 
     def _path_row(self, parent, row, label, var, browse):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
@@ -3497,7 +3539,7 @@ class App:
         ax2.set_ylabel("AWG drive (V)")
         ax2.grid(True, alpha=0.3)
         self._finish_time_axis(self.ax_out)
-        self.fig_wave._canvas.draw_idle()
+        self._draw(self.fig_wave)
         if not replay:
             self._show_fig(self.fig_wave)
         self._wave_redraw = (lambda:
@@ -4380,7 +4422,7 @@ class App:
         ax.loglog(f, a, color="#000000", lw=0.8, alpha=0.75,
                   label=f"native rate ({nfiles} captures, dt {dtn*1e9:.0f} ns)")
         ax.legend(loc="best", fontsize=7)
-        self.fig_spec._canvas.draw_idle()
+        self._draw(self.fig_spec)
         # front the Error spectrum tab (by its frame, not a magic index)
         self._show_fig(self.fig_spec)
 
@@ -6252,7 +6294,7 @@ class App:
                     continue
                 if other.get_xlim() != lims:
                     other.set_xlim(lims)
-                    other.figure._canvas.draw_idle()
+                    self._draw(other.figure)
         finally:
             self._tlink_busy = False
 
@@ -6408,7 +6450,7 @@ class App:
         ax.legend(loc="best", fontsize=7, ncols=2 if n + len(cmp) > 6 else 1)
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(self.ax_out)
-        self.fig_wave._canvas.draw_idle()
+        self._draw(self.fig_wave)
 
     def _plot_waveforms_pinned(self, u, y, pred, it):
         """One drive/measurement pair with a model prediction over it -- the
@@ -6471,7 +6513,7 @@ class App:
         ax.legend(loc="best", fontsize=7)
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(self.ax_out)
-        self.fig_wave._canvas.draw_idle()
+        self._draw(self.fig_wave)
 
     def _plot_note(self, ax, text, loc="nw"):
         """The interpretive sentence that used to crowd the title: small
@@ -6533,7 +6575,7 @@ class App:
         ax.set_ylabel(f"error at the {self._out_name()} (V)")
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(ax)
-        self.fig_err._canvas.draw_idle()
+        self._draw(self.fig_err)
 
     def _spec_avg(self):
         """The 'spectra avg' box: blank/1 = the raw FFT, N = Welch with N
@@ -6620,7 +6662,7 @@ class App:
         if total:
             ax.legend(loc="best", fontsize=7, ncols=2 if total > 6 else 1)
         ax.grid(True, which="both", alpha=0.3)
-        self.fig_spec._canvas.draw_idle()
+        self._draw(self.fig_spec)
 
     def _dcorr_ref(self, s, gui_gain=False):
         """Reference drive the corrections are measured against: the stored
@@ -6702,7 +6744,7 @@ class App:
         self._plot_note(ax, "what the loop has learned to add at the input")
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(ax)
-        self.fig_dcor._canvas.draw_idle()
+        self._draw(self.fig_dcor)
 
     def _plot_dspec(self, snaps, cmp=()):
         """Spectrum of the drive corrections, mirroring the error spectrum:
@@ -6768,7 +6810,7 @@ class App:
                     ha="center", va="center", transform=ax.transAxes,
                     color="#888888")
         ax.grid(True, which="both", alpha=0.3)
-        self.fig_dspec._canvas.draw_idle()
+        self._draw(self.fig_dspec)
 
     def _table_rows(self, cmp=()):
         """One row per stored base iteration and hold run, compare stems
@@ -6912,7 +6954,7 @@ class App:
                             "shrinking updates are convergence at the input")
         ax.grid(True, alpha=0.3)
         self._finish_time_axis(ax)
-        self.fig_ddel._canvas.draw_idle()
+        self._draw(self.fig_ddel)
 
     def _plot_convergence(self, cmp=()):
         s, c = self.session, self._colour()
@@ -6992,7 +7034,7 @@ class App:
         ax.set_ylabel(f"error at the {self._out_name()} (V)")
         ax.set_title(f"{s.channel} '{s.stem}' -- convergence")
         ax.grid(True, which="both", alpha=0.3)
-        self.fig_conv._canvas.draw_idle()
+        self._draw(self.fig_conv)
 
     def _plot_convergence_time(self):
         """The same errors against the clock: thermal transients after an
@@ -7009,7 +7051,7 @@ class App:
         if not base and not runs:
             ax.text(0.5, 0.5, "no timestamped measurements", ha="center", va="center",
                     transform=ax.transAxes, color="#888888")
-            self.fig_convt._canvas.draw_idle()
+            self._draw(self.fig_convt)
             return
 
         def when(sn):
@@ -7045,7 +7087,7 @@ class App:
         self._plot_note(ax, "dotted verticals: a new run (the output was off in between)")
         ax.legend(loc="best", fontsize=7)
         ax.grid(True, which="both", alpha=0.3)
-        self.fig_convt._canvas.draw_idle()
+        self._draw(self.fig_convt)
 
     # ------------------------------------------------------------ diagnostics
     def _plot_diagnostics(self, snaps):
@@ -7118,7 +7160,7 @@ class App:
         axa.set_xlabel("iteration")
         axa.set_ylabel(f"fold pk-pk (mV at the {self._out_name()})")
         axa.grid(True, alpha=0.3)
-        self.fig_fold._canvas.draw_idle()
+        self._draw(self.fig_fold)
 
     def _plot_lattice(self, snaps):
         """Histogram of the newest selected measurement's RAW-rate residual
@@ -7166,7 +7208,7 @@ class App:
         ax.set_title("raw-rate residual on the converter's word lattice")
         self._plot_note(ax, "spikes on the integer words = undithered quantisation")
         ax.grid(True, alpha=0.3)
-        self.fig_latt._canvas.draw_idle()
+        self._draw(self.fig_latt)
 
     def _plot_bands(self):
         """Rms error per campaign band against iteration, with each band's
@@ -7203,7 +7245,7 @@ class App:
         ax.set_title("error per campaign band, with each band's noise floor")
         self._plot_note(ax, "a band at its floor is done; a factor above 1.02 is pumping")
         ax.grid(True, which="both", alpha=0.3)
-        self.fig_bands._canvas.draw_idle()
+        self._draw(self.fig_bands)
 
     def _plot_contraction(self):
         """The contraction the loop actually had per band, |1 - gamma x
@@ -7261,7 +7303,7 @@ class App:
         ax.set_title("contraction per band from the model check")
         self._plot_note(ax, "shaded: no contraction, the correction overshoots; hollow: corr < 0.3")
         ax.grid(True, alpha=0.3)
-        self.fig_lam._canvas.draw_idle()
+        self._draw(self.fig_lam)
 
     def _plot_heatmap(self):
         """Every stored base iteration's error as one image: time across,
@@ -7297,7 +7339,7 @@ class App:
         ax.set_xlabel("time (ms)")
         ax.set_ylabel("iteration")
         ax.set_title("error across the record, every stored iteration")
-        self.fig_heat._canvas.draw_idle()
+        self._draw(self.fig_heat)
 
     def _plot_dacstep(self, snaps):
         """The newest selected iteration's update against the generator's
@@ -7349,7 +7391,7 @@ class App:
         ax.set_ylabel("samples")
         ax.set_title("the drive update against the generator's quantizer")
         ax.grid(True, alpha=0.3)
-        self.fig_dac._canvas.draw_idle()
+        self._draw(self.fig_dac)
 
     def _frf_paths(self):
         """The FRF field, expanded: semicolon-separated entries, each a
@@ -7449,7 +7491,7 @@ class App:
             ax.grid(True, which="both", alpha=0.3)
         if multi or any_dropped or overlay:
             axm.legend(loc="best", fontsize=7)
-        self.fig_frf._canvas.draw_idle()
+        self._draw(self.fig_frf)
         # by frame, not index -- tab positions have moved before (measured)
         self._show_fig(self.fig_frf)
         self.log(f"taper {f['f_use']/1e3:g}-{f['f_max']/1e3:g} kHz shaded")
