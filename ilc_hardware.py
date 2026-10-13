@@ -48,12 +48,26 @@ def polarimeter_path(cfg=None):
 
 
 def _busy_text(exc):
+    """The row's one line for a device that did not open. The driver's own
+    multi-line diagnosis (Scope Grab says whether Windows sees the scope at
+    all, and what sits on its port) goes to the log in full: _failed()."""
     s = str(exc)
     low = s.lower()
     if "access" in low or "in use" in low or "permission" in low or "resource busy" in low \
             or "VI_ERROR_RSRC_BUSY" in s or "VI_ERROR_RSRC_LOCKED" in s:
         return f"in use by another program ({s[:80]})"
-    return s[:160]
+    first = s.strip().split("\n")[0].strip()
+    return first[:160] if first else s[:160]
+
+
+def _failed(exc, prefix=""):
+    """dict(ok=False, text=<first line>, detail=<the rest>) for a device that
+    did not open; the detail is the driver's whole message when it says more
+    than one line (the Hardware tab logs it under the row)."""
+    s = str(exc).strip()
+    lines = [l for l in s.split("\n")]
+    detail = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+    return dict(ok=False, text=prefix + _busy_text(exc), detail=detail)
 
 
 # ------------------------------------------------------------------ scope
@@ -64,7 +78,7 @@ def check_scope(scopemod, channels_desc=""):
     try:
         idn = scope.connect()
     except Exception as exc:
-        return dict(ok=False, text=_busy_text(exc), detail="")
+        return _failed(exc)
     try:
         acq = str(scope.try_get(":ACQuire:TYPE") or "?").strip()
         rng = scope.try_get(":TIMebase:RANGe")
@@ -96,7 +110,7 @@ def check_awg(awgmod):
     try:
         idn = awg.connect()
     except Exception as exc:
-        return dict(ok=False, text=_busy_text(exc), detail="")
+        return _failed(exc)
     try:
         parts, det = [], [str(idn)]
         for ch in (1, 2):
@@ -171,7 +185,7 @@ def check_ell14(cfg=None, pcfg=None):
         dev = ELL14(port, address=str(pcfg.get("ell_address", "0") or "0"),
                     zero_offset_deg=float(pcfg.get("ell_zero_deg", 0.0) or 0.0))
     except Exception as exc:
-        return dict(ok=False, text=f"{port}: {_busy_text(exc)}", detail="")
+        return _failed(exc, f"{port}: ")
     try:
         info = dev.info()
         pos = dev.position()
@@ -180,7 +194,7 @@ def check_ell14(cfg=None, pcfg=None):
         return dict(ok=True, text=text,
                     detail=f"firmware {info['firmware']}, {info['pulses_per_unit']} pulses/rev")
     except Exception as exc:
-        return dict(ok=False, text=f"{port}: {_busy_text(exc)}", detail="")
+        return _failed(exc, f"{port}: ")
     finally:
         try:
             dev.close()
@@ -215,7 +229,7 @@ def check_ds345(cfg=None, pcfg=None):
         text = f"{getattr(dev, 'idn', '?')[:40]} on {getattr(dev, 'addr', '?')}"
         return dict(ok=True, text=text, detail="")
     except Exception as exc:
-        return dict(ok=False, text=_busy_text(exc), detail="")
+        return _failed(exc)
     finally:
         try:
             dev.close()
