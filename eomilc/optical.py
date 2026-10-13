@@ -740,6 +740,18 @@ def verdict(summary) -> dict:
         tr = f.get("transports") or (summary.get("transports") if e["leg"] == 1 else None)
         if tr:
             rec["transports"] = [dict(t) for t in tr]
+            if len(tr) > 1:
+                # the leg's own extremes come from the envelope, whose hold
+                # window spans the idle between the transports: take the
+                # worst transport instead, so a before/after (and the batch's
+                # "halved" test) reads leg 2 when leg 2 is the problem
+                for key in ("top_lm_mdeg", "top_lt_mdeg", "after_fall_lm_mdeg",
+                            "after_fall_lt_mdeg"):
+                    vals = [float(t.get(key, float("nan"))) for t in tr]
+                    vals = [v for v in vals if np.isfinite(v)]
+                    if vals:
+                        rec[key] = max(vals, key=abs)
+                rec["from"] = "worst transport"
         legs.append(rec)
     corr = summary["correction"]
     v90 = list(summary.get("V90_mon") or [5.1283, 5.1374])

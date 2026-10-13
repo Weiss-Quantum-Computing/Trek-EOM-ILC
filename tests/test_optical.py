@@ -221,6 +221,56 @@ def main():
         traceback.print_exc()
         fails.append("exception")
         print("\n".join("    | " + m for m in msgs[-15:]))
+        print("[6] a record with two transports (a spin echo's legs) is read per transport")
+        import subprocess
+        etmp = os.path.join(tmp, "echo")
+        os.makedirs(etmp)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "tools", "make_echo_target.py"),
+                            os.path.join(TARGETS, "target_S47X1.csv"), "--spacing-ms", "16.667",
+                            "--out", etmp], capture_output=True, text=True)
+        e1, e2 = (os.path.join(etmp, f"target_S47E2X{k}.csv") for k in (1, 2))
+        check(r.returncode == 0 and os.path.exists(e1) and os.path.exists(e2),
+              "make_echo_target wrote the S47E2 pair" + ("" if r.returncode == 0 else f": {r.stderr[-200:]}"))
+        eruns = {}
+        for key in ("X1", "X2"):
+            ch_name, gain, fn, zeta = MODELS[key]
+            ch = CHANNELS[ch_name]
+            tp = e1 if key == "X1" else e2
+            tt, vv = run_ilc.load_target(tp, ch.mon_scale)
+            ddt = float(np.median(np.diff(tt)))
+            p = plantmod.Plant(gain=gain, fn=fn, zeta=zeta, dt=ddt)
+            lp = ilc.Loop(plant=p, target=vv, dt=ddt, channel=ch, gamma=0.6, f_cut=20e3, limits=ch.limits)
+            uu = lp.first_shot(flat=True)
+            lp.history.append(lp.metrics(p.forward(uu)))
+            cr = ilc_batch.ChannelRun(key=key, wiring={}, stem=f"S47E2{key}", loop=lp, t=tt, u=uu,
+                                      iteration=1, full_scale=10.0, t_off=0.0,
+                                      state_path=os.path.join(run_dir, f"drive_S47E2{key}.state.npz"),
+                                      target_path=os.path.abspath(tp))
+            ilc_batch.save_state(cr)
+            eruns[key] = cr
+        et, edt = eruns["X1"].t, eruns["X1"].loop.dt
+        edev = optical.open_devices(None, cfg, log=log, simulate=True, pcfg={})
+        edev.sim.rot_err = 0.5
+        optical.sim_play(edev, {"EO1": eruns["X1"].u, "EO2": eruns["X2"].u}, dt=edt)
+        efolder = optical.scan(edev, scans, "S47E2_opt0", et, log=log, angles="0:359:90", shots=2)
+        es = optical.compare(efolder, eruns["X1"].state_path, eruns["X2"].state_path, band_hz=5000.0,
+                             pd_delay_us=0.0, split=0.5, log=log, figs=False)
+        tr = es.get("transports") or []
+        check(len(tr) == 2, f"the comparison reports {len(tr)} transports")
+        lm = [t.get("landmarks_ms", [None] * 4) for t in tr]
+        check(len(tr) == 2 and abs(lm[1][0] - lm[0][0] - 16.668) < 0.1,
+              f"transport 2 starts {lm[1][0] - lm[0][0] if len(tr) == 2 else float('nan'):.3f} ms after transport 1")
+        ev = optical.verdict(es)
+        L = ev["legs"][0]
+        check(len(L.get("transports", [])) == 2 and L.get("from") == "worst transport",
+              "verdict carries both transports and takes the leg's extremes from the worst one")
+        check(finite(L["transports"]), "per-transport numbers finite")
+        lines = optical.verdict_lines(ev)
+        check(sum("transport 2" in x for x in lines) == 1, "one log line per transport")
+        for ch in ("EO1", "EO2"):
+            c = corrmod.read_correction(es["files"][ch])
+            check(len(c.delta) == len(et), f"{ch}: one correction over the whole {len(et)}-point record")
+        optical.close_devices(edev)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
