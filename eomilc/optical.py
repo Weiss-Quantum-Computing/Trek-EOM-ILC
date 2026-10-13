@@ -732,6 +732,14 @@ def verdict(summary) -> dict:
         for key, src in (("lt_std_mdeg", "d_light_fit"), ("lm_std_mdeg", "d_lm_fit"),
                          ("mt_std_mdeg", "d_mon_fit")):
             rec[key] = float((f.get(src) or {}).get("rms_mdeg", float("nan")))
+        # A record holding several transports (a spin echo's two legs in
+        # one ILC record, 13 Oct 2026): the comparison reports each
+        # transport's own numbers under "transports" (per leg, else for leg
+        # 1 at the summary root). Carried as given; absent on a comparison
+        # from before that change, and then the leg's numbers stand alone.
+        tr = f.get("transports") or (summary.get("transports") if e["leg"] == 1 else None)
+        if tr:
+            rec["transports"] = [dict(t) for t in tr]
         legs.append(rec)
     corr = summary["correction"]
     v90 = list(summary.get("V90_mon") or [5.1283, 5.1374])
@@ -755,6 +763,16 @@ def verdict_lines(v) -> list:
                    f"light-target {L['top_lt_mdeg']:+.0f}; first ms after the fall "
                    f"{L['after_fall_lm_mdeg']:+.0f} / {L['after_fall_lt_mdeg']:+.0f} mdeg; "
                    f"light-target rms {L['lt_rms_mdeg']:.0f} mdeg")
+        for t in L.get("transports") or []:
+            if len(L["transports"]) < 2:
+                break                     # one transport: the leg line says it
+            lm = t.get("landmarks_ms") or [float("nan")] * 4
+            out.append(f"   transport {t.get('index', '?')} ({lm[0]:.2f}-{lm[3]:.2f} ms): ramp top "
+                       f"light-monitors {t.get('top_lm_mdeg', float('nan')):+.0f} mdeg, light-target "
+                       f"{t.get('top_lt_mdeg', float('nan')):+.0f}; after the fall "
+                       f"{t.get('after_fall_lm_mdeg', float('nan')):+.0f} / "
+                       f"{t.get('after_fall_lt_mdeg', float('nan')):+.0f} mdeg; light-target rms "
+                       f"{t.get('lt_rms_mdeg', float('nan')):.0f} mdeg")
     c = v["correction"]
     out.append("correction peak " + f"{c['peak_mdeg']:.0f} mdeg: " + ", ".join(
         f"{ch} {x['peak_mdeg']:.0f} mdeg = {x['peak_V']:.1f} V" for ch, x in c["crystals"].items()))
