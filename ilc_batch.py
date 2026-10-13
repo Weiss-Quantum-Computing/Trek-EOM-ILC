@@ -764,6 +764,28 @@ def plan_rows(plan):
     return rows
 
 
+def model_line(plan, key):
+    """One line saying what inverse this channel learns with, and where the
+    numbers came from -- the two chains are not the same amplifier, so the
+    plan is checked channel by channel."""
+    plant, loopp, rec, src = _settings_for(plan, key)
+    if rec["model"] == "frf":
+        what = (f"measured FRF {os.path.basename(rec['frf'])} full to {rec['f_use']/1e3:g} kHz, "
+                f"taper to {rec['f_max']/1e3:g} kHz")
+    else:
+        prm = [f"gain {plant['gain']:.4f}" if plant.get("gain") else "gain ?"]
+        if plant.get("fn"):
+            prm.append(f"fn {plant['fn']:.0f} Hz")
+        if plant.get("zeta"):
+            prm.append(f"zeta {plant['zeta']:.3f}")
+        if plant.get("tau"):
+            prm.append(f"tau {plant['tau']*1e6:.2f} us")
+        what = f"{rec['model'] or 'parametric'}: " + ", ".join(prm)
+    notches = ", ".join(f"{f0/1e3:g}k/{bw:g}" for f0, bw in loopp["notches"]) or "none"
+    return (f"model {key}: {what}; gamma {loopp['gamma']:g}, f_cut {loopp['f_cut']/1e3:g} kHz, "
+            f"notches {notches} ({src})")
+
+
 def dry_run(plan, log=print):
     lp = plan["loop"]
     log(f"plan {plan.get('name', '')}: {len(plan['campaigns'])} campaigns, targets in {plan['_targets_dir']}")
@@ -774,6 +796,11 @@ def dry_run(plan, log=print):
         log(f"wiring {k}: AWG CH{w['awg_ch']} -> monitor CH{w['mon_ch']}, {rb}")
     for n in plan.get("_wiring_notes", []):
         log(f"  note: {n}")
+    for k in ("X1", "X2"):
+        try:
+            log(model_line(plan, k))
+        except BatchError as e:
+            log(f"model {k}: REFUSED: {e}")
     rows = plan_rows(plan)
     for r in rows:
         if not r["n"]:

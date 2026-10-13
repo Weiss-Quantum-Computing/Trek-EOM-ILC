@@ -372,7 +372,12 @@ role names, kept in the panel's config.json): the MonXn channel is the
 monitor, the CmdXn channel the drive readback for the alignment check — with
 no CmdXn assigned that channel's alignment is not verified and the log says
 so. A plan's `"wiring": {"X1": {"drive_ch": 2}}` block overrides the map per
-channel; `--dry-run` prints the wiring in force. It uses the GUI's
+channel; `--dry-run` prints the wiring in force and one **model** line per
+channel: the two chains are different amplifiers, so each channel learns with
+its own inverse (rung, parameters, gamma, f_cut, notches or FRF), taken from
+its own state file (`settings.X1.from_state`) or typed into its own plan block
+(`settings.X1.model/params/gamma/f_cut/notches`). A campaign that resumes from
+an existing state keeps that state's model, not the plan's. It uses the GUI's
 capture scheme (HRES singles with the 3-code offset dither) and writes the
 GUI's state files, so any campaign can be opened with **Load state**
 afterwards and continued by hand.

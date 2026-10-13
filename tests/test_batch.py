@@ -213,8 +213,34 @@ def main():
         man = ilc_batch.run_batch(plan, args(), log=lambda s: None, bench=bench(bench_cfg))
         check(man["campaigns"]["SW50"]["status"] == "done", "the bench's map (CmdX1 on CH2, no CmdX2) trains a series shape")
         check(any("NOT verified" in m for m in msgs), "the log says the alignment was not verified")
-        st = np.load(os.path.join(plan["_run_dir"], "drive_S25X1.state.npz"), allow_pickle=True)
-        check(chm.from_record(str(st["scope_channels"])) == chm.channels_of(off_cfg), "state carries the map")
+        with np.load(os.path.join(plan["_run_dir"], "drive_S25X1.state.npz"), allow_pickle=True) as st:
+            check(chm.from_record(str(st["scope_channels"])) == chm.channels_of(off_cfg), "state carries the map")
+
+        print("[10] two models, one per channel, named in the dry run")
+        path = write_plan(tmp, ["S25"], name="t10")
+        raw = json.load(open(path))
+        raw["run_dir"] = os.path.join(tmp, "run10")       # a fresh folder: an existing state resumes with ITS model
+        raw["settings"] = {"X1": {"model": "resonant", "params": {"gain": 0.557, "fn": 7823, "zeta": 1.47},
+                                  "gamma": 0.6, "f_cut": 20e3, "notches": [[23700, 400]]},
+                           "X2": {"model": "third_order", "params": {"gain": 0.6116, "fn": 13729, "zeta": 2.84, "tau": 2.11},
+                                  "gamma": 0.6, "f_cut": 60e3, "notches": [[25400, 400]]}}
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=sim_cfg)
+        l1, l2 = ilc_batch.model_line(plan, "X1"), ilc_batch.model_line(plan, "X2")
+        check("resonant" in l1 and "fn 7823" in l1 and "f_cut 20 kHz" in l1 and "23.7k/400" in l1, l1)
+        check("third_order" in l2 and "tau 2.11 us" in l2 and "f_cut 60 kHz" in l2 and "25.4k/400" in l2, l2)
+        msgs = []
+        ilc_batch.dry_run(plan, log=msgs.append)
+        check(sum(m.startswith("model X1") for m in msgs) == 1 and sum(m.startswith("model X2") for m in msgs) == 1,
+              "the dry run prints both")
+        man = ilc_batch.run_batch(plan, args(), log=lambda s: None, bench=bench(sim_cfg))
+        c = man["campaigns"]["S25"]
+        check(c["status"] == "done" and c["channels"]["X1"]["history"][-1]["rms_v"] < 0.1 * c["channels"]["X1"]["history"][0]["rms_v"]
+              and c["channels"]["X2"]["history"][-1]["rms_v"] < 0.1 * c["channels"]["X2"]["history"][0]["rms_v"],
+              "both channels learn with their own model")
+        with np.load(os.path.join(plan["_run_dir"], "drive_S25X1.state.npz"), allow_pickle=True) as st1,                 np.load(os.path.join(plan["_run_dir"], "drive_S25X2.state.npz"), allow_pickle=True) as st2:
+            check(float(st1["fn"]) == 7823 and float(st2["fn"]) == 13729 and float(st1["f_cut"]) == 20e3
+                  and float(st2["f_cut"]) == 60e3, "each state records its own model")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
