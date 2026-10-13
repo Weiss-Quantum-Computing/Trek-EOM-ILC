@@ -40,7 +40,7 @@ Support/EOM-ILC-GUI/` there rather than `%APPDATA%`.
 
 ## 1. The window at a glance
 
-The settings sit in five tabs on the left, in the order a campaign uses
+The settings sit in seven tabs on the left, in the order a campaign uses
 them; the session summary, the log and the status line underneath are always
 visible.
 
@@ -51,9 +51,10 @@ visible.
 | **Hardware** | one look at the rack: Scope, AWG, ELL14, DS345, each with a **Check** that opens the device, asks its identity and how it stands (acquisition mode and V/div; outputs ON/OFF, FRQ and waveform; mount position; gate address), closes it again, and writes the answer and the time into the row, red when it did not answer. The mount and the DS345 are the polarimeter's: their port and address come from its config, and while its window is open they report "in use". Nothing is moved or programmed. |
 | **Scope** | the *Scope channels* map (which channel is the PD, the monitors, the Trek commands — the polarimeter's roles), the capture settings (`t-offset`, baseline), and the line-ripple switch with its **Line ripple…** dialog |
 | **Run** | the bench flow in order: a *Bench* line (wiring in force, the last thing a run reported about the instruments), **1 Instruments** (Auto-set, Upload), **2 Learn** (iterations, repeats, Run, Stop), **3 Hold**, then **Batch…**, **Manual step…** (one iteration from captures you took) and **Bench settings…** (trigger timeout, the skip/keep ticks, GEN's channel numbers). In pair mode Auto-set, Run and Hold act on both chains |
+| **Optical** | the optical close by hand, both chains (pair mode only): a state line (the pair, the outputs as last reported, what the AWG was last given, the last scan, the correction peaks, the last verdict) and seven numbered steps — **1 Play keepers**, **2 Scan**, **3 Compare**, **4 Apply**, **5 Learn**, **6 Verify**, **7 Outputs OFF** — each greyed, with the reason under it, until the step before has a result; **Settings…** for the scan's rarely changed numbers — §11 |
 | **Corrections** | learned target corrections: move the TARGET by an error measured elsewhere (the polarimeter), within limits — §11 |
 | **Log** | everything the loop reports. A timestamped copy appends to `run\ilc_gui.log` |
-| right side | six tabs, refreshed at every step, with the iteration selector (in pair mode led by a **shown X1 / X2** switch) and Compare box above them: Waveforms, Error (error / spectrum), Convergence, Drive (corrections / spectrum / updates), Table, Inputs (FRF / target corrections) — a tab with several figures has a view bar on top; see §7 |
+| right side | eight tabs, refreshed at every step, with the iteration selector (in pair mode led by a **shown X1 / X2** switch) and Compare box above them: Waveforms, Error (error / spectrum), Convergence, Drive (corrections / spectrum / updates), Diagnostics, Table, Inputs (FRF / target corrections), Optical (rotation / correction / before / after: drawn by the Optical tab's Compare and Verify) — a tab with several figures has a view bar on top; see §7 |
 | status line | what is running, or when idle the next step: Load/Init, then Auto-set and Run, then the lowest-rms iteration since i08 (the batch's keeper rule); in pair mode it names the shown chain |
 
 Every individual field is documented in §10.
@@ -482,6 +483,7 @@ every draw and overrides anything the sliders set.
 | `meas_<stem>_iNN.npy` | beside the state | the iteration's averaged measurement — bench mode and Step both save it, so every measured iteration reloads with the session |
 | `meas_<stem>_iNN_rMM.npy` | beside the state | a Hold run's averaged measurement — run M of iteration N, same drive, no update |
 | `ilc_gui.log` | `run\` | timestamped append-only copy of everything the panel logged |
+| `<stem>_optN\`, `<stem>_optN_verify\` | `run\optical\` | an Optical-tab scan: the polarimeter's scan folder (Scope Grab captures + `<name>_scan.json`, readable by its data viewer); the comparison in its `analysis\target_compare\` (`corr_<stem>X1/X2_optical.csv`, `target_<stem>X1/X2_played.csv`, `summary.json`, `target_compare.npz`) |
 
 `run\README.md` has the full taxonomy and where finished campaigns get
 filed.
@@ -662,6 +664,36 @@ leave this off there.
 | **Apply to target** | Preview, then: refuse on any failure (wrong channel, another target's grid or values, over the cap, band above the loop's, the estimated drive past the Trek limits, the AWG rail or the ±full-scale upload mapping); otherwise confirm with the numbers and set target = base + total. The base target is kept in the state (`base_target`, `corr_total`, `corrections`); the next measurement is against the new target. |
 | **Revert to base** | Target back to the base target; the files stay in the box, switched off. |
 
+### Optical tab (pair mode)
+
+Every step runs in the background (Stop, the log, the status line as on the
+Run tab), opens the scope and the AWG for itself and closes them again
+**without touching the outputs** — only step 7 switches them OFF, and a step
+that dies after switching one on. A step whose prerequisite is missing is
+greyed with the reason under it (orange), and refused with that reason if it
+is reached anyway; pair mode off greys all seven. Loading or initialising
+another pair starts the steps over.
+
+| field | what it does |
+|---|---|
+| **state line** | The pair's stems and iterations; the outputs as last reported (by step 1 or 7, by a scan or Learn that found them OFF, or by any pair run that switched them OFF); the waveforms the AWG was last given; the last scan (and its verification); the correction peaks of the last comparison and what Apply put on the targets; the last verdict. |
+| **1 Play keepers** | Uploads both sessions' **current** drives (`<stem>X1_iNN`, `<stem>X2_iNN`) after the same setup and limit checks as the bench loop (refused with nothing uploaded on any problem; Auto-set with both outputs off first), asks once to switch both outputs ON, and **leaves them ON** — the Bench line says *kept ON until step 7*. |
+| **name** *(panel)* | The scan's folder name under `run\optical\`. Filled with `<stem>_optN`, N the first number without a complete scan, and moves on after each complete scan; a typed name is kept. A name whose scan is on disk unfinished (stopped) **resumes** it; a complete one is used as it is (nothing new is taken). |
+| **angles** *(config)* | Analyzer angles: `start:stop:step` in degrees (`0:359:22.5`, 16 angles) or a list. |
+| **shots** *(config)* | Single HRES shots per angle (8). |
+| **Scan / Stop** | Refused when either output is OFF or the AWG holds other drives than the sessions (Play keepers again). Opens the analyzer (ELL14, the polarimeter's port and zero) beside the panel's scope, sets the scope's timebase from 0.5 ms before the trigger to 30 ms after the record and single HRES shots, steps the angles (reference returns, hold-null angles), and puts the timebase and acquisition back. The polarimeter's preset is **not** written unless named in Settings (the trigger and the verticals are the ILC's). Needs the headless Scope Grab (scope-grab-multi): with the old checkout the scan is refused by name. Stop saves what was taken; Scan again under the same name resumes. |
+| **band Hz** *(config)* | The comparison's low-pass and the correction's band (5000: the 0.3 ms ramp-top feature needs it); Apply gates at this band. Must be under each loop's own band or Apply refuses. |
+| **PD delay us** *(config)* | The photodiode's own delay, read off the light before it is compared (1.7 µs on this bench). |
+| **split X1** *(config)* | The share of the rotation correction put on EO1; EO2 gets the rest (0.5 for parallel shapes). |
+| **Compare** | `eomilc.optical.compare` on the last scan with both states (their **base** targets once corrected): per leg light, monitors and target, light − monitors, light − target, and `corr_<stem>X1/X2_optical.csv`. The verdict lines go to the log; the Optical plot tab's *rotation* and *correction* views are drawn. |
+| **gain** *(config)* | The fraction of the correction applied (0.7: the statistical sigma is small, leg-to-leg and up/down differences are not in it). |
+| **Apply to both targets** | `eomilc.optical.apply_correction` on each loop with its own file (EO1's to X1, EO2's to X2), gated with the Corrections tab's limits (k sigma, floor, cap, end fade, active only) at the comparison's band, on top of the session's base target and layers — the `optical` slot is **replaced**, never stacked. Both or neither: a refusal on either puts the other back, logs the notes and says why in a dialog. The base targets are kept in the states, both are saved, and the Corrections tab lists the shown session's layer. No confirmation: the step is the confirmation. |
+| **iterations** *(config)* | Iterations of Learn (5); repeats, trigger timeout and the skip tick are the Run tab's. |
+| **Learn** | The pair bench loop (§5) on the corrected targets with the outputs **already ON**: nothing is asked, an output found OFF refuses the run before anything is uploaded, and the outputs stay ON when it ends — finished, stopped or at a failed limit check (only a run that dies switches them OFF). |
+| **Verify (scan + compare)** | A scan named `<scan>_verify` (then `_verify2`, …) with the same settings, its comparison, and a before / after table in the log: per leg the ramp-top and first-ms-after-the-fall extremes of light − target, its rms, the ramp-top light − monitors, and the correction peaks. The Optical plot tab's *before / after* view draws the magnitudes; the status line says whether every leg's ramp-top light − target **halved**. The verification then serves as the next pass's comparison: Apply takes its correction (replacing the last), Learn, Verify again. |
+| **Outputs OFF (both)** | Both outputs OFF; the Bench line and the state line say so. Where every Optical session ends. |
+| **Settings…** *(config)* | *points per shot* (20000), *reference every* (a return to the reference angle every N steps, 9), *settle s* (before the first shot, bench only), *preset* (a polarimeter preset written before the scan; blank = none), *hold-null angles* (extra angles around the hold's null, from each target's peak: 90° × peak / V90 per crystal), *comparison figures* (the polarimeter's fig1–5 PNGs beside the comparison). |
+
 ## 11. Learned target corrections (the outer loop)
 
 The ILC makes the **monitor** follow the target. What the experiment needs is
@@ -683,21 +715,49 @@ header, `time_us,delta_V,sigma_V`, volts in the target CSV's units) can come
 from any measurement of any outcome, for any channel GEN included; the panel
 checks it against the session's own limits.
 
-Workflow for the optical correction:
+### By hand: the Optical tab
+
+Pair mode, both chains together (the experiment plays them together, and
+each Trek keeps its own model). Converge the pair first (Run tab), Auto-set
+with both outputs off, close the polarimeter's window (the analyzer is on
+COM3 and the scope is one program's at a time), make sure the PD is on
+screen and on the Scope channels map, then on the **Optical** tab:
+
+1. **Play keepers** — both current drives uploaded, both outputs ON (one
+   question). They stay ON until step 7.
+2. **Scan** — the analyzer steps through the angles while the keepers play;
+   the scan lands in `run\optical\<stem>_optN\`, in the polarimeter's own
+   format (its data viewer opens it).
+3. **Compare** — light − monitors and light − target per leg, a correction
+   file per crystal, the Optical plot tab.
+4. **Apply** — both targets move by the gated correction × gain (under 1 for
+   the first pass: the statistical sigma is small, but leg-to-leg and up/down
+   differences of 0.1–0.2° are not in it); the base targets are kept.
+5. **Learn** — the pair loop learns the moved targets, outputs still ON.
+6. **Verify** — a second scan and comparison; the before / after table. The
+   number to read is light − **target** (the base target): light − monitors
+   is the crystal's and stays; what the close removes is the light's
+   distance from the target the experiment wants. For another pass, Apply
+   again: the verification's correction *replaces* the last. Light − monitors
+   does not depend on the correction already applied (to first order), so
+   each scan is a fresh estimate of the WHOLE correction, not of a remainder;
+   stacking them would apply it twice. Then Learn, Verify.
+7. **Outputs OFF**.
+
+The batch's optical stage (docs/OPTICAL_CLOSE_DESIGN.md §3) runs the same
+library (`eomilc/optical.py`) over every shape of a plan, unattended.
+
+### The alternative: the polarimeter's window
 
 1. Run the polarimeter scan with the CmdX1/X2 and MonX1/X2 roles (and, for
    the line ripple, a second scan of the same sequence with the ramps
-   disabled).
+   disabled — the Optical tab does not take that reference scan).
 2. `ramp-polarimeter` → *ILC target* (or `tools/target_compare.py`): writes
    `target_<name>_played.csv` (the ILC target with the experiment's timing)
    and `corr_<name>_optical.csv` per crystal.
 3. ILC panel: Init a campaign on `target_<name>_played.csv`, converge it.
 4. Corrections → Add `corr_<name>_optical.csv` → Preview → Apply (a gain
-   under 1 for the first pass is the cautious choice: the statistical sigma
-   is small, but leg-to-leg and up/down differences of 0.1–0.2° are not in
-   it). Iterate the loop until it has learned the new target.
+   under 1 for the first pass is the cautious choice). Iterate the loop
+   until it has learned the new target.
 5. Verification scan, and a new correction file. It *replaces* the old one
-   in the same slot (the box asks): light − monitors does not depend on the
-   correction already applied (to first order), so each scan is a fresh
-   estimate of the WHOLE correction, not of a remainder. Stacking them would
-   apply it twice.
+   in the same slot (the box asks), for the reason in step 6 above.
