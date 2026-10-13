@@ -549,6 +549,77 @@ from [54] on are written to stand alone); run the whole suite once at the
 end. The suite is fast because the panel rasterises only the figure on
 screen; hidden figures draw when their tab or view is shown.
 
+## Two transports in one record (spin echo)
+
+The polarization drift during a hold carries into the next transport: with an
+identical drive, the echo's leg 2 rotated +0.12-0.18° against leg 1 (30 Sep -
+1 Oct), the crystal remembering leg 1. A transport trained on its own is
+learned on a rested crystal. So train both legs in ONE record at the echo's
+spacing (leg start to leg start, 16.667 ms by default), and the loop learns
+leg 2 in the state leg 1 leaves behind.
+
+Build the pair from a one-transport suite target:
+
+```powershell
+C:\ProgramData\anaconda3\python.exe tools\make_echo_target.py <suite>\targets\target_S47X1.csv <suite>\targets\target_S47X2.csv --spacing-ms 16.667
+```
+
+(`[--legs 2] [--tail-us 200] [--suffix E2] [--out DIR]`; the default folder is
+the source's.) The transport is where the target is above 0.1 % of its max,
+widened to the whole ramp (S47: 200..10612 us). The record is the source's
+lead, transport 1, idle until leg 2 starts one spacing after leg 1, transport
+2, the tail -- the same 2 us grid on both channels, the spacing rounded to it
+(16.667 -> 16.668 ms). S47 at 16.667 ms: `target_S47E2X1.csv`/`X2.csv`, 13741
+points, 27.482 ms period, legs at 0.200 and 16.868 ms. The comment lines carry
+the sources, the spacing, each leg's start and the transport's rise/hold/fall,
+plus machine-readable `# spacing_ms:`, `# legs_ms:`, `# lead_us:`,
+`# tail_us:` and `# transport_us:` lines for the comparison and the card
+split. It refuses a spacing shorter than the transport, sources on different
+grids and a source that already holds two transports, and ends by reading each
+file back with `run_ilc.load_target` and putting its flat first shot through
+the init limit check (PASS/FAIL per channel).
+
+Two caps. **Stem:** the panel's pair mode appends `X1`/`X2`, so a stem is at
+most 5 characters -- `S47E2` is exactly 5; `ilc_batch` cuts longer ones to 5
+and refuses a collision (`SF130E2` would train as `SF130`), so shorten the
+`--suffix` instead. **Points:** the panel uploads at most `AWG_MAX_PTS` (16384,
+environment `BK4063B_MAX_PTS`); a 133 ms echo needs it raised, and the 4063B's
+true ceiling is unprobed -- a refused upload means lower it and re-measure.
+
+**The card.** Split the trained pair with the targets:
+
+```powershell
+C:\ProgramData\anaconda3\python.exe tools\split_for_card.py run\keep\drive_S47E2X1_keep.csv run\keep\drive_S47E2X2_keep.csv --targets <suite>\targets\target_S47E2X1.csv <suite>\targets\target_S47E2X2.csv
+```
+
+It finds the transports in the targets and writes four files per channel,
+`<drive>_leg1_upramp.csv`, `_leg1_downramp.csv`, `_leg2_upramp.csv`,
+`_leg2_downramp.csv`, both channels cut at the same times per leg, each leg
+around its own common flat stretch (a one-transport record keeps the old
+`<drive>_upramp.csv` / `_downramp.csv`, cut exactly as before). Per leg it
+prints each file's span -- program exactly that ramp time -- and the card
+hold; between legs, the pause the record implies:
+
+```
+pause after leg k = spacing - (up span + card hold + down span)
+card hold         = hold on the atoms - 2 x settle
+```
+
+S47E2 at the default 200 us settle: up 4.970 ms, card hold 0.872 ms (the
+1.272 ms common flat stretch less 2 x 200 us), down 4.970 ms, pause 16.668 -
+10.812 = 5.856 ms, leg 2 the same. That pause is exactly the idle the ILC
+trained between leg 1's down file and leg 2's up file. A batch plan's `card`
+block cuts the same way (the suite's B2S25 now gives eight files and a 102 us
+pause).
+
+**Bench trigger.** The record repeats on every trigger, and the crystal
+remembers the previous SHOT as well as the previous leg (creep tau ~70 ms, the
+7 Oct hold series). The experiment runs at ~6 s, so its leg 1 always meets a
+relaxed crystal; slow the DS345 so the bench's does too -- at least ~0.5 s
+between shots (7 tau), 1 Hz to be safe, not the 20 Hz or 3.7 Hz of the
+single-transport campaigns -- and set the plan's `timing.trigger_hz` to match,
+so the time estimate is honest.
+
 ## Uploading by hand: two traps, one file
 
 `Awg.upload_arb(..., normalize=True)` divides the samples by their own peak.
