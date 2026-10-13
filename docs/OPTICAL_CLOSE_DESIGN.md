@@ -195,3 +195,141 @@ Smoke block [58] on the simulated devices.
   `self._draw(fig)`; buttons into `self._actions`.
 - Plot titles are data records; interpretation goes in `_plot_note`. The
   experiment traps neutral atoms; never write "ion".
+
+# Addendum (13 Oct 2026): separate per-crystal measurement
+
+## Why
+
+A joint scan (both drives playing) sees one residual, light minus what both
+monitors predict, and splits it between the crystals by a fixed fraction
+(`split`, 0.5). The light only needs the sum, so that corrects the light,
+but the file is valid only for that pair of drives. The errors are each
+crystal's own physics (the 8 Oct creep was X1 only; the ramp-top overshoot
+is per crystal), and in a time-split record the holding crystal's creep
+shows up in the other's window. So the correction is now MEASURED per
+crystal: X1 drives with X2 parked at its idle, then X2 with X1 parked, each
+scan compared alone (the whole correction to the driving crystal), both
+files applied, the loop learns, and a JOINT scan verifies (the light the
+atoms get). The joint verification's own residual is reported, not applied:
+the next pass measures solo again. Cost: three scans per pass instead of two.
+
+## What exists (merged on main before the agents start)
+
+- `rampol.ilc_target.compare` reads a state with a FLAT target as "parked":
+  the transports, the timing reference, the active stretch and the fade come
+  from the leading driven crystal; with one driven crystal `split` is forced
+  to it; `summary["solo"]` ("X1" / "X2" / None) and `summary["driven"]`.
+- `eomilc.optical`:
+  - `park_drive(u)` -> the drive flat at `u[0]`, same length (FRQ, record
+    and trigger unchanged; the output stays ON - never OFF to park).
+  - `PARK_NAMES = {"X1": "PARK1", "X2": "PARK2"}`: the AWG arb names.
+  - `parked_state(path, outdir)` -> a flat copy of a state (what the
+    polarimeter is handed for the parked crystal).
+  - `compare(..., solo=None | "X1" | "X2")`: with solo the partner's state
+    is replaced by its parked copy, split forced, `summary["files"]` holds
+    the driving crystal's file ONLY, `summary["solo"]` set. A solo scan
+    compared without `solo=` would split one crystal's error over both: the
+    caller says which played.
+  - `tests/test_optical.py` [7].
+
+## 5. Batch stage, attribution (agent B: `ilc_batch.py`, `tests/test_batch.py`, `WORKFLOW.md`)
+
+Settings: `DEFAULT_OPTICAL` gains `"attribution": "joint"` (today's flow)
+and `"joint_before": true`; `optical_settings` refuses anything but "joint"
+/ "separate"; `optical_line` says it (e.g. `attribution separate (X1 alone,
+X2 alone, then both to verify)`), so the dry run prints it.
+
+`optical_stage` with "separate", per pass p (gain gains[p-1]):
+
+1. Before: on the first pass of this run with nothing carried and
+   `joint_before`, a joint scan `<name>_before` + joint compare (split
+   `split`) -> `verdict_before`, recorded, NOT applied. Later passes take
+   the previous pass's `verdict_after` as their before (the table), as today.
+2. Solo scans, X in (X1, X2): the partner's channel gets
+   `optical.park_drive(partner.u)` uploaded as `optical.PARK_NAMES[partner]`
+   (`ilc_bench.upload_drive`; outputs stay ON; same length so FRQ holds);
+   X's keeper plays as uploaded; scan `<name>_X1` / `<name>_X2` (events:
+   step "scan", scan=that name); in simulation `sim_play` gets the parked
+   drive for the partner (`_sim_drives` takes a drives override; the bridge
+   as today); `optical.compare(..., solo=X)` -> that crystal's file. The
+   pass record gains `solo_scans {"X1": folder, "X2": folder}`,
+   `verdicts_solo {"X1": verdict, "X2": verdict}`; `corr_files` is
+   `{"EO1": from X1's scan, "EO2": from X2's}`.
+3. Both keepers re-uploaded (both play), both files applied (as today,
+   both or neither), `iterations` iterations, keeper per channel as today.
+4. Verify as today (joint scan `<name>`, joint compare, `verdict_after`,
+   `verify_corr_files` recorded). In separate mode nothing is carried as the
+   next pass's correction (`carry` only passes the verdict for the table).
+
+Resume: a pass whose verification scan is complete and recorded done is not
+repeated (as today); a solo scan on disk resumes under its name. Outputs OFF
+on exit as today.
+
+Tests (`tests/test_batch.py` [11b], after [11], in simulation on S25):
+"optical" with `attribution: "separate"`, gains [1.0], iterations 2, PD delay
+0, figs off, scan 0:359:45 x 2. Check: the dry run line; folders
+`S25_opt1_before` (joint_before), `S25_opt1_X1`, `S25_opt1_X2`, `S25_opt1`;
+the pass record's `solo_scans`, `corr_files` EO1 under the X1 folder and EO2
+under the X2 folder, `verdicts_solo` finite, both `applied`, `verify_scan`;
+the simulated AWG's log shows `("upload", 2, "PARK2")` before the X1 scan
+and `("upload", 1, "PARK1")` before the X2 scan, and the keepers uploaded
+again before the learn; the X1 scan's manifest `drive.idle_V` has EO2 at the
+idle; outputs off at the end; `attribution: "sideways"` refused by
+`optical_settings`. `joint_before: false` -> no `_before` folder and
+`verdict_before` None. [11] and [12] unchanged.
+
+## 6. Optical tab, solo play (agent D: `ilc_gui.py`, `tests/smoke_test.py`, `WORKFLOW_GUI.md`)
+
+- Step 1: a radio `play: both | X1 alone | X2 alone` (`self.optplay_var`,
+  values "both" / "X1" / "X2") beside the button, now "Play (outputs ON)".
+  `_opt_play_work(ss, wires, which)`: the driving session(s)' keepers as
+  today; the parked partner gets `optical.park_drive(partner.u)` uploaded as
+  `optical.PARK_NAMES[partner]`, `self._pair_playing[partner] =
+  dict(wname=<that name>, u=<parked>, parked=True)`; `self._opt["playing"] =
+  which`; the done text says what plays ("X1 keeper S47E2X1_i12, X2 parked
+  (PARK2)").
+- `_opt_prereq`: steps 2 and 6 want the outputs ON and the AWG holding, for
+  each chain, its session's current u (driving) or its park drive (parked);
+  step 6 also wants `playing == "both"` ("Verify needs both playing: step 1
+  with 'both', or Learn").
+- Step 2: the default name ends in `_X1` / `_X2` when playing solo
+  (`_opt_default_name`); the scan's drives come from `_pair_playing` as
+  today (the parked one included).
+- Step 3: `solo = playing if playing != "both" else None` passed to
+  `optical.compare`; the missing-file check expects only the driving
+  crystal's file. `self._opt["files"]` ACCUMULATES: a joint compare sets
+  both, a solo compare sets its crystal's and keeps the other's;
+  `self._opt["files_from"] {EOn: scan name}`. `_opt_scan_done` keeps `files`
+  / `files_from`; `_opt_reset` clears them. Only a JOINT compare sets
+  `o["before"]` (the verify table's before). Done text: "EO1 15.1 V (from
+  S47E2_opt1_X1); EO2 from S47E2_opt1_X2 held".
+- Step 4, now "Apply to the targets": applies every file in
+  `self._opt["files"]` (one or two) to its chain; a refusal puts back what
+  was done in this press and nothing is saved (as today); the log says which
+  crystal's file came from which scan.
+- Step 5: as today; on completion `self._opt["playing"] = "both"` (the pair
+  loop uploads both keepers).
+- Step 6: joint (solo None) as today. Without a joint before (`o["before"]`
+  None, a solo-only flow) the table is skipped with a log line and the
+  verdict lines are printed; `o["before"]` then becomes this verdict.
+- The state line shows the play mode ("playing both" / "X1 alone, X2
+  parked") and the files held ("corrections: EO1 from ..._X1, EO2 from
+  ..._X2").
+- `_plot_optical` works unchanged on a solo summary.
+- Smoke block [60] (standalone, [58]'s stubs and simulated devices; do NOT
+  start a comment line inside it with `# [NN]`): play X1 alone -> the AWG
+  log shows the X1 keeper on CH1 and `PARK2` on CH2, `_pair_playing["X2"]`
+  parked; scan (name ends `_X1`); compare -> files EO1 only, state line says
+  so, `before` still None; Verify refused (playing solo); play X2 alone ->
+  `PARK1` on CH1; scan (`_X2`); compare -> files both, EO1's kept; apply ->
+  both targets moved, one optical layer each, log names both scans; learn 1
+  -> playing both; verify -> joint, no table but the verdict logged; off ->
+  both OFF. [58] passes unchanged (`tests\smoke_block.py 58 60`).
+- `WORKFLOW_GUI.md`: the Optical tab section gains the radio and the solo
+  flow (1 X1 alone, 2, 3; 1 X2 alone, 2, 3; 4; 5; 6; 7).
+
+Both agents: a worktree each, CRLF files, `git add` by name, one commit
+each (what and why, one paragraph; end with the Co-Authored-By line the
+session prints), no push; `tests\run_all.py -q` green at the end (the
+targets folder is on OneDrive by default; Anaconda python). Nothing of this
+has run on hardware.
