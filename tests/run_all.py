@@ -8,8 +8,8 @@ root and scratch folder, so they do not share state); the batch-GUI suite
 runs after the library batch suite in its own lane, because its "Stop
 mid-campaign" block is timing-sensitive and ran into trouble when the smoke
 suite shared the machine with it. The targets folder (the 28 Sep ramp
-suite's) is needed by the two batch suites; without it they are skipped and
-say so. Exit code 1 when anything failed.
+suite's) is needed by the two batch suites, optical and tools; without it
+they are skipped and say so. Exit code 1 when anything failed.
 
 Lanes (12 Oct 2026, this PC, Anaconda python):
   smoke      ~60-80 s with lazy canvas drawing (was ~300 s)
@@ -17,6 +17,8 @@ Lanes (12 Oct 2026, this PC, Anaconda python):
   library    corrections, diagnostics, monitor, polarimetry, rin, scope files,
              protocol -- a few seconds each; optical (~10 s, the simulated
              polarimeter: needs the ramp-polarimeter checkout and the targets)
+             tools (~12 s alone, the spin-echo target builder and card split:
+             needs the targets)
 """
 import os
 import subprocess
@@ -41,7 +43,8 @@ LANES = {
                 ("scope-files", "tests/test_scope_files.py", []),
                 ("protocol", "tests/test_protocol.py", []),
                 ("protocol-sr760", "tests/test_protocol_sr760.py", []),
-                ("optical", "tests/test_optical.py", ["TARGETS"])],
+                ("optical", "tests/test_optical.py", ["TARGETS"]),
+                ("tools", "tests/test_tools.py", ["TARGETS"])],
 }
 PASS_MARKS = ("ALL CHECKS PASSED", "failure(s)", "CHECKS PASSED", "checks passed", "scope files OK",
               "All 87 checks", "All 56 checks", "All 41 checks")
