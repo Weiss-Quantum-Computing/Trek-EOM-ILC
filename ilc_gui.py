@@ -1186,6 +1186,7 @@ class App:
                  batch_follow=self.batchfollow_var.get(),
                  batch_follow_ch=self.batchfollowch_var.get(),
                  pair=bool(self.pair_var.get()),
+                 echo=dict(self.cfg.get("echo", {})),
                  optical={k: v.get() for k, v in self._opt_vars.items()})
         if self._batch_win is not None:
             c["batch_geometry"] = self._batch_win.win.winfo_geometry()
@@ -1286,6 +1287,10 @@ class App:
         b = ttk.Button(sf, text="Plot", command=self.do_preview_target)
         b.grid(row=0, column=4, padx=2)
         self._actions.append(b)
+        b = ttk.Button(sf, text="Echo...", command=self.do_echo_dialog)
+        b.grid(row=0, column=5, padx=2)
+        self._actions.append(b)
+        self._echo_win = None
         ch0 = self.cfg.get("channel", "EO1")
         self.channel_var = tk.StringVar(value=ch0 if ch0 in CHANNELS else "EO1")
         self.stem_var = tk.StringVar(value=self.cfg.get("stem", ""))
@@ -3853,6 +3858,95 @@ class App:
             side="left", fill="x", expand=True)
         ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(
             side="left", padx=(4, 0))
+
+    # ---- spin echo: both transports of a suite target in one record ------
+    def do_echo_dialog(self):
+        """Build target_<stem>E2X1/X2.csv from a one-transport pair
+        (eomilc.echo): the source's lead, the transport, idle until the next
+        leg starts one spacing after the first, the transport again, a tail.
+        The Target box then holds the new X1 file and the stem its name, so
+        Init (pair mode) trains both legs in one campaign. The same builder
+        serves tools/make_echo_target.py and a batch campaign's "echo" key."""
+        fr = self._dialog("_echo_win", "Spin-echo record from a target pair")
+        if fr is None:
+            return
+        e = self.cfg.get("echo", {}) if isinstance(self.cfg.get("echo"), dict) else {}
+        src = self.target_var.get().strip()
+        v = dict(source=tk.StringVar(value=src),
+                 spacing=tk.StringVar(value=str(e.get("spacing_ms", "16.667"))),
+                 legs=tk.StringVar(value=str(e.get("legs", "2"))),
+                 tail=tk.StringVar(value=str(e.get("tail_us", "200"))),
+                 suffix=tk.StringVar(value=str(e.get("suffix", ""))),
+                 out=tk.StringVar(value=str(e.get("out", ""))))
+        self._echo_vars = v
+        g = ttk.Frame(fr); g.pack(fill="x")
+        self._path_row(g, 0, "Source X1", v["source"],
+                       lambda: self._browse(v["source"], "Target CSV", "target_*X1.csv",
+                                            os.path.dirname(src) if src else os.path.join(HERE, "waveforms")))
+        self._path_row(g, 1, "Write to", v["out"],
+                       lambda: v["out"].set(filedialog.askdirectory(
+                           parent=self._echo_win, title="Folder for the echo targets",
+                           initialdir=v["out"].get() or os.path.dirname(v["source"].get()) or HERE)
+                           or v["out"].get()))
+        g.columnconfigure(1, weight=1)
+        r = ttk.Frame(fr); r.pack(fill="x", pady=(3, 0))
+        for lab, key, w in (("leg spacing ms", "spacing", 8), ("legs", "legs", 3),
+                            ("tail us", "tail", 5), ("suffix", "suffix", 5)):
+            ttk.Label(r, text=lab).pack(side="left", padx=(0, 2))
+            ttk.Entry(r, textvariable=v[key], width=w).pack(side="left", padx=(0, 8))
+        ttk.Label(fr, foreground="#666666", wraplength=470, justify="left", text=(
+            "X2's source is the same name with X2, beside X1's. Leg spacing is "
+            "leg start to leg start (the experiment's echo time; it is rounded to "
+            "the record's grid). Suffix blank = E<legs>; the files are "
+            "target_<stem><suffix>X1/X2.csv, in the source's folder unless "
+            "Write to is set. The stem must stay within the pair mode's "
+            f"{NAME_LIMIT - 6} characters. The log gets the record's numbers, "
+            "the card pause between legs and the limit check per channel.")).pack(
+            fill="x", pady=(4, 0))
+        bf = ttk.Frame(fr); bf.pack(fill="x", pady=(6, 0))
+        b = ttk.Button(bf, text="Build + check", command=self._echo_build)
+        b.pack(side="left", fill="x", expand=True)
+        self._actions.append(b)
+        ttk.Button(bf, text="Close", command=self._echo_win.destroy).pack(side="left", padx=(4, 0))
+
+    def _echo_build(self):
+        """The dialog's button: build, check, put the new X1 in the Target
+        box and its name in the stem box, plot it."""
+        from eomilc import echo
+        v = self._echo_vars
+        src = v["source"].get().strip()
+        if not os.path.exists(src):
+            return messagebox.showerror("Spin-echo record", f"source not found: {src!r}",
+                                        parent=self._echo_win)
+        try:
+            spacing, legs, tail = float(v["spacing"].get()), int(float(v["legs"].get())), float(v["tail"].get())
+        except ValueError:
+            return messagebox.showerror("Spin-echo record", "spacing, legs and tail must be numbers",
+                                        parent=self._echo_win)
+        suffix = v["suffix"].get().strip() or None
+        out = v["out"].get().strip() or None
+        self.log(f"spin-echo record from {os.path.basename(src)}: {legs} legs, {spacing:g} ms spacing")
+        try:
+            r = echo.make([src], spacing_ms=spacing, legs=legs, tail_us=tail, suffix=suffix,
+                          out_dir=out, log=lambda s: self.log("  " + s))
+        except (ValueError, OSError) as e:
+            self.log(f"  REFUSED: {e}")
+            return messagebox.showerror("Spin-echo record", str(e), parent=self._echo_win)
+        self.cfg["echo"] = dict(spacing_ms=spacing, legs=legs, tail_us=tail,
+                                suffix=v["suffix"].get().strip(), out=v["out"].get().strip())
+        if "X2" not in r["files"]:
+            self.log("  NOTE: no X2 source beside the X1 file; only X1's record was written "
+                     "(pair mode needs both)")
+        self.target_var.set(r["files"].get("X1") or next(iter(r["files"].values())))
+        self.stem_var.set(r["name"])
+        if not r["ok"]:
+            messagebox.showerror("Spin-echo record",
+                                 "written, but a check FAILED -- see the log", parent=self._echo_win)
+        elif r["notes"]:
+            messagebox.showwarning("Spin-echo record", "written; " + "; ".join(r["notes"]),
+                                   parent=self._echo_win)
+        self.do_preview_target(quiet=True)
+        return r
 
     def _auto_reload(self):
         try:

@@ -197,7 +197,52 @@ def load_plan(path, cfg=None):
     plan["settings"] = {k: plan.get("settings", {}).get(k) or DEFAULT_SETTINGS[k] for k in DEFAULT_WIRING}
     if not plan.get("campaigns"):
         raise SystemExit(f"{path}: no campaigns")
+    plan["_echo_notes"] = echo_records(plan)
     return plan
+
+
+def echo_records(plan, log=None):
+    """A campaign with an "echo" key trains a spin-echo record built from its
+    stem's one-transport pair (eomilc.echo): {"stem": "S47", "echo":
+    {"spacing_ms": 16.667, "legs": 2, "tail_us": 200, "suffix": "E2"}} writes
+    target_S47E2X1/X2.csv into the targets folder (left alone when already
+    there and identical) and the campaign goes on under the stem S47E2, its
+    AWG name cut to 5 characters as build_plan does. Returns the notes for
+    the dry run; a source that cannot be used leaves the campaign's stem as it
+    was, so plan_rows reports the campaign with its error."""
+    from eomilc import echo
+    notes = []
+    for camp in plan["campaigns"]:
+        e = camp.get("echo")
+        if not e or camp.get("_echo"):
+            continue
+        src = camp["stem"]
+        x1 = os.path.join(plan["_targets_dir"], f"target_{src}X1.csv")
+        x2 = os.path.join(plan["_targets_dir"], f"target_{src}X2.csv")
+        quiet = []
+        try:
+            r = echo.make([x1, x2], spacing_ms=float(e.get("spacing_ms", 16.667)), legs=int(e.get("legs", 2)),
+                          tail_us=float(e.get("tail_us", 200.0)), suffix=e.get("suffix"),
+                          out_dir=plan["_targets_dir"], log=quiet.append, do_check=False)
+        except (ValueError, OSError) as exc:
+            notes.append(f"{src}: echo record NOT built: {exc}")
+            camp["_echo"] = dict(error=str(exc), source=src)
+            continue
+        camp["_echo"] = dict(source=src, name=r["name"], files=r["files"], written=r["written"],
+                             spacing_ms=r["rec"]["spacing_ms"], legs=r["rec"]["legs"],
+                             legs_ms=r["rec"]["legs_ms"], n=r["rec"]["n"], pause_ms=echo.pause_ms(r["rec"]))
+        camp["stem"] = r["name"]
+        if len(r["name"]) + 2 > 7 and not camp.get("awg"):
+            camp["awg"] = r["name"][:5]
+        notes.append(f"{r['name']}: spin echo of {src}, {r['rec']['legs']} legs at "
+                     + ", ".join(f"{x:.3f}" for x in r["rec"]["legs_ms"])
+                     + f" ms (spacing {r['rec']['spacing_ms']:.3f} ms), {r['rec']['n']} pts; card pause "
+                     f"{echo.pause_ms(r['rec']):.3f} ms; "
+                     + ("written" if any(r["written"].values()) else "already there")
+                     + (f"; AWG name {camp['awg']}" if camp.get("awg") else ""))
+        if log:
+            log("  " + notes[-1])
+    return notes
 
 
 def repo_path(p):
@@ -1388,6 +1433,8 @@ def dry_run(plan, log=print):
         log(f"wiring {k}: AWG CH{w['awg_ch']} -> monitor CH{w['mon_ch']}, {rb}")
     for n in plan.get("_wiring_notes", []):
         log(f"  note: {n}")
+    for n in plan.get("_echo_notes", []):
+        log(f"echo {n}")
     for k in ("X1", "X2"):
         try:
             log(model_line(plan, k))

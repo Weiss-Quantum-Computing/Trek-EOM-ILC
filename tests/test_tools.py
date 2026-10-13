@@ -126,6 +126,25 @@ def main():
         except ValueError as e:
             check("2 transports" in str(e), f"B2S25 (already two transports) refused: {str(e)[:50]}")
 
+        print("[2b] eomilc.echo.make: the library behind the tool, the panel's Echo... and the batch's echo key")
+        from eomilc import echo
+        tmp2 = os.path.join(tmp, "lib")
+        quiet = []
+        r = echo.make([tgt("S47", "X1")], spacing_ms=16.667, out_dir=tmp2, log=quiet.append)
+        check(sorted(r["files"]) == ["X1", "X2"] and r["name"] == "S47E2" and r["ok"] and not r["notes"],
+              "a lone X1 finds its X2 beside it; S47E2, both checks pass, no notes")
+        check(all(r["written"].values()) and open(r["files"]["X1"], newline="").read() == open(x1, newline="").read(),
+              "the library writes the file the command line wrote, byte for byte")
+        r2 = echo.make([tgt("S47", "X1")], spacing_ms=16.667, out_dir=tmp2, log=quiet.append, do_check=False)
+        check(not any(r2["written"].values()) and any(m.startswith("unchanged") for m in quiet),
+              "an identical file on disk is left alone (the batch rebuilds at every plan load)")
+        check(abs(echo.pause_ms(r["rec"]) - 5.856) < 1e-9 and any("pause between legs 5.856 ms" in m for m in quiet),
+              f"card pause {echo.pause_ms(r['rec']):.3f} ms = spacing - (up + card hold + down), logged")
+        r3 = echo.make([tgt("S47", "X1")], spacing_ms=16.667, out_dir=tmp2, suffix="ECHO2", log=quiet.append,
+                       do_check=False)
+        check(r3["name"] == "S47ECHO2" and r3["notes"] and "8 characters" in r3["notes"][0],
+              f"a long suffix is written with a note: {r3['notes'][0]}")
+
         print("[3] split_for_card: the E2 record, as a synthetic drive pair (target / 560)")
         d1 = as_drive(x1, os.path.join(tmp, "drive_S47E2X1.csv"))
         d2 = as_drive(x2, os.path.join(tmp, "drive_S47E2X2.csv"))

@@ -558,14 +558,23 @@ learned on a rested crystal. So train both legs in ONE record at the echo's
 spacing (leg start to leg start, 16.667 ms by default), and the loop learns
 leg 2 in the state leg 1 leaves behind.
 
-Build the pair from a one-transport suite target:
+Build the pair from a one-transport suite target, three ways over one builder
+(`eomilc.echo`): the panel's **Echo...** beside the Target box (Session tab;
+it then holds the new X1 and the stem, ready for a pair Init), the command
+line
 
 ```powershell
-C:\ProgramData\anaconda3\python.exe tools\make_echo_target.py <suite>\targets\target_S47X1.csv <suite>\targets\target_S47X2.csv --spacing-ms 16.667
+C:\ProgramData\anaconda3\python.exe tools\make_echo_target.py <suite>\targets\target_S47X1.csv --spacing-ms 16.667
 ```
 
-(`[--legs 2] [--tail-us 200] [--suffix E2] [--out DIR]`; the default folder is
-the source's.) The transport is where the target is above 0.1 % of its max,
+(`[target_S47X2.csv] [--legs 2] [--tail-us 200] [--suffix E2] [--out DIR]`; a
+lone X1 takes its X2 from beside it; the default folder is the source's), or
+a batch campaign's `"echo"` key, `{"stem": "S47", "echo": {"spacing_ms":
+16.667, "legs": 2, "tail_us": 200, "suffix": "E2"}}`: the record is built into
+the plan's targets folder when the plan loads (an identical file already there
+is left alone), the campaign goes on as `S47E2` (its AWG name cut to 5
+characters as `make-plan` does), and the dry run prints the record's legs,
+points and card pause. The transport is where the target is above 0.1 % of its max,
 widened to the whole ramp (S47: 200..10612 us). The record is the source's
 lead, transport 1, idle until leg 2 starts one spacing after leg 1, transport
 2, the tail -- the same 2 us grid on both channels, the spacing rounded to it

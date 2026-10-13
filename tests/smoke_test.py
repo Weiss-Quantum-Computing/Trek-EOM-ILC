@@ -2558,6 +2558,91 @@ print("[58] optical tab: refused without a pair and out of order; 1 plays both k
       "layer, Corrections list shows it; 5 learns 2 iterations with no output event; 6 verifies "
       "(finite before/after, status verdict); 7 both OFF")
 
+# [59] Spin-echo record from the Session tab (13 Oct 2026): Echo... beside the
+# Target box builds target_<stem><suffix>X1/X2.csv from a one-transport pair
+# (eomilc.echo, the same builder as tools/make_echo_target.py and a batch
+# campaign's "echo" key), checks both channels, and leaves the new X1 in the
+# Target box with its name in the stem box. A generated pair in SCRATCH, as
+# block 57's (NOT named '[57]' at a line start: the block runner's regex would
+# cut this block there). Dialogs stubbed and put back; stands alone
+# (smoke_block.py 59).
+_mb59 = ilc_gui.messagebox
+_saved59 = (_mb59.showerror, _mb59.showwarning, _mb59.showinfo)
+_said59 = []
+_mb59.showerror = lambda title, msg, **k: _said59.append(("error", msg))
+_mb59.showwarning = lambda title, msg, **k: _said59.append(("warning", msg))
+_mb59.showinfo = lambda title, msg, **k: _said59.append(("info", msg))
+try:
+    _tus = np.arange(5501) * 2.0
+    _ramp = np.clip(np.minimum((_tus - 500) / 3000, (10500 - _tus) / 3000), 0, 1)
+    _v59 = 5000 * 0.5 * (1 - np.cos(np.pi * _ramp))
+    _d59 = os.path.join(SCRATCH, "echo59")
+    os.makedirs(_d59, exist_ok=True)
+    for _k in ("X1", "X2"):
+        np.savetxt(os.path.join(_d59, f"target_ECHO{_k}.csv"), np.c_[_tus, _v59 * (1.0 if _k == "X1" else 0.9)],
+                   delimiter=",", header="time_us,voltage_V", comments="", fmt="%.6g")
+    app.target_var.set(os.path.join(_d59, "target_ECHOX1.csv"))
+    app.do_echo_dialog()
+    root.update()
+    assert app._echo_win.winfo_exists() and app._echo_vars["source"].get().endswith("target_ECHOX1.csv")
+    assert app._echo_vars["spacing"].get() == "16.667" and app._echo_vars["legs"].get() == "2"
+    assert app.do_echo_dialog() is None and app._echo_win.winfo_exists()      # one at a time: lifted
+    # a spacing shorter than the transport is refused, nothing written
+    app._echo_vars["spacing"].set("5")
+    _n0 = len(app.log_text.get("1.0", "end"))
+    assert app._echo_build() is None and _said59[-1][0] == "error" and "not longer than the transport" in _said59[-1][1]
+    assert not glob.glob(os.path.join(_d59, "target_ECHOE2*"))
+    # 12 ms spacing: the transport is the first to last sample OFF the idle,
+    # 502..10498 us (500 and 10500 are exact zeros), so lead 251 pts | 4999 |
+    # idle to 6251 | 4999 | tail 100: 11350 pts, legs at 0.502 and 12.502 ms
+    app._echo_vars["spacing"].set("12")
+    _r59 = app._echo_build()
+    root.update()
+    assert _r59 is not None and _r59["ok"] and sorted(_r59["files"]) == ["X1", "X2"]
+    assert os.path.exists(os.path.join(_d59, "target_ECHOE2X1.csv")) and os.path.exists(os.path.join(_d59, "target_ECHOE2X2.csv"))
+    assert _r59["rec"]["n"] == 251 + 6000 + 4999 + 100 and abs(_r59["rec"]["spacing_ms"] - 12.0) < 1e-9, \
+        (_r59["rec"]["n"], _r59["rec"]["spacing_ms"], _r59["rec"]["i0"], _r59["rec"]["span_us"])
+    assert _r59["rec"]["legs_ms"] == [0.502, 12.502]
+    _t59, _y59 = ilc_gui.run_ilc.load_target(os.path.join(_d59, "target_ECHOE2X2.csv"))
+    assert len(_t59) == _r59["rec"]["n"] and abs(_y59.max() - 4.5) < 1e-6      # X2's 4.5 kV, monitor volts
+    assert np.allclose(_y59[251:5250], _y59[6251:11250]) and np.all(_y59[5250:6251] == 0)
+    assert app.target_var.get() == os.path.join(_d59, "target_ECHOE2X1.csv") and app.stem_var.get() == "ECHOE2"
+    # ECHOE2 is 6 characters: over the pair mode's 5 -> a warning, the record still written
+    assert _said59[-1][0] == "warning" and "6 characters" in _said59[-1][1]
+    _log59 = app.log_text.get("1.0", "end")[_n0:]
+    assert "wrote" in _log59 and "check X1 (EO1): PASS" in _log59 and "check X2 (EO2): PASS" in _log59
+    assert "card  : pause between legs" in _log59 and "legs  : 2 at 0.502, 12.502 ms" in _log59
+    assert app.cfg["echo"]["spacing_ms"] == 12.0 and app.cfg["echo"]["legs"] == 2
+    # a 5-character name: no warning; an identical file on disk is left alone
+    app._echo_vars["suffix"].set("E")
+    _said59.clear()
+    _r59 = app._echo_build()
+    root.update()
+    assert _r59["name"] == "ECHOE" and not _said59 and app.stem_var.get() == "ECHOE"
+    _m59 = os.path.getmtime(os.path.join(_d59, "target_ECHOEX1.csv"))
+    _r59b = app._echo_build()
+    assert not any(_r59b["written"].values()) and os.path.getmtime(os.path.join(_d59, "target_ECHOEX1.csv")) == _m59
+    # the batch plan's "echo" key builds the same files from the campaign's stem
+    import ilc_batch as _ib59
+    import json as _json59
+    _plan59 = os.path.join(_d59, "plan.json")
+    _json59.dump({"name": "e59", "targets_dir": _d59, "campaigns": [{"stem": "ECHO", "echo": {"spacing_ms": 12, "suffix": "E"}}]},
+                 open(_plan59, "w"))
+    _p59 = _ib59.load_plan(_plan59, cfg=app.cfg)
+    assert _p59["campaigns"][0]["stem"] == "ECHOE" and _p59["campaigns"][0]["_echo"]["source"] == "ECHO"
+    assert _p59["_echo_notes"] and "already there" in _p59["_echo_notes"][0] and "card pause" in _p59["_echo_notes"][0]
+    _msgs59 = []
+    _ib59.dry_run(_p59, log=_msgs59.append)
+    assert any(m.startswith("echo ECHOE: spin echo of ECHO, 2 legs at 0.502, 12.502 ms") for m in _msgs59)
+    assert any(m.strip().startswith("ECHOE") and "11350 pts" in m for m in _msgs59), _msgs59
+    app._echo_win.destroy()
+finally:
+    _mb59.showerror, _mb59.showwarning, _mb59.showinfo = _saved59
+print("[59] spin-echo record: Echo... dialog refuses a too-short spacing, builds ECHOE2 (11350 pts, "
+      "legs 0.502/12.502 ms, both channels PASS, Target box + stem set, 6-character stem warned), "
+      "ECHOE without a warning, an unchanged file is left alone; the batch's echo key builds the "
+      "same files and the dry run prints the record")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the

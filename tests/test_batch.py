@@ -373,6 +373,36 @@ def main():
         man = ilc_batch.run_batch(plan, args(redo=True, no_optical=True), log=msgs.append, bench=bench(bench_cfg))
         check("optical" not in man["campaigns"]["S25"] and any("skipped (--no-optical)" in m for m in msgs),
               "--no-optical skips the stage")
+
+        print("[13] a campaign's echo key: the spin-echo record is built at plan load, into the targets folder")
+        tdir = os.path.join(tmp, "targets13")
+        os.makedirs(tdir)
+        for k in ("X1", "X2"):
+            shutil.copy(os.path.join(TARGETS, f"target_S47{k}.csv"), tdir)
+        path = os.path.join(tmp, "plan13.json")
+        json.dump({"name": "t13", "targets_dir": tdir, "run_dir": os.path.join(tmp, "run13"),
+                   "campaigns": [{"stem": "S47", "echo": {"spacing_ms": 16.667}},
+                                 {"stem": "S47", "echo": {"spacing_ms": 16.667, "legs": 3, "suffix": "ECHO3"}},
+                                 {"stem": "S25", "echo": {"spacing_ms": 16.667}}]}, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        c1, c2, c3 = plan["campaigns"]
+        check(c1["stem"] == "S47E2" and "awg" not in c1 and os.path.exists(os.path.join(tdir, "target_S47E2X1.csv"))
+              and os.path.exists(os.path.join(tdir, "target_S47E2X2.csv")), "S47 + echo -> S47E2, both files in the targets folder")
+        check(c2["stem"] == "S47ECHO3" and c2["awg"] == "S47EC" and c2["_echo"]["legs"] == 3
+              and os.path.exists(os.path.join(tdir, "target_S47ECHO3X1.csv")), "three legs with a long suffix: AWG name cut to 5")
+        check(c3["stem"] == "S25" and "error" in c3["_echo"] and "not longer than the transport" not in c3["_echo"]["error"],
+              f"a missing source leaves the campaign as it was: {c3['_echo']['error'][:60]}")
+        msgs = []
+        ilc_batch.dry_run(plan, log=msgs.append)
+        check(any(m.startswith("echo S47E2: spin echo of S47, 2 legs at 0.200, 16.868 ms (spacing 16.668 ms), 13741 pts; "
+                               "card pause 5.856 ms; written") for m in msgs), "the dry run names the record and its card pause")
+        check(any(m.startswith("echo S25: echo record NOT built") for m in msgs), "... and the one it could not build")
+        rows = {r["stem"]: r for r in ilc_batch.plan_rows(plan)}
+        check(rows["S47E2"]["n"] == 13741 and abs(rows["S47E2"]["period_ms"] - 27.482) < 1e-6 and rows["S47E2"]["ok"],
+              "S47E2 row: 13741 pts, 27.482 ms, drives within limits")
+        check(rows["S25"]["error"] and "does not exist" in rows["S25"]["error"], "the S25 row reports its missing target")
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        check("already there" in plan["_echo_notes"][0], "a second load finds the files unchanged")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
