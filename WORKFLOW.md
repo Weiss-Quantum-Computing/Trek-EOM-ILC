@@ -455,10 +455,74 @@ histories. Running the plan again skips finished campaigns (`--redo` repeats
 them) and resumes an interrupted one from its states, earlier
 measurements included, so the keeper is chosen from the whole campaign.
 
+**The optical stage.** The loop makes the Trek MONITORS follow the target; the
+light leaves them by 0.7-1.7° at the top of every ramp and 0.3-0.95° in the
+first ms after the fall (8 Oct), which no monitor shows. With an `"optical"`
+block in the plan, at its root or in a campaign (the campaign's keys win;
+`"optical": false` in a campaign switches a root block off for it), a
+campaign goes on after its keepers:
+
+```json
+"optical": {"scan": {"angles": "0:359:22.5", "shots": 8}, "band_hz": 5000,
+            "pd_delay_us": 1.7, "split": 0.5, "gains": [0.7, 1.0],
+            "iterations": 5, "name": "{stem}_opt{pass}"}
+```
+
+Those are the defaults, with `scan.points` 20000, `scan.ref_every` 9,
+`scan.hold_null` true, `scan.settle_s` 1.0, `outdir` `run\optical`, `verify`
+true and `require_keeper` true (no stage when a channel diverged or failed the
+limit check); `cap_v` lowers the gate's 300 V cap at the EOM. Per campaign:
+both keepers play (outputs ON under the same `--allow-output-on`), the
+rotating-analyzer polarimeter scans the light (`<stem>_opt1_before`), the
+comparison writes minus (light − monitors), low-passed to `band_hz`, as a
+correction per crystal, and both TARGETS move by it at `gains[0]`
+(`eomilc.optical.apply_correction`: the Corrections tab's gate and checks;
+both channels or neither). `iterations` iterations of the normal loop learn the
+moved targets, the stop rules applying from the pass's first iteration; then
+a verification scan (`<stem>_opt1`) and its comparison give the after. Pass 2
+applies that verification's correction at `gains[1]` — it REPLACES pass 1's in
+the slot, it never stacks — learns, and verifies again. The keeper is then the
+last measured iteration after the last applied correction, written where the
+electrical keeper would be. A refused correction ends the stage for that
+campaign, recorded, and the campaign keeps the keeper it had. Outputs go OFF at
+the end of the stage. `--dry-run` prints one line per campaign
+(`optical: 2 passes gains 0.7/1.0, 5 iterations each, scan 0:359:22.5 x 8
+shots, band 5 kHz`); `--no-optical` skips the stage for one run.
+
+The states then carry the panel's correction keys (`base_target`,
+`corr_total`, `corrections`), so **Load state** shows the corrected target and
+its layer, and a later comparison is made on the base target. The manifest
+entry gains an `optical` block, also written to `run\optical\<stem>_optical.json`:
+per pass the scan and verification folders, the correction and played-target
+files, per channel what was applied (gain, peak kept at the EOM, fraction
+resolved, status), `verdict_before` / `verdict_after` (`optical.verdict`: per
+leg the ramp-top and after-fall extremes of light − monitors and light −
+target, their spreads, the correction peak per crystal) and the iterations it
+learned. A pass whose verification scan is complete on disk is not repeated
+when an interrupted campaign resumes; an unfinished scan resumes where it
+stopped. On the bench the scan reads through the ILC's own scope, which must
+be **scope-grab-multi** (the headless API): with the old checkout the stage
+stops before switching anything on and the log says how to point `SCOPE_GRAB`
+at the right one. The analyzer is the ELL14 of the polarimeter's config.
+
 Offline, `--simulate` (or **Simulate**) runs a plan against
 `eomilc/simbench.py` (the measured FRFs with a gain and delay error). It writes
 into `run\sim`, never `run\`, so a simulated state cannot be resumed as if it
-had been measured.
+had been measured. The optical stage then scans `rampol.sim`'s polarimeter
+(`optical.open_devices(simulate=True)`), whose only light-only term is a
+0.5° rotator error (`sim_rot_err`). Three things keep the two simulations
+honest with each other: the polarimeter plays what the simbench chains make
+of the drives, divided by its own gain (`sim_bridge`; the raw drives read ~5 %
+off the target in its monitors, ~10° at the top of a parallel shape, because
+`rampol.sim`'s chain is a bare gain); it is cabled PD/MonX1/MonX2 only (its
+command channel is made from its monitor, and a time map of that against the
+learned drive misplaces the target by tens of µs); and the PD delay is 0 µs
+unless the plan sets one (the simulated PD has none). What the closure is seen
+to do there is the spread of light − target falling pass by pass (290 → 189 →
+123 mdeg on S25, 0.7 then 1.0) while light − monitors at the ramp top stays
+(it is the light's own); the ramp-top light − target extreme barely moves,
+being mostly a constant ~−0.5° monitors − target offset of the simulated
+comparison.
 
 Two tests exercise the simulated bench:
 
@@ -467,7 +531,10 @@ Two tests exercise the simulated bench:
   - uploads alternate slots;
   - reruns skip finished campaigns and resume interrupted ones;
   - Stop ends the batch cleanly;
-  - a mis-set generator is refused with nothing switched on.
+  - a mis-set generator is refused with nothing switched on;
+  - the optical stage: two passes, Stop in pass 2 and a resume that does not
+    repeat pass 1, the states' correction keys, and a refused correction
+    leaving the electrical keeper.
 - `tests/test_batch_gui.py <targets>` drives the batch window: plan builder,
   Check plan, Simulate, Stop, the confirmation, following, reopening.
 
