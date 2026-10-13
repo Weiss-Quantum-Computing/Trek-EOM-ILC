@@ -15,7 +15,8 @@ Lanes (12 Oct 2026, this PC, Anaconda python):
   smoke      ~60-80 s with lazy canvas drawing (was ~300 s)
   gui-batch  ~150 s, after test_batch (~60 s)
   library    corrections, diagnostics, monitor, polarimetry, rin, scope files,
-             protocol -- a few seconds each
+             protocol -- a few seconds each; optical (~10 s, the simulated
+             polarimeter: needs the ramp-polarimeter checkout and the targets)
 """
 import os
 import subprocess
@@ -39,7 +40,8 @@ LANES = {
                 ("rin", "tests/test_rin.py", []),
                 ("scope-files", "tests/test_scope_files.py", []),
                 ("protocol", "tests/test_protocol.py", []),
-                ("protocol-sr760", "tests/test_protocol_sr760.py", [])],
+                ("protocol-sr760", "tests/test_protocol_sr760.py", []),
+                ("optical", "tests/test_optical.py", ["TARGETS"])],
 }
 PASS_MARKS = ("ALL CHECKS PASSED", "failure(s)", "CHECKS PASSED", "checks passed", "scope files OK",
               "All 87 checks", "All 56 checks", "All 41 checks")
