@@ -173,7 +173,15 @@ def make_scope(mod):
     VI_ERROR_ALLOC, which Scope.connect swallows per-candidate and reports
     as 'No Keysight USB instrument found'. Second: Scope.close() closes its
     RM, which must not be the shared one -- see _shared_rm."""
-    scope = mod.Scope()
+    # scope-grab-multi's Scope takes a profile (which instrument it talks
+    # to); the older checkouts take nothing. The profile is the MSO-X unless
+    # SCOPE_MODEL names another key of that module's scope_profiles.
+    prof_mod = getattr(mod, "scope_profiles", None)
+    if prof_mod is not None:
+        key = os.environ.get("SCOPE_MODEL") or getattr(prof_mod, "DEFAULT_PROFILE", "msox2014a")
+        scope = mod.Scope(prof_mod.get_profile(key))
+    else:
+        scope = mod.Scope()
     scope._make_rm = lambda: _shared_rm(mod.pyvisa)
     orig_close = scope.close
 

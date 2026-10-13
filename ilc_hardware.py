@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -106,17 +107,29 @@ def check_awg(awgmod):
                 pass
             frq = name = None
             try:
+                # read_channel gives the raw replies: BSWV is
+                # "C1:BSWV WVTP,ARB,FRQ,90.893HZ,AMP,20V,..." and ARWV
+                # "C1:ARWV INDEX,50,NAME,S92PX1B_i15"; the simulated
+                # generator answers with dicts
                 rc = awg.read_channel(ch)
                 b = rc.get("BSWV", rc) if isinstance(rc, dict) else {}
-                frq = b.get("FRQ") if isinstance(b, dict) else None
+                if isinstance(b, dict):
+                    frq = b.get("FRQ")
+                elif isinstance(b, str):
+                    m = re.search(r"FRQ,([-+0-9.eE]+)", b)
+                    frq = m.group(1) if m else None
+                a = rc.get("ARWV") if isinstance(rc, dict) else None
+                if isinstance(a, str) and "NAME," in a:
+                    name = a.split("NAME,")[-1].split(",")[0].strip()
             except Exception:
                 pass
-            try:
-                name = str(awg.query(f"C{ch}:ARWV?")).strip()
-                if "NAME," in name:
-                    name = name.split("NAME,")[-1].split(",")[0]
-            except Exception:
-                pass
+            if name is None:
+                try:
+                    name = str(awg.query(f"C{ch}:ARWV?")).strip()
+                    if "NAME," in name:
+                        name = name.split("NAME,")[-1].split(",")[0]
+                except Exception:
+                    pass
             txt = f"CH{ch} {'ON' if on else 'OFF' if on is not None else '?'}"
             if frq is not None:
                 try:
