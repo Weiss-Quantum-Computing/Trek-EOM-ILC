@@ -454,6 +454,38 @@ def _base_state(path, outdir):
     return out
 
 
+PARK_NAMES = {"X1": "PARK1", "X2": "PARK2"}      # the AWG arb names of the parked drives
+
+
+def park_drive(u):
+    """The drive that parks a channel while the OTHER crystal is scanned
+    alone (13 Oct 2026): flat at the record's idle (the drive's first
+    sample), the same length, so FRQ, the record and the trigger stay as
+    they are and the output stays ON (an output is never switched off to
+    park: the AWG / Trek rule)."""
+    u = np.asarray(u, float)
+    return np.full_like(u, u[0])
+
+
+def parked_state(path, outdir):
+    """A copy of an ILC state whose target and drive are flat at their idle:
+    what compare() hands the polarimeter for the crystal that was PARKED
+    during a solo scan. rampol.ilc_target reads a flat target as "parked"
+    and attributes the whole correction to the other crystal. Written as
+    parked_<state>.npz in the comparison folder."""
+    z = np.load(path, allow_pickle=True)
+    os.makedirs(outdir, exist_ok=True)
+    out = os.path.join(outdir, "parked_" + os.path.basename(path))
+    if not out.endswith(".npz"):
+        out += ".npz"
+    tgt = np.asarray(z["base_target"] if "base_target" in z.files else z["target"], float)
+    np.savez(out, t=z["t"], target=np.full_like(tgt, tgt[0]), u=park_drive(z["u"]),
+             name=z["name"], channel=z["channel"],
+             dt=z["dt"] if "dt" in z.files else float(np.median(np.diff(z["t"]))),
+             source=os.path.abspath(path), parked=True)
+    return out
+
+
 def _read_played(path):
     rows = []
     with open(path, encoding="utf-8") as fh:
@@ -521,7 +553,7 @@ def _extremes(summary, folder, sg, played, band_hz, pd_delay_us, lock_tol=0.006)
 
 
 def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0.5,
-            log=print, figs=True, extremes=True):
+            log=print, figs=True, extremes=True, solo=None):
     """rampol.ilc_target.compare on a scan, the leg gap past the record (one
     leg). x1_state / x2_state: the ILC states (drive_*.state.npz) for EO1 and
     EO2 - their BASE target when they carry one. Returns compare's summary
@@ -530,7 +562,18 @@ def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0
     with extremes=True, "extremes" (the per-leg numbers verdict reads, from
     the whole record). figs: compare's fig1-5 (matplotlib's Agg backend is
     selected for pyplot in this process; the panel draws on Figure objects,
-    which it does not touch)."""
+    which it does not touch).
+
+    solo "X1" / "X2" (13 Oct 2026): the scan was taken with that crystal
+    driving alone and the other PARKED (park_drive on its channel). The
+    parked crystal's state goes to the polarimeter as a flat copy
+    (parked_state), which attributes the whole light - monitors to the
+    driving crystal (split 1 / 0, whatever `split` says), and "files" holds
+    that crystal's correction only. summary["solo"] names it. A solo scan
+    compared WITHOUT solo= would split the one crystal's error over both,
+    so the caller must say which played."""
+    if solo not in (None, "X1", "X2"):
+        raise ValueError(f"solo must be None, 'X1' or 'X2', not {solo!r}")
     _rampol()
     from rampol import ilc_target as it
     pc = _pcfg(None)
@@ -543,9 +586,20 @@ def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0
         if used != orig:
             log(f"  {os.path.basename(orig)} carries a corrected target: compared on its "
                 f"base target ({os.path.basename(used)})")
+    if solo == "X1":
+        x2 = parked_state(x2_state, out)
+        split = 1.0
+    elif solo == "X2":
+        x1 = parked_state(x1_state, out)
+        split = 0.0
+    if solo:
+        log(f"  {solo} drove alone, {'X2' if solo == 'X1' else 'X1'} parked at its idle: the whole "
+            f"correction is {solo}'s")
     summary = it.compare(folder, x1, x2, f_cut=float(band_hz), pd_delay_us=float(pd_delay_us),
                          split=float(split), leg_gap_ms=1e6, scope_grab_path=sg_path,
                          eomilc_path=ROOT, log=log, figs=figs)
+    summary["solo"] = solo
+    keep = {None: ("EO1", "EO2"), "X1": ("EO1",), "X2": ("EO2",)}[solo]
     files, played, by_c = {}, {}, {}
     plays = [p for p in summary["correction"]["files"] if p.endswith("_played.csv")]
     for p in summary["correction"]["files"]:
@@ -553,6 +607,8 @@ def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0
             continue
         c = corrmod.read_correction(p)
         ch = str(c.meta.get("channel", ""))
+        if ch not in keep:
+            continue                      # the parked crystal's file is all zero
         files[ch] = p
         tf = c.meta.get("target_file")
         if not (tf and os.path.exists(str(tf))):

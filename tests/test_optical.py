@@ -216,11 +216,7 @@ def main():
         check(optical._base_state(cr.state_path, tmp) == cr.state_path,
               "an uncorrected state is used as it is")
         optical.close_devices(dev)
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        fails.append("exception")
-        print("\n".join("    | " + m for m in msgs[-15:]))
+
         print("[6] a record with two transports (a spin echo's legs) is read per transport")
         import subprocess
         etmp = os.path.join(tmp, "echo")
@@ -271,6 +267,55 @@ def main():
             c = corrmod.read_correction(es["files"][ch])
             check(len(c.delta) == len(et), f"{ch}: one correction over the whole {len(et)}-point record")
         optical.close_devices(edev)
+
+        print("[7] one crystal alone, the other parked: the correction is attributed to it")
+        pk = optical.park_drive(runs["X2"].u)
+        check(len(pk) == len(runs["X2"].u) and np.all(pk == runs["X2"].u[0]),
+              "park_drive: flat at the drive's first sample, same length")
+        sdev = optical.open_devices(None, cfg, log=log, simulate=True, pcfg={})
+        sdev.sim.rot_err = 0.5
+        optical.sim_play(sdev, {"EO1": runs["X1"].u, "EO2": pk}, dt=dt)
+        sfolder = optical.scan(sdev, scans, f"{STEM}_solo1_X1", t, log=log, angles="0:359:45", shots=2)
+        try:
+            optical.compare(sfolder, runs["X1"].state_path, runs["X2"].state_path, solo="both", log=log)
+            check(False, "a bad solo value is refused")
+        except ValueError as e:
+            check("solo must be" in str(e), "a bad solo value is refused")
+        ss = optical.compare(sfolder, runs["X1"].state_path, runs["X2"].state_path, band_hz=5000.0,
+                             pd_delay_us=0.0, split=0.5, log=log, figs=False, solo="X1")
+        check(ss["solo"] == "X1" and ss["driven"] == ["X1"] and ss["correction"]["split_X1"] == 1.0,
+              "solo X1: the comparison knows, split forced to 1")
+        check(set(ss["files"]) == {"EO1"} and os.path.exists(ss["files"]["EO1"]),
+              "files: EO1's correction only")
+        pk_state = os.path.join(sfolder, "analysis", "target_compare",
+                                "parked_" + os.path.basename(runs["X2"].state_path))
+        with np.load(pk_state, allow_pickle=True) as z:
+            check(bool(z["parked"]) and np.ptp(z["target"]) == 0 and np.ptp(z["u"]) == 0,
+                  "the parked state handed to the polarimeter is flat")
+        check(any("X1 drove alone" in m for m in msgs) and any("X1 alone" in m and "parked" in m for m in msgs),
+              "both layers log the solo attribution")
+        sv = optical.verdict(ss)
+        check(finite(sv) and sv["correction"]["crystals"]["EO2"]["peak_V"] == 0.0
+              and sv["correction"]["crystals"]["EO1"]["peak_V"] > 0.5,
+              f"verdict: EO1 {sv['correction']['crystals']['EO1']['peak_V']:.1f} V, EO2 0 V")
+        lp = runs["X1"].loop
+        before = np.array(lp.target, float)
+        a = optical.apply_correction(lp, runs["X1"].t, runs["X1"].u, runs["X1"].full_scale, ss["files"]["EO1"],
+                                     base_target=applied["X1"].base_target, layers=applied["X1"].layers)
+        check(np.max(np.abs(a.target - before)) > 0, "EO1's solo correction applies to X1's loop")
+        # the other way round: X2 alone
+        optical.sim_play(sdev, {"EO1": optical.park_drive(runs["X1"].u), "EO2": runs["X2"].u}, dt=dt)
+        sfolder2 = optical.scan(sdev, scans, f"{STEM}_solo1_X2", t, log=log, angles="0:359:45", shots=2)
+        ss2 = optical.compare(sfolder2, runs["X1"].state_path, runs["X2"].state_path, band_hz=5000.0,
+                              pd_delay_us=0.0, log=log, figs=False, solo="X2")
+        check(ss2["solo"] == "X2" and set(ss2["files"]) == {"EO2"} and ss2["correction"]["split_X1"] == 0.0
+              and finite(optical.verdict(ss2)), "solo X2: EO2's file only, finite verdict")
+        optical.close_devices(sdev)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        fails.append("exception")
+        print("\n".join("    | " + m for m in msgs[-15:]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
