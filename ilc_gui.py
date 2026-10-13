@@ -72,6 +72,7 @@ from eomilc import channels as chanmap   # scope channel ROLES, shared with the 
 from eomilc import diagnostics as dg     # per-measurement stats, folds, floors
 import matplotlib.dates as mdates
 import ilc_bench            # the debugged bench helpers; main() is guarded
+import ilc_hardware         # the Hardware tab's device checks
 import ilc_batch            # batch runs: X1 + X2 together, a list of targets
 import run_ilc              # load_target and the state-file conventions
 
@@ -1187,14 +1188,16 @@ class App:
         self.lnb = ttk.Notebook(left)
         self.lnb.pack(fill="x")
         self._tabs = {}
-        for key, label in (("session", "Session"), ("model", "Model"),
-                           ("scope", "Scope"), ("run", "Run"),
-                           ("corr", "Corrections")):
+        for key, label in (("hw", "Hardware"), ("session", "Session"),
+                           ("model", "Model"), ("scope", "Scope"),
+                           ("run", "Run"), ("corr", "Corrections")):
             fr = ttk.Frame(self.lnb, padding=2)
             self.lnb.add(fr, text=label)
             self._tabs[key] = fr
         tab_session, tab_model = self._tabs["session"], self._tabs["model"]
         tab_measure, tab_run = self._tabs["scope"], self._tabs["run"]
+        self._actions = []           # every button a running worker disables
+        self._build_hw_tab(self._tabs["hw"])
 
         # ---- session: two paths, resume or start ----------------------
         rf = ttk.LabelFrame(tab_session, text="Resume a campaign", padding=3)
@@ -1206,7 +1209,7 @@ class App:
                                  "*.state.npz", RUN_DIR))
         b = ttk.Button(rf, text="Load state", command=self.do_load)
         b.grid(row=0, column=3, padx=2)
-        self._actions = [b]
+        self._actions.append(b)
         rf.columnconfigure(1, weight=1)
 
         sf = ttk.LabelFrame(tab_session, text="New campaign", padding=3)
@@ -1801,6 +1804,77 @@ class App:
         ysb.pack(side="right", fill="y")
         tv.pack(side="left", fill="both", expand=True)
         self.table = tv
+
+    # ------------------------------------------------------------ hardware
+    HW_ROWS = (("scope", "Scope", "MSO-X: identity, acquisition mode, window, V/div"),
+               ("awg", "AWG", "4063B: identity, each output ON/OFF, FRQ, waveform"),
+               ("ell14", "ELL14", "analyzer mount (polarimeter's): identity, position"),
+               ("ds345", "DS345", "light gate (polarimeter's): identity, address"))
+
+    def _build_hw_tab(self, parent):
+        """One look at the rack. Each check opens the device, asks its
+        identity and how it stands, and closes it again; nothing is moved
+        or programmed. The mount and the DS345 are the polarimeter's: their
+        port and address come from its config, and while its window is open
+        they report 'in use'."""
+        f = ttk.LabelFrame(parent, text="Devices (opened, asked, closed)", padding=3)
+        f.pack(fill="x", pady=(0, 2))
+        self.hw_status, self.hw_time = {}, {}
+        for i, (key, name, what) in enumerate(self.HW_ROWS):
+            ttk.Label(f, text=name, width=7).grid(row=i, column=0, sticky="w", pady=1)
+            self.hw_status[key] = ttk.Label(f, text="not checked", foreground="#666666",
+                                            wraplength=330, justify="left")
+            self.hw_status[key].grid(row=i, column=1, sticky="w", padx=(0, 6))
+            self.hw_time[key] = ttk.Label(f, text="", foreground="#999999", width=8)
+            self.hw_time[key].grid(row=i, column=2, sticky="e")
+            b = ttk.Button(f, text="Check", width=7,
+                           command=lambda k=key: self.do_hw_check([k]))
+            b.grid(row=i, column=3, padx=(4, 0))
+            self._actions.append(b)
+        f.columnconfigure(1, weight=1)
+        r = ttk.Frame(parent)
+        r.pack(fill="x", pady=(0, 2))
+        b = ttk.Button(r, text="Check all four", command=lambda: self.do_hw_check(
+            [k for k, _n, _w in self.HW_ROWS]))
+        b.pack(side="left", fill="x", expand=True)
+        self._actions.append(b)
+        ttk.Label(parent, foreground="#666666", justify="left", wraplength=470, text=(
+            "\n".join(f"{name}: {what}" for _k, name, what in self.HW_ROWS)
+            + "\nThe ILC drives the scope and the AWG only. A device held by another "
+              "program (the polarimeter on COM3, Scope Grab on the scope) reports "
+              "'in use'. The Run tab's Bench line keeps the last thing a run reported.")
+        ).pack(fill="x")
+
+    def do_hw_check(self, keys):
+        self.run_worker(lambda: self._hw_check_work(list(keys)),
+                        "checking " + ", ".join(keys) + "...")
+
+    def _hw_check_work(self, keys):
+        pcfg = ilc_hardware.polarimeter_config()
+        mods = None
+        for key in keys:
+            if self.stop_evt.is_set():
+                break
+            try:
+                if key in ("scope", "awg"):
+                    if mods is None:
+                        mods = self._bench_modules()
+                    res = (ilc_hardware.check_scope(mods[0], chanmap.describe(self.cfg).split("\n")[0])
+                           if key == "scope" else ilc_hardware.check_awg(mods[1]))
+                elif key == "ell14":
+                    res = ilc_hardware.check_ell14(self.cfg, pcfg)
+                else:
+                    res = ilc_hardware.check_ds345(self.cfg, pcfg)
+            except Exception as exc:
+                res = dict(ok=False, text=f"check failed: {exc}", detail="")
+            print(f"{key}: {res['text']}" + (("\n   " + res["detail"].replace("\n", "\n   "))
+                                             if res.get("detail") else ""))
+            self.msgs.put(("call", lambda k=key, r=res: self._hw_show(k, r)))
+
+    def _hw_show(self, key, res):
+        self.hw_status[key].configure(text=res["text"],
+                                      foreground="#1b6e1b" if res["ok"] else "#a93a2c")
+        self.hw_time[key].configure(text=ilc_hardware.stamp())
 
     # ------------------------------------------------- scope channel roles
     def _build_channels_frame(self, parent):

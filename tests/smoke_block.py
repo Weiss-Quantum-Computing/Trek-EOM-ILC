@@ -45,8 +45,8 @@ def main(argv):
     app.do_load()
     root.update()
     src = open(os.path.join(HERE, "tests", "smoke_test.py"), encoding="utf-8").read().replace("\r\n", "\n")
-    ns = dict(app=app, root=root, np=np, os=os, glob=glob, SCRATCH=SCRATCH, ilc_gui=ilc_gui,
-              run_ilc=run_ilc, re=re, shutil=shutil, tempfile=tempfile)
+    ns = dict(app=app, root=root, np=np, os=os, glob=glob, SCRATCH=SCRATCH, REPO=HERE,
+              ilc_gui=ilc_gui, run_ilc=run_ilc, re=re, shutil=shutil, tempfile=tempfile)
     rc = 0
     for blk in argv:
         m = re.search(rf"^# \[{re.escape(blk)}\].*?(?=^# \[|^# Figure PNGs)", src, re.S | re.M)

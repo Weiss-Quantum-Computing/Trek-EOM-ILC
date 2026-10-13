@@ -48,6 +48,7 @@ visible.
 |---|---|
 | **Session** | load a state file, or build one: target + channel + name + first-shot gain → Init |
 | **Model** | *Inverse model*: what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, the learning notches, and the FRF band |
+| **Hardware** | one look at the rack: Scope, AWG, ELL14, DS345, each with a **Check** that opens the device, asks its identity and how it stands (acquisition mode and V/div; outputs ON/OFF, FRQ and waveform; mount position; gate address), closes it again, and writes the answer and the time into the row, red when it did not answer. The mount and the DS345 are the polarimeter's: their port and address come from its config, and while its window is open they report "in use". Nothing is moved or programmed. |
 | **Scope** | the *Scope channels* map (which channel is the PD, the monitors, the Trek commands — the polarimeter's roles), the capture settings (`t-offset`, baseline), and the line-ripple switch with its **Line ripple…** dialog |
 | **Run** | the bench flow in order: a *Bench* line (wiring in force, the last thing a run reported about the instruments), **1 Instruments** (Auto-set, Upload), **2 Learn** (iterations, repeats, Run, Stop), **3 Hold**, then **Batch…**, **Manual step…** (one iteration from captures you took) and **Bench settings…** (trigger timeout, the skip/keep ticks, GEN's channel numbers) |
 | **Corrections** | learned target corrections: move the TARGET by an error measured elsewhere (the polarimeter), within limits — §11 |

@@ -1023,6 +1023,9 @@ print("[52] compare status line: names what resolved, counts what did not, "
       "(channel/grid NOTE included)")
 
 # a path entry shows the END of what it holds -- the file name, not the drive
+# (on the Session tab, which is on screen when a person reads it; since the
+# Hardware tab went first the entry is unmapped until then and has no width)
+app.lnb.select(app._tabs["session"]); root.update()
 app.state_var.set(os.path.join(SCRATCH, "a" * 120, "drive_MKJX1.state.npz"))
 root.update_idletasks(); root.update()
 first, last = app.state_entry.xview()
@@ -1813,7 +1816,7 @@ print("[47b] Measure FRF dither: drive, monitor and aux stepped over 3 codes and
 # and Revert puts the base back; a line-ripple fit from captures is
 # subtracted from every measurement once ticked and is saved in the state.
 from eomilc import corrections as _corrmod, mains as _mains
-assert set(app._tabs) == {"session", "model", "scope", "run", "corr"}
+assert set(app._tabs) == {"hw", "session", "model", "scope", "run", "corr"}
 for _fr in app._tabs.values():
     app.lnb.select(_fr)
 root.update()
@@ -2039,6 +2042,47 @@ app._redraw_iterations(); root.update()
 print("[55] diagnostics: fold finds the injected per-code pattern on i0-i2 (>6 sigma) and not later; "
       "sidecar written, read back through recall, V/div from the scope; six Diagnostics views, the "
       "wall-clock convergence, the SEM band, the spectrum floor and the convergence floor all drew")
+
+# [56] Hardware tab (13 Oct 2026): four rows, each check opens / asks /
+# closes and lands in its row with the time, failures in red, and the log
+# carries the detail. The checks themselves are stubbed here (no bench);
+# ilc_hardware.check_awg is exercised on the simulated generator.
+import time
+from eomilc import simbench as _simb
+import ilc_hardware as _ihw
+assert [k for k, _n, _w in app.HW_ROWS] == ["scope", "awg", "ell14", "ds345"]
+_awg, _scope, _mod = _simb.make_bench({1: os.path.join(REPO, "run", "frf_WIDE_X1.csv"),
+                                       2: os.path.join(REPO, "run", "frf_WIDE_X2.csv")})
+_mod_fake = type("M", (), {})()
+_real_make = ilc_gui.ilc_bench.make_awg
+ilc_gui.ilc_bench.make_awg = lambda m: _awg
+try:
+    _r = _ihw.check_awg(_mod_fake)
+finally:
+    ilc_gui.ilc_bench.make_awg = _real_make
+assert _r["ok"] and "CH1 OFF" in _r["text"] and "CH2 OFF" in _r["text"], _r
+_calls = []
+_orig = (_ihw.check_scope, _ihw.check_awg, _ihw.check_ell14, _ihw.check_ds345)
+_ihw.check_scope = lambda m, d="": (_calls.append("scope"), dict(ok=True, text="MSO-X: HRES", detail="x"))[1]
+_ihw.check_awg = lambda m: (_calls.append("awg"), dict(ok=True, text="4063B: CH1 OFF", detail=""))[1]
+_ihw.check_ell14 = lambda c, p=None: (_calls.append("ell14"), dict(ok=False, text="COM3: in use by another program", detail=""))[1]
+_ihw.check_ds345 = lambda c, p=None: (_calls.append("ds345"), dict(ok=True, text="SRS DS345 on GPIB0::19", detail=""))[1]
+try:
+    app.do_hw_check(["scope", "awg", "ell14", "ds345"])
+    for _ in range(200):
+        root.update()
+        if not app.busy:
+            break
+        time.sleep(0.02)
+finally:
+    _ihw.check_scope, _ihw.check_awg, _ihw.check_ell14, _ihw.check_ds345 = _orig
+assert _calls == ["scope", "awg", "ell14", "ds345"], _calls
+assert app.hw_status["scope"].cget("text") == "MSO-X: HRES" and app.hw_time["scope"].cget("text")
+assert str(app.hw_status["ell14"].cget("foreground")) == "#a93a2c"
+assert str(app.hw_status["ds345"].cget("foreground")) == "#1b6e1b"
+assert "ell14: COM3: in use" in app.log_text.get("1.0", "end")
+print("[56] hardware tab: four rows, checks in order, status + time per row, in-use in red, "
+      "detail in the log; check_awg on the simulated generator reads both outputs OFF")
 
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not

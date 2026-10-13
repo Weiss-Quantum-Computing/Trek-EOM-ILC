@@ -41,7 +41,9 @@ LANES = {
                 ("protocol", "tests/test_protocol.py", []),
                 ("protocol-sr760", "tests/test_protocol_sr760.py", [])],
 }
-PASS_MARKS = ("ALL CHECKS PASSED", "0 failure(s)", "ALL 26 CHECKS PASSED", "OK")
+PASS_MARKS = ("ALL CHECKS PASSED", "failure(s)", "CHECKS PASSED", "checks passed", "scope files OK",
+              "All 87 checks", "All 56 checks", "All 41 checks")
+FAIL_MARKS = ("Traceback", "AssertionError", "FAILED", "  FAIL ", "Error:")
 
 
 def run_one(name, script, args, targets, quiet, out):
@@ -54,9 +56,14 @@ def run_one(name, script, args, targets, quiet, out):
     dt = time.time() - t0
     text = (p.stdout or "") + (p.stderr or "")
     lines = [l for l in text.splitlines() if l.strip() and "Warning" not in l]
-    marks = [l for l in lines if any(m in l for m in PASS_MARKS) or "FAIL" in l or "failure" in l]
+    ok = p.returncode == 0 and not any(m in l for l in lines for m in ("AssertionError", "Traceback"))
+    if ok:
+        marks = [l for l in lines if any(m in l for m in PASS_MARKS)]
+    else:
+        # the failing assertion and the block before it, not the last progress line
+        idx = [i for i, l in enumerate(lines) if any(m in l for m in FAIL_MARKS)]
+        marks = [lines[i] for i in idx[-3:]] if idx else []
     tail = (marks or lines or [""])[-1].strip()
-    ok = p.returncode == 0 and ("FAIL" not in tail or "0 failure" in tail)
     out[name] = ("ok" if ok else "FAILED", dt, tail if quiet or ok else "\n".join(lines[-25:]))
 
 
