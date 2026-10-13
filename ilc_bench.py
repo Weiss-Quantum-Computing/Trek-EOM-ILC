@@ -92,13 +92,17 @@ from eomilc.config import CHANNELS, HV_PER_MON
 def find_scope_grab(siblings):
     """The scope repo was renamed keysight-scope-grab on GitHub (26 Aug
     2026); a pre-rename checkout (this bench PC) keeps the old folder
-    name. Prefer the new name, fall back to the old, and when neither
-    exists return the NEW path so the error message names the right thing
-    to clone. The SCOPE_GRAB env var overrides everything."""
+    name, and scope-grab-multi (13 Oct 2026: the multi-scope checkout, the
+    one the polarimeter loads) carries the headless API the optical close
+    needs -- Scope.record, transfer_plan, dither_step, restore_offsets --
+    which the older checkouts lack. Prefer it, then the renamed repo, then
+    the old folder; when none exists return the renamed path so the error
+    message names the right thing to clone. The SCOPE_GRAB env var
+    overrides everything."""
     env = os.environ.get("SCOPE_GRAB")
     if env:
         return env
-    for name in ("keysight-scope-grab", "scope-grab"):
+    for name in ("scope-grab-multi", "keysight-scope-grab", "scope-grab"):
         p = os.path.join(siblings, name, "scope_grab.py")
         if os.path.exists(p):
             return p
