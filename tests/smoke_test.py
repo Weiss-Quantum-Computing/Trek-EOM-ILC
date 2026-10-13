@@ -1816,7 +1816,7 @@ print("[47b] Measure FRF dither: drive, monitor and aux stepped over 3 codes and
 # and Revert puts the base back; a line-ripple fit from captures is
 # subtracted from every measurement once ticked and is saved in the state.
 from eomilc import corrections as _corrmod, mains as _mains
-assert set(app._tabs) == {"hw", "session", "model", "scope", "run", "corr"}
+assert set(app._tabs) == {"hw", "session", "model", "scope", "run", "optical", "corr"}
 for _fr in app._tabs.values():
     app.lnb.select(_fr)
 root.update()
@@ -2014,7 +2014,7 @@ assert app._measurement_stats(_late[-1]["y"] + _rng.normal(0, 1e-3, (6, len(_s.t
 # every view draws
 app.itersel_var.set("all"); app._redraw_iterations(); root.update()
 assert [app.nb.tab(t, "text") for t in app.nb.tabs()] == \
-    ["Waveforms", "Error", "Convergence", "Drive", "Diagnostics", "Table", "Inputs"]
+    ["Waveforms", "Error", "Convergence", "Drive", "Diagnostics", "Table", "Inputs", "Optical"]
 assert len(app.ax_fold.lines) > 10 and len(app.ax_foldamp.lines) >= 1
 assert len(app.ax_bands.lines) >= 8                       # 4 bands x (rms + floor)
 assert len(app.ax_lam.lines) >= 2 and any(l.get_ydata().size == 1 for l in app.ax_lam.lines)
@@ -2320,6 +2320,244 @@ print("[57] pair mode: X1/X2 Init from one target name (a name with no X1 refuse
       "pair Hold (16 shots, both r01); X2's own Fit to FRF; Load brings both back; untick -> "
       "single mode runs as before")
 
+# [58] Optical tab (13 Oct 2026): the optical close by hand on both chains --
+# 1 Play keepers, 2 Scan, 3 Compare, 4 Apply, 5 Learn, 6 Verify, 7 Outputs
+# OFF. The ILC's loop runs on the simulated bench (as [57]); the light comes
+# from eomilc.optical's simulated polarimeter, injected through
+# app._optical_devices with rot_err 0.5 deg (else light - monitors is noise
+# and the gate keeps nothing) and fed the drives that play. The simulated PD
+# has no delay: PD delay 0. Stubs as [57], put back at the end; stands alone
+# (smoke_block.py 58).
+import math as _math58
+import time as _time58
+import run_ilc as _ri58
+import ilc_bench as _ib58
+from eomilc import simbench as _sb58
+from eomilc import optical as _op58
+from eomilc import corrections as _cm58
+_mb58 = ilc_gui.messagebox
+_saved58 = (_mb58.askyesno, _mb58.showerror, _mb58.showinfo, ilc_gui.AWG_WAVEFORMS)
+_asked58 = []
+_mb58.askyesno = lambda title, msg, **k: (_asked58.append(title), True)[1]
+_mb58.showerror = lambda title, msg, **k: _asked58.append(("error", title, msg))
+_mb58.showinfo = lambda title, msg, **k: _asked58.append(("info", title, msg))
+ilc_gui.AWG_WAVEFORMS = os.path.join(SCRATCH, "Waveforms58")
+
+
+def _pump58(limit_s=600):
+    _t0 = _time58.time()
+    root.update()
+    while app.busy and _time58.time() - _t0 < limit_s:
+        root.update()
+        _time58.sleep(0.02)
+    for _ in range(10):
+        root.update()
+        _time58.sleep(0.01)
+    assert not app.busy, "the worker did not finish"
+
+
+try:
+    # without a pair every step is refused, by the reason
+    app.pair_var.set(False)
+    app._on_pair_toggle(quiet=True)
+    root.update()
+    assert all(str(app._opt_btns[i].cget("state")) == "disabled" for i in range(1, 8))
+    app.do_opt_play()
+    assert _asked58[-1][0] == "error" and "pair mode is off" in _asked58[-1][2], _asked58[-1]
+
+    # the pair: the ILC header, the 2 us grid, 0 -> 5 kV at the EOM -> 0 over 11 ms
+    _tus = np.arange(5501) * 2.0
+    _ramp = np.clip(np.minimum((_tus - 500) / 3000, (10500 - _tus) / 3000), 0, 1)
+    _v58 = 5000 * 0.5 * (1 - np.cos(np.pi * _ramp))
+    for _k in ("X1", "X2"):
+        np.savetxt(os.path.join(SCRATCH, f"target_OPT{_k}.csv"), np.c_[_tus, _v58],
+                   delimiter=",", header="time_us,voltage_V", comments="", fmt="%.6g")
+    app._set_channels(ilc_gui.chanmap.DEFAULT_CHANNELS)   # CH1 PD, CH2 CmdX1, CH3 MonX1, CH4 MonX2
+    app.cmpsel_var.set("")
+    app.line_on_var.set(False)
+    app.pair_var.set(True)
+    app._on_pair_toggle()
+    root.update()
+    app.target_var.set(os.path.join(SCRATCH, "target_OPTX1.csv"))
+    app.stem_var.set("OPT")
+    app.seed_var.set("")
+    app.shotgain_var.set("")
+    app.toff_var.set("0")
+    app.fs_var.set("10.0")
+    app.model_var.set(ilc_gui.KEY2LABEL["resonant"])
+    app._on_model_change()
+    for _var, _val in ((app.pgain_var, "0.557"), (app.pfn_var, "7823"), (app.pzeta_var, "1.474"),
+                       (app.gamma_var, "0.6"), (app.fcut_var, "20000"), (app.notch_var, "")):
+        _var.set(_val)
+    app.model_var_2.set(ilc_gui.KEY2LABEL["resonant"])
+    app._on_model_change_2()
+    for _var, _val in ((app.pgain_var_2, "0.6116"), (app.pfn_var_2, "8509"), (app.pzeta_var_2, "1.83"),
+                       (app.gamma_var_2, "0.6"), (app.fcut_var_2, "20000"), (app.notch_var_2, "")):
+        _var.set(_val)
+    _n58 = len(_asked58)
+    app.do_init()
+    root.update()
+    _p58 = app.pair
+    assert _p58 is not None and (_p58["X1"].stem, _p58["X2"].stem) == ("OPTX1", "OPTX2"), _asked58[_n58:]
+
+    # the ILC's simulated bench, as [57]; Auto-set puts FRQ on the record
+    _awg58, _scope58, _mod58 = _sb58.make_bench({1: os.path.join(REPO, "run", "frf_WIDE_X1.csv"),
+                                                 2: os.path.join(REPO, "run", "frf_WIDE_X2.csv")},
+                                                channels=app.cfg)
+
+    def _fake_pair58():
+        _ib58._AWGMOD = _mod58
+        return _awg58, _scope58
+    app._connect_pair = _fake_pair58
+    app._bench_modules = lambda: (None, _mod58)
+    app.do_autoset()
+    _pump58()
+    assert not _awg58.is_on(1) and not _awg58.is_on(2)
+
+    # the polarimeter's simulated devices: a fresh bench per scan, its AWG
+    # fed by the scan step with the drives that play. Its monitors are the
+    # drive x a static gain (the polarimeter's calibration, 0.5594 / 0.5924):
+    # given the DC gains of the chains the loop learns on here instead, the
+    # light at the hold is the light of the drive the loop converges to
+    _dc58 = {_c: float(np.mean(_ch.respond(np.ones(5501), 2e-6)[-500:]))
+             for _c, _ch in _scope58.chains.items()}
+    _devs58 = []
+
+    def _optdev58(scope, cfg):
+        _d = _op58.open_devices(None, cfg, log=print, simulate=True, pcfg={})
+        _d.sim.rot_err = 0.5
+        _d.sim.awg_gain = dict(_dc58)
+        _devs58.append(_d)
+        return _d
+    app._optical_devices = _optdev58
+    app.optangles_var.set("0:359:45")
+    app.optshots_var.set("2")
+    app.optdelay_var.set("0")
+    app.optiters_var.set("2")
+    app.optgain_var.set("0.7")
+    app.optfigs_var.set(False)
+    app.repeats_var.set("16")
+    app.wait_var.set("5")
+    app.skip_var.set(False)
+    root.update()
+
+    # step 2 before step 1: greyed, and refused by the reason
+    assert str(app._opt_btns[1].cget("state")) == "normal"
+    assert all(str(app._opt_btns[i].cget("state")) == "disabled" for i in range(2, 7))
+    app.do_opt_scan()
+    assert _asked58[-1][0] == "error" and "needs step 1" in _asked58[-1][2], _asked58[-1]
+
+    # 1 Play keepers: one question, both ON, the i00 drives uploaded, kept ON
+    _n58 = len(_asked58)
+    app.do_opt_play()
+    _pump58()
+    assert _asked58[_n58:] == ["Outputs are OFF"], _asked58[_n58:]
+    assert _awg58.is_on(1) and _awg58.is_on(2)
+    _ups = [e[1:] for e in _awg58.log if e[0] == "upload"]
+    assert (1, "OPTX1_i00") in _ups and (2, "OPTX2_i00") in _ups
+    assert "kept ON until step 7" in app.run_state.cget("text")
+    assert app._opt["outputs"][0] == "ON" and "outputs  ON" in app.opt_state.cget("text")
+
+    # 2 Scan: the default name, the folder, the drives that play fed to the light
+    assert app.optname_var.get() == "OPT_opt1", app.optname_var.get()
+    assert str(app._opt_btns[2].cget("state")) == "normal"
+    app.do_opt_scan()
+    _pump58()
+    _scan58 = app._opt["scan"]
+    assert _scan58 and os.path.isfile(os.path.join(_scan58, "OPT_opt1_scan.json")), _scan58
+    assert os.path.dirname(_scan58) == os.path.join(ilc_gui.RUN_DIR, "optical")
+    assert app._opt_scan_complete(_scan58)
+    assert np.array_equal(_devs58[-1].drives["EO1"], _p58["X1"].u) and \
+        np.array_equal(_devs58[-1].drives["EO2"], _p58["X2"].u)
+    assert _awg58.is_on(1) and _awg58.is_on(2)                    # the scan left them ON
+    assert app.optname_var.get() == "OPT_opt2"                     # past the complete scan
+
+    # 3 Compare: both correction files, the verdict, the Optical plot tab
+    app.do_opt_compare()
+    _pump58()
+    _sum58 = app._opt["compare"]
+    assert _sum58 is not None and _sum58["folder"] == _scan58
+    for _ch in ("EO1", "EO2"):
+        _c = _cm58.read_correction(_sum58["files"][_ch])
+        assert _c.meta.get("channel") == _ch and np.max(np.abs(_c.delta)) > 1.0, _ch
+    assert all(len(_ax.lines) > 0 for _ax in app.ax_opt) and len(app.ax_optcorr.lines) >= 2
+    assert app.nb.select() == str(app._views["Optical"]["frame"])
+    assert "correction peak" in app.log_text.get("1.0", "end")
+
+    # 4 Apply: both targets moved by the gated amount, base kept, one layer
+    _t58 = {_k: np.array(_s.loop.target) for _k, _s in _p58.items()}
+    app.do_opt_apply()
+    _pump58()
+    for _k, _s in _p58.items():
+        _sc = _s.loop.channel.mon_scale
+        assert np.array_equal(_s.base_target, _t58[_k]), _k
+        assert np.max(np.abs(_s.loop.target - _t58[_k])) * _sc > 1.0, _k
+        assert np.allclose(_s.loop.target, _s.base_target + _s.corr_total)
+        assert len(_s.corr_layers) == 1 and _s.corr_layers[0]["slot"] == "optical" and \
+            _s.corr_layers[0]["status"] == "applied" and _s.corr_layers[0]["gain"] == 0.7
+        assert _s.corr_layers[0]["path"] == os.path.abspath(_sum58["files"][ilc_gui.PAIR_CHANNEL[_k]])
+        _st = _ri58.load_state(_s.state_path)
+        assert np.array_equal(_st["base_target"], _t58[_k]) and "corrections" in _st
+    # the Corrections tab lists the shown session's layer
+    _rows = [app.corr_tv.item(_i, "values") for _i in app.corr_tv.get_children()]
+    assert len(_rows) == 1 and _rows[0][2] == "optical" and _rows[0][-1] == "applied", _rows
+    assert app.ax_optcorr.lines[-1].get_linestyle() == "--"        # what is on the target now
+
+    # 5 Learn: two iterations of the pair loop, no question, outputs never switched
+    _ev58 = len(_awg58.log)
+    _it58 = {_k: _s.iteration for _k, _s in _p58.items()}
+    _n58 = len(_asked58)
+    app.do_opt_learn()
+    _pump58()
+    assert _asked58[_n58:] == [], _asked58[_n58:]
+    assert [e for e in _awg58.log[_ev58:] if e[0] == "output"] == []
+    assert _awg58.is_on(1) and _awg58.is_on(2)
+    for _k, _s in _p58.items():
+        assert _s.iteration == _it58[_k] + 2, (_k, _s.iteration)
+        assert int(_ri58.load_state(_s.state_path)["iteration"]) == _it58[_k] + 2
+        assert app._pair_playing[_k]["wname"] == f"{_s.stem}_i{_s.iteration:02d}"
+    assert "outputs left ON for the Optical steps" in app.log_text.get("1.0", "end")
+
+    # 6 Verify: a second scan + compare, the before / after table, the third view
+    assert str(app._opt_btns[6].cget("state")) == "normal"
+    app.do_opt_verify()
+    _pump58()
+    _ver58 = app._opt["verify"]
+    assert _ver58 and os.path.isfile(os.path.join(_ver58, "OPT_opt1_verify_scan.json")), _ver58
+    _tab58 = app._opt["table"]
+    assert _tab58 and all(_math58.isfinite(_b) and _math58.isfinite(_a) for _l, _b, _a in _tab58)
+    assert any("ramp top, light - target" in _l for _l, _b, _a in _tab58)
+    assert len(app.ax_optva.lines) >= 3
+    assert "ramp-top light - target" in app.status.cget("text") and \
+        "halved" in app.status.cget("text"), app.status.cget("text")
+    assert "before / after: before = OPT_opt1, after = OPT_opt1_verify" in app.log_text.get("1.0", "end")
+    assert _awg58.is_on(1) and _awg58.is_on(2)
+    # the verification is the next pass's comparison: Apply is open again
+    assert str(app._opt_btns[4].cget("state")) == "normal"
+    assert str(app._opt_btns[5].cget("state")) == "disabled"
+
+    # 7 Outputs OFF: both, the Bench line and the state line say so
+    _ev58 = len(_awg58.log)
+    app.do_opt_off()
+    _pump58()
+    assert not _awg58.is_on(1) and not _awg58.is_on(2)
+    assert [e for e in _awg58.log[_ev58:] if e[0] == "output"] == [("output", 1, False),
+                                                                    ("output", 2, False)]
+    assert "CH1 and CH2 output OFF (Optical step 7)" in app.run_state.cget("text")
+    assert app._opt["outputs"][0] == "OFF" and "outputs  OFF" in app.opt_state.cget("text")
+    assert str(app._opt_btns[2].cget("state")) == "disabled"
+    for _l, _b, _a in _tab58:
+        print(f"       {_l:40s}{_b:9.1f}{_a:9.1f}")
+finally:
+    _mb58.askyesno, _mb58.showerror, _mb58.showinfo, ilc_gui.AWG_WAVEFORMS = _saved58
+    for _a in ("_connect_pair", "_bench_modules", "_optical_devices"):
+        app.__dict__.pop(_a, None)
+print("[58] optical tab: refused without a pair and out of order; 1 plays both keepers ON (one "
+      "question); 2 scans OPT_opt1 into run\\optical with the playing drives as the light; 3 "
+      "compares (EO1/EO2 corr files, plot tab drawn); 4 moves both targets, base kept, one optical "
+      "layer, Corrections list shows it; 5 learns 2 iterations with no output event; 6 verifies "
+      "(finite before/after, status verdict); 7 both OFF")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the
@@ -2333,7 +2571,9 @@ try:
                       ("dspec", app.fig_dspec), ("ddelta", app.fig_ddel),
                       ("err", app.fig_err), ("spec", app.fig_spec),
                       ("conv", app.fig_conv),
-                      ("frf", app.fig_frf), ("corr", app.fig_corr)):
+                      ("frf", app.fig_frf), ("corr", app.fig_corr),
+                      ("opt", app.fig_opt), ("optcorr", app.fig_optcorr),
+                      ("optva", app.fig_optva)):
         fig.savefig(os.path.join(SCRATCH, f"fig_{name}.png"), dpi=100)
     print("[10b] figure PNGs saved from the canvases")
 except Exception:
