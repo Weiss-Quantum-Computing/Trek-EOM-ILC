@@ -46,15 +46,15 @@ visible.
 
 | tab | what it holds |
 |---|---|
-| **Session** | load a state file, or build one: target + channel + name + first-shot gain → Init |
-| **Model** | *Inverse model*: what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, the learning notches, and the FRF band |
+| **Session** | load a state file, or build one: target + channel + name + first-shot gain → Init. The **Pair (X1 + X2)** tick on top makes Load and Init act on both chains at once (§5) |
+| **Model** | *Inverse model*: what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, the learning notches, and the FRF band. In pair mode a second block under it is X2's, with its own everything |
 | **Hardware** | one look at the rack: Scope, AWG, ELL14, DS345, each with a **Check** that opens the device, asks its identity and how it stands (acquisition mode and V/div; outputs ON/OFF, FRQ and waveform; mount position; gate address), closes it again, and writes the answer and the time into the row, red when it did not answer. The mount and the DS345 are the polarimeter's: their port and address come from its config, and while its window is open they report "in use". Nothing is moved or programmed. |
 | **Scope** | the *Scope channels* map (which channel is the PD, the monitors, the Trek commands — the polarimeter's roles), the capture settings (`t-offset`, baseline), and the line-ripple switch with its **Line ripple…** dialog |
-| **Run** | the bench flow in order: a *Bench* line (wiring in force, the last thing a run reported about the instruments), **1 Instruments** (Auto-set, Upload), **2 Learn** (iterations, repeats, Run, Stop), **3 Hold**, then **Batch…**, **Manual step…** (one iteration from captures you took) and **Bench settings…** (trigger timeout, the skip/keep ticks, GEN's channel numbers) |
+| **Run** | the bench flow in order: a *Bench* line (wiring in force, the last thing a run reported about the instruments), **1 Instruments** (Auto-set, Upload), **2 Learn** (iterations, repeats, Run, Stop), **3 Hold**, then **Batch…**, **Manual step…** (one iteration from captures you took) and **Bench settings…** (trigger timeout, the skip/keep ticks, GEN's channel numbers). In pair mode Auto-set, Run and Hold act on both chains |
 | **Corrections** | learned target corrections: move the TARGET by an error measured elsewhere (the polarimeter), within limits — §11 |
 | **Log** | everything the loop reports. A timestamped copy appends to `run\ilc_gui.log` |
-| right side | six tabs, refreshed at every step, with the iteration selector and Compare box above them: Waveforms, Error (error / spectrum), Convergence, Drive (corrections / spectrum / updates), Table, Inputs (FRF / target corrections) — a tab with several figures has a view bar on top; see §7 |
-| status line | what is running, or when idle the next step: Load/Init, then Auto-set and Run, then the lowest-rms iteration since i08 (the batch's keeper rule) |
+| right side | six tabs, refreshed at every step, with the iteration selector (in pair mode led by a **shown X1 / X2** switch) and Compare box above them: Waveforms, Error (error / spectrum), Convergence, Drive (corrections / spectrum / updates), Table, Inputs (FRF / target corrections) — a tab with several figures has a view bar on top; see §7 |
+| status line | what is running, or when idle the next step: Load/Init, then Auto-set and Run, then the lowest-rms iteration since i08 (the batch's keeper rule); in pair mode it names the shown chain |
 
 Every individual field is documented in §10.
 
@@ -194,6 +194,45 @@ the parametric model from each iteration's own data as it steps.
    measurement. The state and iteration counter are untouched; repeated
    holds keep counting runs up. Setup checks, the output-ON confirmation
    and the output-OFF-at-end policy all apply as in the bench loop.
+
+### Both chains at once (pair mode)
+
+The two Trek + EOM chains are different amplifiers, and the ramps play with
+both moving; the batch has always trained them together. Tick **Pair
+(X1 + X2)** on the Session tab and the panel does the same, by hand:
+
+1. **State** and **Target** take the **X1** file; the X2 file is the same name
+   with the last `X1` replaced by `X2` (`target_S47X1.csv` →
+   `target_S47X2.csv`, `drive_S47X1.state.npz` → `drive_S47X2.state.npz`). A
+   name with no `X1` in it, or an X2 file that is not there, is refused with
+   the name it looked for. A seed drive pairs the same way.
+2. The **Channel** box is EO1 and greyed: the Model tab's top block is X1's
+   (EO1) and a second block under it is X2's (EO2), each with its own rung,
+   parameters, γ, `f_cut`, notches, FRF and taper, its own **Replace values
+   with a fit…** and **Show FRF**, and its own field memory (EO2's, the same
+   memory the Channel switch uses).
+3. **Init campaign** builds both, each from its own block: the **Name stem**
+   gets `X1` / `X2` appended (so at most 5 characters), X1's first shot uses
+   the first-shot gain box and X2's its own model gain. Nothing is written
+   until both have passed their checks. **Load state** loads both and fills
+   both blocks from their states.
+4. **Auto-set** sets both AWG channels and the drive and monitor verticals of
+   both chains in one session of the instruments, and refuses while either
+   output is ON. **Run bench loop (X1 + X2)** asks once to switch both
+   outputs ON, uploads both drives every iteration, checks the alignment of
+   each chain that has a CmdXn channel, reads **both monitors from the same
+   frozen acquisition** on every shot (the offset dither on both), then for
+   each chain: metrics, noise floor, stats sidecar, model check, update with
+   its own loop, state saved, drive files written. Log lines carry `X1` /
+   `X2` in front. Both outputs go OFF at the end. **Hold** re-measures both
+   drives the same way, runs numbered per chain.
+5. The **shown X1 / X2** switch above the plots picks which session the
+   plots, the summary ("… (X2 of a pair)"), the status hint and every
+   single-channel tool — Upload, Manual step, Corrections, Measure FRF, the
+   line ripple — are on. It can be flipped mid-run.
+
+Unticking leaves the X1 session loaded and the panel exactly as it is
+without the tick.
 
 ## 6. Stepping through the model ladder (the demo)
 
@@ -501,6 +540,7 @@ and it behaves like any entry again.
 
 | field | what it does |
 |---|---|
+| **Pair (X1 + X2)** *(config)* | Pair mode (§5): State, Target and Seed drive take the X1 file and the X2 file is found by name (the last `X1` → `X2`; refused when there is no `X1` or no such file); Channel is EO1 and greyed; the stem gets `X1` / `X2` appended; Load and Init act on both; the Model tab grows X2's block and the plots a **shown** switch. Unticked, the X1 session stays loaded. Remembered between launches, and the startup reload then loads the pair. |
 | **State** *(config)* | Path to a `drive_<stem>.state.npz`. **Load state** rebuilds the whole campaign from it: target, current drive, plant, γ, f_cut, t-offset, iteration counter, error history — puts the state's own target file back in the **Target** box (recorded as `target_path` by Init; a state from before that is matched by content against `waveforms\` and `run\`, and one that matches nothing leaves the box alone and says so) — and recalls every `meas_*.npy` sharing the stem beside it into the plots. The remembered state reloads automatically at launch. |
 | **Target** *(config)* | CSV of the desired waveform: first column time (`time_us` or `time_s`), second column value in **output units** (EOM volts on EO1/EO2, measured volts on GEN — divided by the channel's `mon_scale` on load). Comment lines start with `#`. Auto-plots on selection. Recorded in the state by Init and restored by Load state, so the box always shows the target the loaded campaign's iterations were measured against. |
 | **Build…** | Generates a target from scratch. Dialog fields: *shape* (cosine-edged ramp up-hold-return, or half-sine pulse), *peak* in output units, *lead / rise / hold / fall / tail* in ms (lead and tail are flat zero — the level the AWG idles on), *dt* in µs (the loop grid; 2 µs is the campaign standard). |
@@ -517,6 +557,7 @@ and it behaves like any entry again.
 | field | what it does |
 |---|---|
 | **Model** *(panel)* | What the update divides the error by: gain only (0th), one pole (1st), second order (resonant), third order (resonant + pole), or the measured FRF. Not stored in the state — the state stores the plant *parameters*; which form is active is your choice each session. Every history entry is tagged with the model that produced it. |
+| **X2 (EO2) block** *(pair mode; field memory)* | The same fields again for X2 — Model, gain / tau / fn / zeta, gamma, f_cut, FRF, the taper, notch — showing only the rung's own fields, with its own **Replace values with a fit…** (the fit dialog reads this block's FRF and X2's measurements and writes this block's boxes) and **Show FRF**. Init and the pair loop give X2 these numbers and X1 the top block's; Load fills each from its own state. Remembered as EO2's field memory, which the Channel switch reads too. Measure FRF lands its file in the shown chain's block. |
 | **gain** *(state)* | The model's DC gain, AWG volts → measured volts. Used by every parametric lead (`e/gain` is the whole 0th-order correction) and by the model-predicted-output trace. Fallback source for the first-shot gain. |
 | **tau us** *(state)* | One-pole time constant, µs. Only the one-pole model reads it. On the Trek chains it equals the resonance's group delay (~28 µs) — the lag without the ring. |
 | **fn Hz**, **zeta** *(state)* | Second-order natural frequency and damping ratio. Only the second-order model reads them. Any ζ > 0 is accepted: ζ > 1 is two real poles, which is what the Trek chains' FRFs fit (X1 at 0.5 V: fₙ ≈ 7.3 kHz, ζ ≈ 1.1); the ζ ≈ 0.2 resonance of the Aug ramp fits was withdrawn. |
@@ -579,7 +620,7 @@ leave this off there.
 
 | field | what it does |
 |---|---|
-| **Bench** line | The wiring in force (AWG channel → monitor channel, readback channel or "none (alignment not verified)") and the last instrument fact a run reported (Auto-set's FRQ/AMP/output, output ON/OFF at a run's end), with its time. |
+| **Bench** line | The wiring in force (AWG channel → monitor channel, readback channel or "none (alignment not verified)") and the last instrument fact a run reported (Auto-set's FRQ/AMP/output, output ON/OFF at a run's end), with its time. In pair mode, one wiring line per chain from the Scope channels map. |
 | **AWG ch / scope ch** *(Bench settings…)* | Generator channel the drive is uploaded to and the scope channel carrying the monitor. EO1/EO2 fill them from the *Scope channels* map (the MonXn channel) and refuse a number that contradicts it; GEN uses them as typed. |
 | **iterations** *(config)* | Number of updates to run. The loop measures `iterations + 1` times — the last measurement documents the final drive without updating past it. |
 | **repeats** *(config)* | HRES single shots averaged in software per iteration. 64 is the campaign standard (~25 s at the 20 Hz trigger, dithers the scope's 2.5 mV word lattice to its 0.16 mV floor); 16 is a usable quick check; below 16 is refused. |
@@ -590,6 +631,7 @@ leave this off there.
 | **Upload `<stem>_iNN` to AWG** | Uploads the session's current drive into the generator's user memory and selects it — the manual-workflow counterpart of what the bench loop does each iteration, at the same fixed ±full-scale mapping (never normalised). Asks before overwriting a stored waveform of the same name; no dialog when the name is free. Warns in the log when the output is live (the new waveform plays the moment it is selected). |
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
 | **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |
+| **Run bench loop (X1 + X2)** *(pair mode)* | The same loop on both chains: both drives uploaded each iteration (CH1 X1, CH2 X2), one question for both outputs ON, alignment checked on each chain with a CmdXn channel, both monitors read from the **same** acquisition on every shot with the offset dither, then per chain the metrics, noise floor, stats sidecar, model check, update with its own model, limit check, state and drive files — `meas_<stem>X1_iNN.npy` and `…X2…` side by side. Log lines start `X1` / `X2`. Both outputs OFF at the end. The two states must share one grid (refused otherwise). *keep native-rate avg* is not kept in pair mode (the log says so). Auto-set sets both AWG channels and both chains' verticals and refuses while either output is ON; Hold re-measures both drives (the **iter** box applies to both) from one acquisition per shot. |
 
 | **Hold (runs / gap between runs s / iter)** | Re-measures the current drive `runs` times, `gap between runs s` apart, with **no update and no state change** — the thermalisation probe. Runs are tagged `iter k rN`, saved as `meas_<stem>_iNN_rMM.npy`, and numbered on from any earlier holds of the same iteration. Same setup checks, output confirmation and output-off-at-end as the bench loop; Stop works between shots and during the gap. The **iter** box picks which stored iteration to hold: blank is the current drive; a number loads that iteration's `drive_<stem>_iNN.csv` from beside the state, uploads it under its own name and tags the runs to it (`iter 9 r1…`), so an earlier drive can be re-measured without Init — which would restart the campaign at i00 under the same names. When a run lands, the panel ticks **runs** and adds the held iteration to the **Iterations** box if either would have hidden it, and says so in the log. |
 
@@ -597,6 +639,7 @@ leave this off there.
 
 | field | what it does |
 |---|---|
+| **shown X1 / X2** *(pair mode)* | Which session of the pair the plots, the summary, the status hint and the single-channel tools (Upload, Manual step, Corrections, Measure FRF, line ripple; the AWG / scope channel numbers follow it) are on. Switching redraws every tab from that session. Load and Init show X1. |
 | **Iterations shown** *(config)* | Which stored iterations the Drive corrections, Drive updates, Error and Error spectrum tabs overlay: blank = last two, `all`, a range `2-5`, or a list `0,3,6`. Enter or **Redraw** applies. Draws from this session's measurements plus every `meas_*.npy` recalled at Load state. |
 | **Compare** *(config, paths remembered)* | Other campaigns overlaid on the same plots, read-only: space-separated keys, each optionally `key:ITERS` with the Iterations grammar (`OLDX1 OLDX2:all OLDX3:0,3`); a blank selection means that campaign's last measured iteration. A key is a stem in the active state's directory (`drive_<stem>.state.npz` plus its `meas_*.npy` / `drive_*_iNN.csv`), or a state file elsewhere picked with **Add campaigns...** — which appends its key to the box and keys a name collision `STEM@folder`. **Clear** empties the box, the picked paths and the state cache. The status line under the box names what resolved and counts what did not. Never saved or stepped. Each stem gets one colour (hues chosen clear of the active session's viridis ramp), older selected iterations blending toward white; hold runs ride along dashed when **runs** is on. Overlays land on Error, Error spectrum, Drive corrections, Drive spectrum, Drive updates (each stem against its *own* reference and prior drives, on its *own* time grid and monitor scale), Convergence (the stem's whole peak+rms error history, regardless of the iteration selection), and both Waveforms panes (every selected measurement and drive, plus that stem's target when it differs). Δt labels stay active-session-only. A stem with no state or no measurements is reported in the log once per spec. |
 | **dot every Nth sample** *(config)* | Marker density on every data trace: blank = auto (~180 dots per trace), a number = that literal subsampling step, `1` = every real sample gets a dot. Enter or **Redraw** applies everywhere, the Waveforms tab and target preview included. |

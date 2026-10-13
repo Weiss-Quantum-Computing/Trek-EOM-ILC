@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import traceback
+import types
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -145,6 +146,12 @@ CMP_HINT = ("nothing loaded -- stems in this run folder, e.g. "
 # its text, and the request goes all the way up to the window, so a line of
 # campaign names would resize the panel every time one was added.
 CMP_STATUS_CHARS = 96
+# The Model tab's frame title: single mode, and column 1 / column 2 of a pair.
+MODEL_FRAME_TEXT = "Inverse model (what the update divides the error by)"
+PAIR_KEYS = ("X1", "X2")
+STEM_NOTE = f"(<= {NAME_LIMIT - 4} chars; '_iNN' is appended)"
+STEM_NOTE_PAIR = f"(<= {NAME_LIMIT - 6} chars; X1/X2 + '_iNN' appended)"
+PAIR_CHANNEL = {"X1": "EO1", "X2": "EO2"}
 
 
 def _norm_path(p):
@@ -699,6 +706,35 @@ class _QueueWriter(io.TextIOBase):
 
 
 # ------------------------------------------------------------------ batch
+class _Prefixed(io.TextIOBase):
+    """A stdout that starts every line with a tag (pair mode's X1 / X2).
+    A line already indented by more than the tag keeps its column: the tag
+    replaces the leading spaces instead of pushing the text right."""
+
+    def __init__(self, out, tag):
+        self.out, self.tag, self.buf = out, tag, ""
+
+    def _tagged(self, line):
+        if not line.strip():
+            return line
+        if line.startswith(" " * (len(self.tag) + 1)):
+            return self.tag + line[len(self.tag):]
+        return f"{self.tag} {line}"
+
+    def write(self, text):
+        self.buf += text
+        while "\n" in self.buf:
+            line, self.buf = self.buf.split("\n", 1)
+            self.out.write(self._tagged(line) + "\n")
+        return len(text)
+
+    def flush(self):
+        if self.buf:
+            self.out.write(self._tagged(self.buf))
+            self.buf = ""
+        self.out.flush()
+
+
 class BatchWindow:
     """The Batch window: build, check, simulate and run an ilc_batch plan --
     a list of target pairs trained X1 and X2 together, one after another.
@@ -1113,6 +1149,7 @@ class App:
 
     def _save_config(self):
         self._remember_fields()
+        self._remember_fields_2()
         c = dict(self.cfg)
         c.update(field_memory=self._field_mem,
                  geometry=self.root.winfo_geometry(),
@@ -1146,7 +1183,8 @@ class App:
                  repeats=self.repeats_var.get(), iterations=self.iters_var.get(),
                  batch_plan=self.batchplan_var.get(),
                  batch_follow=self.batchfollow_var.get(),
-                 batch_follow_ch=self.batchfollowch_var.get())
+                 batch_follow_ch=self.batchfollowch_var.get(),
+                 pair=bool(self.pair_var.get()))
         if self._batch_win is not None:
             c["batch_geometry"] = self._batch_win.win.winfo_geometry()
         try:
@@ -1199,6 +1237,28 @@ class App:
         self._actions = []           # every button a running worker disables
         self._build_hw_tab(self._tabs["hw"])
 
+        # ---- pair mode: X1 and X2 learned side by side ------------------
+        # Ticked, the State and Target rows take the X1 file and the X2 file
+        # is found by name (X1 -> X2); Load and Init act on both, each chain
+        # keeps its own model (the Model tab grows an X2 column), and the
+        # bench loop plays both drives and reads both monitors from one
+        # acquisition. self.pair holds the two sessions; self.session is the
+        # one the plots show (the 'shown' radio above the plots).
+        self.pair = None
+        self.pair_var = tk.BooleanVar(value=bool(self.cfg.get("pair", False)))
+        self.shown_var = tk.StringVar(value="X1")
+        self._col2 = None            # the Model tab's X2 column, built on first tick
+        self._mem_model_2 = None     # the X2 column's model in the field memory
+        pr = ttk.Frame(tab_session)
+        pr.pack(fill="x", pady=(0, 2))
+        b = ttk.Checkbutton(pr, text="Pair (X1 + X2)", variable=self.pair_var,
+                            command=self._on_pair_toggle)
+        b.pack(side="left")
+        self._actions.append(b)
+        ttk.Label(pr, text="(State / Target take the X1 file; X2's is the same "
+                           "name with X2)", foreground="#666666").pack(
+            side="left", padx=(6, 0))
+
         # ---- session: two paths, resume or start ----------------------
         rf = ttk.LabelFrame(tab_session, text="Resume a campaign", padding=3)
         rf.pack(fill="x", pady=(0, 2))
@@ -1231,10 +1291,11 @@ class App:
                           values=list(CHANNELS), state="readonly")
         cb.pack(side="left", padx=(2, 8))
         cb.bind("<<ComboboxSelected>>", lambda e: self._on_channel_change())
+        self._channel_cb = cb
         ttk.Label(r3, text="Name stem").pack(side="left")
         ttk.Entry(r3, textvariable=self.stem_var, width=9).pack(side="left", padx=2)
-        ttk.Label(r3, text=f"(<= {NAME_LIMIT - 4} chars; '_iNN' is appended)"
-                  ).pack(side="left")
+        self._stem_note = ttk.Label(r3, text=STEM_NOTE)
+        self._stem_note.pack(side="left")
 
         r4 = ttk.Frame(sf); r4.grid(row=2, column=0, columnspan=5, sticky="ew", pady=1)
         # The first-shot gain is deliberately NOT the model gain: it fixes
@@ -1278,9 +1339,15 @@ class App:
         sf.columnconfigure(1, weight=1)
 
         # ---- inverse model -------------------------------------------
-        vf = ttk.LabelFrame(tab_model, text="Inverse model (what the update "
-                                            "divides the error by)", padding=3)
-        vf.pack(fill="x", pady=(0, 2))
+        # The column(s): column 1 is the channel's in single mode and EO1's
+        # in pair mode; the X2 column (pair mode only) packs under it --
+        # under, not beside: the tab has the height to spare, and the left
+        # panel's width is taken from the plots.
+        self._model_row = ttk.Frame(tab_model)
+        self._model_row.pack(fill="x", pady=(0, 2))
+        vf = ttk.LabelFrame(self._model_row, text=MODEL_FRAME_TEXT, padding=3)
+        vf.pack(fill="x")
+        self._model_frame1 = vf
         self.model_var = tk.StringVar(
             value=self.cfg.get("model", KEY2LABEL["frf"]))
         if self.model_var.get() not in LABEL2KEY:
@@ -1381,6 +1448,18 @@ class App:
         b.pack(side="right", padx=(0, 4))
         self._actions.append(b)
         vf.columnconfigure(1, weight=1)
+        # Column 1 as a column: the same variables and widgets, named the
+        # way the X2 column's are, so the model helpers take either.
+        self._col1 = types.SimpleNamespace(
+            key="X1", frame=vf, model_var=self.model_var,
+            param_vars=self._param_vars, param_entries=self._param_entries,
+            param_labels=self._param_labels, gamma_var=self.gamma_var,
+            fcut_var=self.fcut_var, fcut_label=self._fcut_label,
+            fcut_entry=self._fcut_entry, band_note=self._band_note,
+            notch_var=self.notch_var, frf_var=self.frf_var,
+            fuse_var=self.fuse_var, fmax_var=self.fmax_var,
+            fuse_entry=self._fuse_entry, fmax_entry=self._fmax_entry,
+            taper_widgets=self._taper_widgets)
         self._update_model_fields()
         # What the panel shows belongs to THIS channel and model; the memory
         # is what every other (channel, model) pair last had. Read once here,
@@ -1542,7 +1621,16 @@ class App:
         # WORKFLOW_GUI.md section 10, and width here is contested
         sel = ttk.Frame(right)
         sel.pack(fill="x", pady=(0, 2))
-        ttk.Label(sel, text="Iterations").pack(side="left")
+        # pair mode: which of the two sessions the plots, the summary and
+        # every single-channel tool (Upload, Corrections, Manual step) are on
+        self._shown_frame = ttk.Frame(sel)
+        ttk.Label(self._shown_frame, text="shown").pack(side="left")
+        for k in PAIR_KEYS:
+            ttk.Radiobutton(self._shown_frame, text=k, value=k,
+                            variable=self.shown_var,
+                            command=self._on_shown_change).pack(side="left")
+        self._iter_label = ttk.Label(sel, text="Iterations")
+        self._iter_label.pack(side="left")
         self.itersel_var = tk.StringVar(value=self.cfg.get("iter_sel", ""))
         e = ttk.Entry(sel, textvariable=self.itersel_var, width=11)
         e.pack(side="left", padx=2)
@@ -1676,6 +1764,10 @@ class App:
         # the wiring fields (monitor col, AWG/scope channels, FRF autopoint)
         # follow the remembered channel -- they were built with EO1's values
         self._apply_channel_defaults()
+        # a panel closed in pair mode opens in pair mode (the startup reload
+        # then loads the pair)
+        if self.pair_var.get():
+            self._on_pair_toggle(quiet=True)
 
     def _tab(self, name, nrows, sharex=False, tab=None, view=None):
         """A figure in the plot notebook. `tab` names the notebook tab it
@@ -2122,6 +2214,20 @@ class App:
         thing a run reported about the instruments."""
         if not hasattr(self, "run_state"):
             return
+        if self.pair_var.get():
+            lines = []
+            for k in PAIR_KEYS:
+                try:
+                    w = chanmap.wiring(self.cfg, k)
+                    lines.append(f"{k} ({w['channel']}): AWG CH{w['awg_ch']} -> monitor "
+                                 f"CH{w['mon_ch']}, readback "
+                                 + (f"CH{w['drive_ch']}" if w["drive_ch"]
+                                    else "none (alignment not verified)"))
+                except ValueError as e:
+                    lines.append(f"{k}: {e}")
+            return self.run_state.configure(
+                text="\n".join(lines) + "\n" + (self._bench_last or "instruments: "
+                                                "nothing played this session"))
         ch = self.channel_var.get()
         try:
             awg, mon = int(self.awgch_var.get()), int(self.scopech_var.get())
@@ -2153,12 +2259,19 @@ class App:
             return "ready -- Load state, or Init a campaign (Session tab)"
         hist = [m for m in s.loop.history if isinstance(m, dict) and "rms_err_hv" in m]
         if not hist:
-            return f"ready -- {s.stem}: Auto-set, then Run bench loop (Run tab)"
+            return (f"ready -- {self._hint_who(s)}: Auto-set, then Run bench "
+                    f"loop (Run tab)")
         late = [(i, m["rms_err_hv"]) for i, m in enumerate(hist) if i >= 8] or \
             list((i, m["rms_err_hv"]) for i, m in enumerate(hist))
         i, r = min(late, key=lambda t: t[1])
-        return (f"ready -- {s.stem}: lowest rms {'since i08 ' if len(hist) > 8 else ''}"
+        return (f"ready -- {self._hint_who(s)}: lowest rms {'since i08 ' if len(hist) > 8 else ''}"
                 f"is i{i:02d} ({r:.2f} V at the EOM)")
+
+    def _hint_who(self, s):
+        """The status hint's name for the shown session: its stem, and in
+        pair mode which chain of the pair it is."""
+        k = self._pair_key_of(s)
+        return f"{s.stem} (shown: {k} of the pair)" if k else s.stem
 
     def _line_segments(self):
         """'-12:0, 10:16.5' (ms) -> [(t0, t1)] in seconds; blank -> None."""
@@ -3044,9 +3157,9 @@ class App:
                 return False
         return bool(result.get("yes"))
 
-    def _notches(self):
+    def _notches(self, c=None):
         try:
-            return ilc.parse_notches(self.notch_var.get())
+            return ilc.parse_notches((c or self._col1).notch_var.get())
         except ValueError as e:
             raise RuntimeError(str(e))
 
@@ -3088,18 +3201,20 @@ class App:
         m.setdefault("models", {})[self._mem_model] = {
             k: self._param_vars[k].get().strip() for k in self._MEM_KEYS}
 
-    def _recall_params(self, ch, key, blank_if_new):
+    def _recall_params(self, ch, key, blank_if_new, c=None):
         """The parameter boxes for (ch, key). A pair never seen before keeps
         the current numbers on a MODEL switch (a starting point, as before)
-        and blanks them on a CHANNEL switch (the prior-leak guard)."""
+        and blanks them on a CHANNEL switch (the prior-leak guard). `c`: the
+        Model column whose boxes are filled (default column 1)."""
+        pv = (c or self._col1).param_vars
         got = (self._field_mem.get(ch) or {}).get("models", {}).get(key)
         if got is None:
             if blank_if_new:
-                for v in self._param_vars.values():
+                for v in pv.values():
                     v.set("")
             return False
         for k in self._MEM_KEYS:
-            self._param_vars[k].set(got.get(k, ""))
+            pv[k].set(got.get(k, ""))
         return True
 
     def _on_model_change(self):
@@ -3169,7 +3284,10 @@ class App:
         if os.path.exists(self.target_var.get().strip()):
             self.do_preview_target(quiet=True)
 
-    def _apply_channel_defaults(self, channel=None):
+    def _apply_channel_defaults(self, channel=None, wiring_only=False):
+        """The wiring fields for `channel` (default: the Channel box), and
+        the FRF autopoint -- unless wiring_only, which pair mode uses when the
+        shown chain changes: the FRF field is column 1's, EO1's."""
         ch = channel or self.channel_var.get()
         d = CH_DEFAULTS[ch]
         mon_col, awg_ch, scope_ch = d["mon_col"], d["awg_ch"], d["scope_ch"]
@@ -3187,6 +3305,8 @@ class App:
         self.awgch_var.set(str(awg_ch))
         self.scopech_var.set(str(scope_ch))
         self._refresh_run_state()
+        if wiring_only:
+            return
         # Point at this channel's wide-probe FRF unless the user browsed to
         # something that is not just the other channel's default.
         cur = os.path.basename(self.frf_var.get())
@@ -3195,56 +3315,62 @@ class App:
             self.frf_var.set(p if p and os.path.exists(p) else "")
 
     # -------------------------------------------------------- model ladder
-    def _model_key(self):
-        return LABEL2KEY.get(self.model_var.get(), "frf")
+    def _model_key(self, c=None):
+        return LABEL2KEY.get((c or self._col1).model_var.get(), "frf")
 
-    def _update_model_fields(self):
+    def _update_model_fields(self, c=None):
         """Only the parameters the selected model actually has are shown
         (and the hidden ones are disabled as well, so nothing reads them).
         That includes the band knobs: f_cut belongs to the parametric rungs
         (the FRF path deliberately never pre-filters at it -- ilc.update),
         and the f_use/f_max taper belongs to the measured FRF. The FRF path
-        row stays on every rung: the fit dialog reads it."""
-        key = self._model_key()
+        row stays on every rung: the fit dialog reads it. `c`: the Model
+        column (default column 1; pair mode's X2 column has its own)."""
+        c = c or self._col1
+        key = self._model_key(c)
         need = PARAMS_FOR[key]
         for k in ("gain", "tau", "fn", "zeta"):
-            self._param_labels[k].pack_forget()
-            self._param_entries[k].pack_forget()
+            c.param_labels[k].pack_forget()
+            c.param_entries[k].pack_forget()
         for k in ("gain", "tau", "fn", "zeta"):
-            self._param_entries[k].configure(state="normal" if k in need else "disabled")
+            c.param_entries[k].configure(state="normal" if k in need else "disabled")
             if k in need:
-                self._param_labels[k].pack(side="left", padx=(0, 2))
-                self._param_entries[k].pack(side="left", padx=(0, 8))
+                c.param_labels[k].pack(side="left", padx=(0, 2))
+                c.param_entries[k].pack(side="left", padx=(0, 8))
         frf = key == "frf"
-        self._fcut_entry.configure(state="disabled" if frf else "normal")
-        for w in (self._fcut_label, self._fcut_entry, self._band_note):
-            w.pack_forget()
+        c.fcut_entry.configure(state="disabled" if frf else "normal")
+        for w in (c.fcut_label, c.fcut_entry, c.band_note):
+            if w is not None:
+                w.pack_forget()
         if not frf:
-            self._fcut_label.pack(side="left", padx=(0, 2))
-            self._fcut_entry.pack(side="left", padx=(0, 6))
-            self._band_note.pack(side="left")
-        for e in (self._fuse_entry, self._fmax_entry):
+            c.fcut_label.pack(side="left", padx=(0, 2))
+            c.fcut_entry.pack(side="left", padx=(0, 6))
+            if c.band_note is not None:
+                c.band_note.pack(side="left")
+        for e in (c.fuse_entry, c.fmax_entry):
             e.configure(state="normal" if frf else "disabled")
-        for w, _opts in self._taper_widgets:
+        for w, _opts in c.taper_widgets:
             w.pack_forget()
         if frf:
-            for w, opts in self._taper_widgets:
+            for w, opts in c.taper_widgets:
                 w.pack(**opts)
 
-    def _set_param_entries(self, p):
+    def _set_param_entries(self, p, c=None):
         """Plant -> panel entries (blank = the term is absent from p)."""
-        self.pgain_var.set(f"{p.gain:.4f}")
-        self.ptau_var.set(f"{p.tau*1e6:.2f}" if p.tau > 0 else "")
-        self.pfn_var.set(f"{p.fn:.0f}" if p.fn > 0 else "")
-        self.pzeta_var.set(f"{p.zeta:.3f}" if p.zeta > 0 else "")
+        pv = (c or self._col1).param_vars
+        pv["gain"].set(f"{p.gain:.4f}")
+        pv["tau"].set(f"{p.tau*1e6:.2f}" if p.tau > 0 else "")
+        pv["fn"].set(f"{p.fn:.0f}" if p.fn > 0 else "")
+        pv["zeta"].set(f"{p.zeta:.3f}" if p.zeta > 0 else "")
 
-    def _entry_params(self, key, strict):
+    def _entry_params(self, key, strict, c=None):
         """Panel entries for model `key` -> dict.  strict=False returns None
         on any blank entry (the caller says which and how to fill it);
         strict=True raises with a hint at the fit button."""
+        pv = (c or self._col1).param_vars
         vals = {}
         for k in PARAMS_FOR[key]:
-            txt = self._param_vars[k].get().strip()
+            txt = pv[k].get().strip()
             if not txt:
                 if not strict:
                     return None
@@ -3273,12 +3399,15 @@ class App:
                               offset=offset, dt=dt)
 
     # ------------------------------------------------------------ fitting
-    def do_fit_dialog(self):
+    def do_fit_dialog(self, c=None):
         """'Replace values with a fit?' -- the two ways the selected rung's
         parameters can be filled from data, each explained, and Cancel.
         Both overwrite the parameter boxes; the loop picks the new values up
-        at the next Init/Step/Bench (those read the boxes)."""
-        key = self._model_key()
+        at the next Init/Step/Bench (those read the boxes). `c`: the Model
+        column (pair mode's X2 column has its own button)."""
+        c = c or self._col1
+        key = self._model_key(c)
+        sess = self._col_session(c)
         if key == "frf":
             return messagebox.showinfo(
                 "Replace values with a fit",
@@ -3288,13 +3417,14 @@ class App:
                 "inside its coherent band, and the loop divides by it "
                 "directly. Fitting belongs to the parametric rungs.")
         names = ", ".join(PARAMS_FOR[key])
-        fps = self._frf_paths()
+        fps = self._frf_paths(c)
         frf_ok = len(fps) == 1 and os.path.exists(fps[0])
-        meas_ok = self.session is not None and (
-            bool(self.session.snapshots) or bool(self.meas_var.get().strip()))
+        meas_ok = sess is not None and (
+            bool(sess.snapshots) or bool(self.meas_var.get().strip()))
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("Replace values with a fit?")
+        dlg.title("Replace values with a fit?"
+                  + (f" ({c.key})" if self.pair_var.get() else ""))
         dlg.transient(self.root)
         dlg.grab_set()
         fr = ttk.Frame(dlg, padding=10)
@@ -3328,11 +3458,11 @@ class App:
             "poles).")
                   ).grid(row=0, column=0, columnspan=4, sticky="w")
         try:
-            fhi0 = max(float(self.fcut_var.get()), 20e3)
+            fhi0 = max(float(c.fcut_var.get()), 20e3)
         except ValueError:
             fhi0 = 40e3
         fhi_var = tk.StringVar(value=f"{fhi0:g}")
-        have_gain = bool(self.pgain_var.get().strip())
+        have_gain = bool(c.param_vars["gain"].get().strip())
         fixg_var = tk.BooleanVar(value=not have_gain)
         ttk.Label(a, text="fit up to Hz").grid(row=1, column=0, sticky="w",
                                                 pady=(4, 0))
@@ -3364,7 +3494,7 @@ class App:
                                             parent=dlg)
             gain = None
             if not fixg_var.get():
-                txt = self.pgain_var.get().strip()
+                txt = c.param_vars["gain"].get().strip()
                 try:
                     gain = float(txt)
                     if gain <= 0:
@@ -3375,7 +3505,7 @@ class App:
                         "type one or tick 'gain from the lowest tones'",
                         parent=dlg)
             dlg.destroy()
-            self.do_fit_frf(fps[0], key, f_hi, gain)
+            self.do_fit_frf(fps[0], key, f_hi, gain, c=c)
 
         bb = ttk.Button(a, text="Fit to FRF", command=go_frf,
                         state="normal" if frf_ok else "disabled")
@@ -3394,7 +3524,7 @@ class App:
             "for the gain, or when no FRF has been measured yet.")
                   ).grid(row=0, column=0, sticky="w")
         src_b = ("the latest measurement in this session"
-                 if self.session is not None and self.session.snapshots else
+                 if sess is not None and sess.snapshots else
                  f"the Captures glob {self.meas_var.get().strip()}"
                  if meas_ok else
                  "nothing to fit from: load or init a session and run an "
@@ -3404,7 +3534,7 @@ class App:
 
         def go_meas():
             dlg.destroy()
-            self.do_fit()
+            self.do_fit(c=c)
 
         ttk.Button(b, text="Fit to measurement", command=go_meas,
                    state="normal" if meas_ok else "disabled").grid(
@@ -3413,20 +3543,23 @@ class App:
         ttk.Button(fr, text="Cancel", command=dlg.destroy).grid(
             row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
 
-    def do_fit_frf(self, path, model_key, f_hi, gain=None):
+    def do_fit_frf(self, path, model_key, f_hi, gain=None, c=None):
         """Fit the selected parametric rung to the FRF file `path` up to
         f_hi Hz; gain None = the median |H| of the lowest tones. Works with
-        or without a session (the fit lives in frequency, not on a grid)."""
+        or without a session (the fit lives in frequency, not on a grid).
+        `c`: the Model column the result goes into."""
+        c = c or self._col1
         try:
-            gamma = float(self.gamma_var.get())
+            gamma = float(c.gamma_var.get())
         except ValueError:
             gamma = 0.6
-        dt = self.session.loop.dt if self.session is not None else 2e-6
+        sess = self._col_session(c)
+        dt = sess.loop.dt if sess is not None else 2e-6
         self.run_worker(lambda: self._fit_frf_work(path, model_key, f_hi,
-                                                   gain, gamma, dt),
+                                                   gain, gamma, dt, c),
                         "fitting model to the FRF...")
 
-    def _fit_frf_work(self, path, model_key, f_hi, gain, gamma, dt):
+    def _fit_frf_work(self, path, model_key, f_hi, gain, gamma, dt, c=None):
         f, H = ilc._read_frf(path)
         p, info = plantmod.fit_frf(f, H, model=model_key, f_hi=f_hi,
                                    gain=gain, dt=dt)
@@ -3447,19 +3580,21 @@ class App:
                  f"contracting there; keep f_cut below it (the Q filter "
                  f"shields a little past it)" if f_b is not None else
                  f"below 1 at every measured tone to {f[-1]/1e3:.0f} kHz"))
-        self.msgs.put(("call", lambda: self._after_frf_fit(p)))
+        self.msgs.put(("call", lambda: self._after_frf_fit(p, c)))
 
-    def _after_frf_fit(self, p):
-        self._set_param_entries(p)
+    def _after_frf_fit(self, p, c=None):
+        self._set_param_entries(p, c)
         try:
-            self.do_show_frf()          # the fitted model over the tones
+            self.do_show_frf(c)         # the fitted model over the tones
         except Exception as e:          # the overlay is a courtesy
             self.log(f"(FRF overlay not drawn: {e})")
 
-    def do_fit(self):
+    def do_fit(self, c=None):
         """Identify the selected parametric model from real data: the last
-        measured iteration if there is one, else the capture glob."""
-        key = self._model_key()
+        measured iteration if there is one, else the capture glob. `c`: the
+        Model column (its session: X2's for pair mode's X2 column)."""
+        c = c or self._col1
+        key = self._model_key(c)
         if key == "frf":
             return messagebox.showinfo(
                 "Fit to measurement",
@@ -3468,16 +3603,17 @@ class App:
                 "CLI: tools/sysid_make.py + sysid_fit.py), then set the "
                 "taper inside its coherent band and switch the Model to "
                 "'measured FRF'. Fit belongs to the parametric rungs.")
-        if self.session is None:
+        sess = self._col_session(c)
+        if sess is None:
             return messagebox.showerror("Fit to measurement",
                                         "load or init a session first")
         pattern = self.meas_var.get().strip()
         mon = self.moncol_var.get()
-        self.run_worker(lambda: self._fit_work(key, pattern, mon),
+        self.run_worker(lambda: self._fit_work(key, pattern, mon, c, sess),
                         "fitting plant from measurement...")
 
-    def _fit_work(self, model_key, pattern, mon):
-        s = self.session
+    def _fit_work(self, model_key, pattern, mon, c=None, s=None):
+        s = s or self.session
         if s.snapshots:
             # Fit the measurement against the drive that PLAYED it. After a
             # step the current drive has already moved on, and identifying a
@@ -3507,10 +3643,12 @@ class App:
               f"{info['resid_rms_pct']:.2f}% rms of span -- what this model "
               f"form cannot explain about the measured response")
         it = s.snapshots[-1]["it"] if s.snapshots else s.iteration
-        self.msgs.put(("call", lambda: self._after_fit(p2, u_fit, y, it)))
+        self.msgs.put(("call", lambda: self._after_fit(p2, u_fit, y, it, c, s)))
 
-    def _after_fit(self, p, u_fit, y, it):
-        self._set_param_entries(p)
+    def _after_fit(self, p, u_fit, y, it, c=None, s=None):
+        self._set_param_entries(p, c)
+        if s is not None and s is not self.session:
+            return                  # the plots show the other chain of the pair
         self._plot_waveforms_pinned(u_fit, y, p.forward(u_fit), it)
         self._show_fig(self.fig_wave)
 
@@ -3520,12 +3658,16 @@ class App:
         if os.path.exists(self.target_var.get().strip()):
             self.do_preview_target()
 
-    def _first_shot_gain(self):
+    def _first_shot_gain(self, shot=None, c=None):
         """The conversion gain for the flat first shot: the dedicated entry,
-        else the model gain as fallback. None when neither is set."""
-        for name, var in (("first-shot gain", self.shotgain_var),
-                          ("model gain", self.pgain_var)):
-            txt = var.get().strip()
+        else the model gain as fallback. None when neither is set. `shot`
+        replaces the entry's text and `c` names the Model column whose gain
+        is the fallback (pair mode's X2: no first-shot gain, its own gain)."""
+        shot_txt = self.shotgain_var.get() if shot is None else shot
+        model_txt = (c or self._col1).param_vars["gain"].get()
+        for name, txt in (("first-shot gain", shot_txt),
+                          ("model gain", model_txt)):
+            txt = txt.strip()
             if txt:
                 try:
                     g = float(txt)
@@ -3701,10 +3843,17 @@ class App:
         path = self.state_var.get().strip()
         if not path:
             return self._browse(self.state_var, "State files", "*.state.npz", RUN_DIR)
+        if self.pair_var.get():
+            return self._load_pair(path)
         try:
             s = load_session(path)
         except Exception as e:
             return messagebox.showerror("Load state", str(e))
+        self._take_session(s, path)
+
+    def _take_session(self, s, path):
+        """A loaded session into the panel: column 1, the Session tab's
+        boxes, the Target box, the recalled measurements, the plots."""
         self.session = s
         self._remember_fields()     # the panel's numbers, before the state's
         self.channel_var.set(s.channel)
@@ -3800,6 +3949,8 @@ class App:
         self._show_session(select_tab=True)
 
     def do_init(self):
+        if self.pair_var.get():
+            return self._init_pair()
         target = self.target_var.get().strip()
         if not os.path.exists(target):
             return messagebox.showerror("Init", f"target not found: {target!r}")
@@ -4013,7 +4164,9 @@ class App:
         else:                        # a pre-record state: show what we know
             tag = ""
             band = f"f_cut {lp.f_cut/1e3:g} kHz, "
-        txt = (f"{s.channel}  '{s.stem}'  iteration {s.iteration}{tag}\n"
+        of_pair = (f" ({self._pair_key_of(s)} of a pair)"
+                   if self._pair_key_of(s) else "")
+        txt = (f"{s.channel}  '{s.stem}'  iteration {s.iteration}{tag}{of_pair}\n"
                f"target {np.ptp(lp.target)*lp.channel.mon_scale:.0f} V pk-pk, "
                f"{len(s.t)} pts, dt {lp.dt*1e6:.2f} us\n"
                f"drive peak {np.abs(s.u).max():.3f} V, idle "
@@ -4063,12 +4216,25 @@ class App:
     def _gather_settings(self):
         """Entry fields -> plain values, ON THE MAIN THREAD. Tk variables must
         not be read from a worker (tkinter is not thread-safe), so everything a
-        worker needs is collected here and handed over as floats and strings."""
-        cfg = self._floats(gamma=self.gamma_var, f_cut=self.fcut_var,
+        worker needs is collected here and handed over as floats and strings.
+
+        Pair mode: the SHOWN channel's column, as in single mode (Manual step
+        acts on the shown session), plus both under cfg["pair"] =
+        {"X1": cfg, "X2": cfg} for the pair loop and Init."""
+        if not (self.pair_var.get() and self._col2 is not None):
+            return self._gather_column(self._col1)
+        both = {k: self._gather_column(self._pair_col(k)) for k in PAIR_KEYS}
+        out = dict(both[self.shown_var.get()])
+        out["pair"] = both
+        return out
+
+    def _gather_column(self, c):
+        """One Model column's settings (plus the shared t-offset)."""
+        cfg = self._floats(gamma=c.gamma_var, f_cut=c.fcut_var,
                            t_offset_us=self.toff_var)
-        cfg["mode"] = self._model_key()
-        cfg["notches"] = self._notches()
-        fpaths = self._frf_paths()
+        cfg["mode"] = self._model_key(c)
+        cfg["notches"] = self._notches(c)
+        fpaths = self._frf_paths(c)
         cfg["frf_path"] = fpaths[0] if fpaths else ""
         if cfg["mode"] == "frf":
             if not fpaths:
@@ -4080,7 +4246,7 @@ class App:
                     f"the FRF field lists {len(fpaths)} files (the overlay "
                     f"view) -- the measured-FRF model divides by exactly "
                     f"ONE. Keep the one to drive with.")
-            cfg.update(self._floats(f_use=self.fuse_var, f_max=self.fmax_var))
+            cfg.update(self._floats(f_use=c.fuse_var, f_max=c.fmax_var))
             if not 0 < cfg["f_use"] < cfg["f_max"]:
                 raise RuntimeError(
                     f"the taper needs 0 < f_use < f_max "
@@ -4090,14 +4256,15 @@ class App:
             cfg["frf_top"] = self._check_taper_band(
                 cfg["frf_path"], cfg["f_use"], cfg["f_max"])
         else:
-            cfg["params"] = self._entry_params(cfg["mode"], strict=True)
+            cfg["params"] = self._entry_params(cfg["mode"], strict=True, c=c)
         return cfg
 
-    def _apply_settings(self, cfg):
+    def _apply_settings(self, cfg, s=None):
         """Worker side: settings -> loop, logging anything that actually
         changed. Changed values persist in the state on the next save,
-        exactly like the CLI's --f-cut / --t-offset overrides."""
-        s = self.session
+        exactly like the CLI's --f-cut / --t-offset overrides. `s`: the
+        session (default the shown one; the pair loop names each)."""
+        s = s or self.session
         if abs(cfg["gamma"] - s.loop.gamma) > 1e-12:
             print(f"gamma {s.loop.gamma:g} -> {cfg['gamma']:g}")
             s.loop.gamma = cfg["gamma"]
@@ -4145,12 +4312,13 @@ class App:
             s.model_key = cfg["mode"]
             s.frf_path, s.frf_use, s.frf_max = "", 0.0, 0.0
 
-    def _noise_floor(self, stack):
+    def _noise_floor(self, stack, s=None):
         """One log line per measurement: where the error has fallen under
         the measurement's own scatter, against the band the update acts on
         (f_cut, or the taper's end on the FRF rung). Returns the numbers for
-        the metrics dict -- empty when there is nothing to estimate from."""
-        s = self.session
+        the metrics dict -- empty when there is nothing to estimate from.
+        `s`: the session (default the shown one; the pair loop names it)."""
+        s = s or self.session
         f_top = s.loop.frf.f_max if s.loop.frf is not None else s.loop.f_cut
         try:
             # the loop's error is target - (y - line): the same thing as
@@ -4206,14 +4374,14 @@ class App:
                                   for d in lines]
         return out
 
-    def _measurement_stats(self, stack, path, scope=None, scope_ch=None):
+    def _measurement_stats(self, stack, path, scope=None, scope_ch=None, s=None):
         """The shots' statistics for one measurement (eomilc.diagnostics):
         the standard error per sample and per bin, the campaign bands and
         their floors, and the residual folded on the ADC code when the
         monitor's V/div is known. Written beside the measurement as
         meas_..._stats.npz so every stored iteration can be drawn later.
         Returns the dict, or None when there was nothing to compute from."""
-        s = self.session
+        s = s or self.session
         vdiv = offset = None
         if scope is not None and scope_ch is not None:
             try:
@@ -4250,12 +4418,12 @@ class App:
                     fold_amp=float(st.get("fold_amp", float("nan"))),
                     fold_sig=float(st.get("fold_sig", float("nan"))))
 
-    def _model_check_line(self, it, u_now, y_now):
+    def _model_check_line(self, it, u_now, y_now, s=None):
         """After a measurement of iteration `it`: did the chain answer the
         update that made this drive the way the model predicted? Needs the
         previous base measurement and its drive; silent without them.
         Returns the numbers for the metrics dict."""
-        s = self.session
+        s = s or self.session
         prev = next((sn for sn in reversed(s.snapshots)
                      if sn.get("run") is None and sn["it"] == it - 1
                      and sn.get("u") is not None), None)
@@ -4312,12 +4480,12 @@ class App:
                                       corr=r["corr"], update_rms=r["update_rms"])
                                  for r in rows])
 
-    def _plateau_line(self):
+    def _plateau_line(self, s=None):
         """When the history says the loop is re-learning noise, say so --
         and name the best iteration, whose drive is on disk. Silent
         otherwise: the noise-floor line is already there every time, and a
         second every-iteration line would bury both."""
-        s = self.session
+        s = s or self.session
         p = ilc.plateau(s.loop.history, run_id=self._run_id)
         if not p or not p["flat"]:
             return
@@ -4330,10 +4498,10 @@ class App:
               f"{p['best_it']} at {p['best']:.1f} V, "
               f"drive_{s.stem}_i{p['best_it']:02d}.csv")
 
-    def _write_iteration(self, wname):
+    def _write_iteration(self, wname, s=None):
         """Drive CSV in run\\, GUI-previewable copy in the AWG library --
         exactly the pair the CLIs leave behind."""
-        s = self.session
+        s = s or self.session
         out = os.path.join(RUN_DIR, f"drive_{wname}.csv")
         outputs.write_awg_csv(out, s.t, s.u,
                               comment=f"{s.channel} ILC {wname}\n{s.loop.plant}")
@@ -4505,6 +4673,8 @@ class App:
         the record's period sets the arb frequency and the scope window, the
         drive and target spans set the verticals. Never touches an output
         switch, and refuses to reconfigure a channel that is live."""
+        if self.pair_var.get():
+            return self._do_autoset_pair()
         if self.session is None:
             return messagebox.showerror("Auto-set",
                                         "load or init a session first -- the "
@@ -4542,114 +4712,124 @@ class App:
         # the panel's life, on the single most likely way to leave this
         # function (the output was already on).
         try:
-            if awg.is_on(awg_ch):
-                print(f"REFUSING to auto-set CH{awg_ch}: its output is ON, "
-                      f"and changing FRQ/AMP under a live output moves real "
-                      f"voltage at the chain. Switch it off first.")
-                return
-            # Select the session's CURRENT drive if the generator already
-            # holds it -- selecting is all autoset may do; uploading is the
-            # bench loop's job (or the AWG GUI's, from its Waveforms library).
-            stored = awg.list_waveforms(user_only=True)
-            pick = next((n for n in stored if n == wname), None) or \
-                next((n for n in stored if n.lower() == wname.lower()), None)
-            blocks = {
-                "OUTP": {"LOAD": "HZ"},
-                "SRATE": {"MODE": "DDS"},
-                "BSWV": {"WVTP": "ARB", "FRQ": 1.0 / period,
-                         "AMP": 2 * fs, "OFST": 0},
-                "MODE": ("Burst", {"GATE_NCYC": "NCYC", "TIME": 1,
-                                   "TRSR": "EXT"}),
-            }
-            if pick:
-                blocks["ARWV"] = {"NAME": pick}
-            # apply_channel writes in the only order the 4063B honours
-            # (load first, ARWV and SRATE before BSWV, mode block last, and
-            # burst STATE,ON sent separately before its parameters -- the
-            # manual requires it, and a combined write drops the type switch)
-            missed = awg.apply_channel(awg_ch, blocks,
-                                       log=lambda m: print("      ", m))
-            if missed:
-                print("       did NOT take (apply_channel readback):", missed)
-            # trust nothing: read the selection and burst back and show them
-            arwv = awg.query(f"C{awg_ch}:ARWV?").strip()
-            btwv = awg.query(f"C{awg_ch}:BTWV?").strip()
-            print(f"AWG CH{awg_ch}: ARB, DDS, period {period*1e3:.4f} ms "
-                  f"(FRQ {1.0/period:.6g} Hz), AMP {2*fs:g} Vpp, OFST 0, "
-                  f"load HZ -- output left "
-                  f"{'ON' if awg.is_on(awg_ch) else 'OFF'}")
-            self._bench_note(f"Auto-set: CH{awg_ch} FRQ {1.0/period:.6g} Hz, AMP "
-                             f"{2*fs:g} Vpp, output {'ON' if awg.is_on(awg_ch) else 'OFF'}; "
-                             f"scope HRES")
-            print(f"       waveform readback: {arwv}")
-            if not pick:
-                print(f"       NOTE: '{wname}' is not in the generator's user "
-                      f"memory (it holds: {', '.join(stored) or 'nothing'}). "
-                      f"The selection was left alone -- upload it from the "
-                      f"AWG GUI's Waveforms library ({wname}.csv, Normalise "
-                      f"OFF), or let the bench loop upload it.")
-            print(f"       burst readback: {btwv}")
-
-            # full window with settle room, waveform start at the left edge:
-            # position (trigger -> screen centre) = half the period
-            rng = nice_setting(1.3 * period)
-            scope.put(":TIMebase:RANGe", f"{rng:.6g}")
-            scope.put(":TIMebase:POSition", f"{period/2:.6g}")
-            scope.put(":ACQuire:TYPE", "HRES")
-            print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
-            if drive_ch is None:
-                print(f"  no CmdX{awg_ch} readback channel: only the monitor's "
-                      f"verticals are set")
-            for ch, lo, hi, what in ((drive_ch, u_lo, u_hi, "drive"),
-                                     (scope_ch, v_lo, v_hi, "monitor")):
-                if ch is None:
-                    continue
-                scope.put(f":CHANnel{ch}:DISPlay", "1")
-                # DC, always -- and before the verticals, and regardless of
-                # 'keep verticals'. The ILC error is an absolute level, so AC
-                # coupling does not rescale the measurement, it deletes the
-                # part being measured: the monitor's DC is the EOM voltage,
-                # and the drive's is the idle the end clamp exists to bound.
-                # A noise capture leaves these channels AC on purpose
-                # (eomilc.rin, ilc_bench.noise_capture set and restore it),
-                # so a restore that did not run would otherwise sit here
-                # silently until the next campaign learned nonsense. Coupling
-                # first for the reason ilc_bench.scope_apply gives: the offset
-                # written after it is interpreted against the coupling then in
-                # force. 'keep verticals' is about V/div and offset -- the
-                # ones you may want hand-tuned -- not about which half of the
-                # signal reaches the digitiser.
-                was = scope.try_get(f":CHANnel{ch}:COUPling")
-                scope.put(f":CHANnel{ch}:COUPling", "DC")
-                if was is not None and was.upper() != "DC":
-                    print(f"scope CH{ch} ({what}): coupling was {was} -- set "
-                          f"to DC (AC deletes the level the loop measures)")
-                if keep_verticals:
-                    print(f"scope CH{ch} ({what}): {scope.get(f':CHANnel{ch}:SCALe')} "
-                          f"V/div, offset {scope.get(f':CHANnel{ch}:OFFSet')} V, "
-                          f"DC -- verticals left as found (keep verticals "
-                          f"ticked); coupling is not a vertical")
-                    continue
-                span = max(hi - lo, 1e-3)
-                scale = nice_setting(1.25 * span / 8)      # 8 vertical divs
-                mid = 0.5 * (hi + lo)
-                scope.put(f":CHANnel{ch}:SCALe", f"{scale:.6g}")
-                scope.put(f":CHANnel{ch}:OFFSet", f"{mid:.6g}")
-                print(f"scope CH{ch} ({what}): {scale:.3g} V/div, offset "
-                      f"{mid:+.3g} V, DC (signal {lo:+.3g}..{hi:+.3g} V)")
-            print(f"scope: {rng*1e3:.4g} ms window ({rng/10*1e3:.4g} ms/div), "
-                  f"position +{period/2*1e3:.4g} ms, acquisition HRES")
-            print("trigger source and level NOT touched -- they belong to "
-                  "the burst-pulse wiring; confirm the shot still fires")
-            errs = scope.errors()
-            if errs:
-                print("scope reported:", errs)
+            self._autoset_on(awg, scope, period, u_lo, u_hi, v_lo, v_hi, fs,
+                             awg_ch, scope_ch, wname, keep_verticals, drive_ch)
         finally:
             # both closes leave the shared ResourceManager standing
             # (ilc_bench.make_awg / make_scope), so the order does not matter
             awg.close()
             scope.close()
             print("instruments closed")
+
+    def _autoset_on(self, awg, scope, period, u_lo, u_hi, v_lo, v_hi, fs,
+                    awg_ch, scope_ch, wname, keep_verticals=False,
+                    drive_ch=None):
+        """Auto-set's work on instruments already open (one chain): the AWG
+        channel, the scope window, the chain's drive and monitor verticals.
+        _autoset_work opens and closes around it; pair mode calls it once
+        per chain inside one session."""
+        if awg.is_on(awg_ch):
+            print(f"REFUSING to auto-set CH{awg_ch}: its output is ON, "
+                  f"and changing FRQ/AMP under a live output moves real "
+                  f"voltage at the chain. Switch it off first.")
+            return
+        # Select the session's CURRENT drive if the generator already
+        # holds it -- selecting is all autoset may do; uploading is the
+        # bench loop's job (or the AWG GUI's, from its Waveforms library).
+        stored = awg.list_waveforms(user_only=True)
+        pick = next((n for n in stored if n == wname), None) or \
+            next((n for n in stored if n.lower() == wname.lower()), None)
+        blocks = {
+            "OUTP": {"LOAD": "HZ"},
+            "SRATE": {"MODE": "DDS"},
+            "BSWV": {"WVTP": "ARB", "FRQ": 1.0 / period,
+                     "AMP": 2 * fs, "OFST": 0},
+            "MODE": ("Burst", {"GATE_NCYC": "NCYC", "TIME": 1,
+                               "TRSR": "EXT"}),
+        }
+        if pick:
+            blocks["ARWV"] = {"NAME": pick}
+        # apply_channel writes in the only order the 4063B honours
+        # (load first, ARWV and SRATE before BSWV, mode block last, and
+        # burst STATE,ON sent separately before its parameters -- the
+        # manual requires it, and a combined write drops the type switch)
+        missed = awg.apply_channel(awg_ch, blocks,
+                                   log=lambda m: print("      ", m))
+        if missed:
+            print("       did NOT take (apply_channel readback):", missed)
+        # trust nothing: read the selection and burst back and show them
+        arwv = awg.query(f"C{awg_ch}:ARWV?").strip()
+        btwv = awg.query(f"C{awg_ch}:BTWV?").strip()
+        print(f"AWG CH{awg_ch}: ARB, DDS, period {period*1e3:.4f} ms "
+              f"(FRQ {1.0/period:.6g} Hz), AMP {2*fs:g} Vpp, OFST 0, "
+              f"load HZ -- output left "
+              f"{'ON' if awg.is_on(awg_ch) else 'OFF'}")
+        self._bench_note(f"Auto-set: CH{awg_ch} FRQ {1.0/period:.6g} Hz, AMP "
+                         f"{2*fs:g} Vpp, output {'ON' if awg.is_on(awg_ch) else 'OFF'}; "
+                         f"scope HRES")
+        print(f"       waveform readback: {arwv}")
+        if not pick:
+            print(f"       NOTE: '{wname}' is not in the generator's user "
+                  f"memory (it holds: {', '.join(stored) or 'nothing'}). "
+                  f"The selection was left alone -- upload it from the "
+                  f"AWG GUI's Waveforms library ({wname}.csv, Normalise "
+                  f"OFF), or let the bench loop upload it.")
+        print(f"       burst readback: {btwv}")
+
+        # full window with settle room, waveform start at the left edge:
+        # position (trigger -> screen centre) = half the period
+        rng = nice_setting(1.3 * period)
+        scope.put(":TIMebase:RANGe", f"{rng:.6g}")
+        scope.put(":TIMebase:POSition", f"{period/2:.6g}")
+        scope.put(":ACQuire:TYPE", "HRES")
+        print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
+        if drive_ch is None:
+            print(f"  no CmdX{awg_ch} readback channel: only the monitor's "
+                  f"verticals are set")
+        for ch, lo, hi, what in ((drive_ch, u_lo, u_hi, "drive"),
+                                 (scope_ch, v_lo, v_hi, "monitor")):
+            if ch is None:
+                continue
+            scope.put(f":CHANnel{ch}:DISPlay", "1")
+            # DC, always -- and before the verticals, and regardless of
+            # 'keep verticals'. The ILC error is an absolute level, so AC
+            # coupling does not rescale the measurement, it deletes the
+            # part being measured: the monitor's DC is the EOM voltage,
+            # and the drive's is the idle the end clamp exists to bound.
+            # A noise capture leaves these channels AC on purpose
+            # (eomilc.rin, ilc_bench.noise_capture set and restore it),
+            # so a restore that did not run would otherwise sit here
+            # silently until the next campaign learned nonsense. Coupling
+            # first for the reason ilc_bench.scope_apply gives: the offset
+            # written after it is interpreted against the coupling then in
+            # force. 'keep verticals' is about V/div and offset -- the
+            # ones you may want hand-tuned -- not about which half of the
+            # signal reaches the digitiser.
+            was = scope.try_get(f":CHANnel{ch}:COUPling")
+            scope.put(f":CHANnel{ch}:COUPling", "DC")
+            if was is not None and was.upper() != "DC":
+                print(f"scope CH{ch} ({what}): coupling was {was} -- set "
+                      f"to DC (AC deletes the level the loop measures)")
+            if keep_verticals:
+                print(f"scope CH{ch} ({what}): {scope.get(f':CHANnel{ch}:SCALe')} "
+                      f"V/div, offset {scope.get(f':CHANnel{ch}:OFFSet')} V, "
+                      f"DC -- verticals left as found (keep verticals "
+                      f"ticked); coupling is not a vertical")
+                continue
+            span = max(hi - lo, 1e-3)
+            scale = nice_setting(1.25 * span / 8)      # 8 vertical divs
+            mid = 0.5 * (hi + lo)
+            scope.put(f":CHANnel{ch}:SCALe", f"{scale:.6g}")
+            scope.put(f":CHANnel{ch}:OFFSet", f"{mid:.6g}")
+            print(f"scope CH{ch} ({what}): {scale:.3g} V/div, offset "
+                  f"{mid:+.3g} V, DC (signal {lo:+.3g}..{hi:+.3g} V)")
+        print(f"scope: {rng*1e3:.4g} ms window ({rng/10*1e3:.4g} ms/div), "
+              f"position +{period/2*1e3:.4g} ms, acquisition HRES")
+        print("trigger source and level NOT touched -- they belong to "
+              "the burst-pulse wiring; confirm the shot still fires")
+        errs = scope.errors()
+        if errs:
+            print("scope reported:", errs)
 
     # --------------------------------------------------------------- upload
     def do_upload(self):
@@ -4712,6 +4892,8 @@ class App:
         evolve over minutes? Measurements are tagged as runs (iter k r1,
         r2, ...) so they never mix with the loop's own iterations, and the
         state is untouched."""
+        if self.pair_var.get():
+            return self._do_hold_pair()
         if self.session is None:
             return messagebox.showerror("Hold", "load or init a session first")
         try:
@@ -4728,15 +4910,15 @@ class App:
             it_hold, u_hold, src = self._hold_drive(self.holditer_var.get())
         except RuntimeError as e:
             return messagebox.showerror("Hold", str(e))
+        native = bool(self.keepnative_var.get())     # main thread, as do_bench
         self.run_worker(lambda: self._hold_work(int(f["runs"]), f["gap_s"],
                                                 int(f["awg_ch"]),
                                                 int(f["scope_ch"]),
                                                 int(f["repeats"]), f["wait"],
-                                                self.keepnative_var.get(),
-                                                it_hold, u_hold, src),
+                                                native, it_hold, u_hold, src),
                         "hold: re-measuring...")
 
-    def _hold_drive(self, spec):
+    def _hold_drive(self, spec, s=None):
         """The 'iter' box -> (iteration, drive, source). Blank means the
         session's current drive (None, None, ...). A number means that
         iteration's stored drive_<stem>_iNN.csv beside the state -- the
@@ -4744,7 +4926,7 @@ class App:
         be re-measured without Init, which would restart the campaign at
         i00 under the same names and discard the loop's memory."""
         spec = spec.strip()
-        s = self.session
+        s = s or self.session
         if not spec:
             return None, None, "the current drive"
         try:
@@ -4916,6 +5098,8 @@ class App:
 
     # ------------------------------------------------------------ bench run
     def do_bench(self):
+        if self.pair_var.get():
+            return self._do_bench_pair()
         if self.session is None:
             return messagebox.showerror("Bench", "load or init a session first")
         try:
@@ -4928,13 +5112,15 @@ class App:
         if not self._wiring_ok(f["awg_ch"], f["scope_ch"], "Bench"):
             return
         drive_ch = self._drive_scope_ch(f["awg_ch"])
+        # the ticks read HERE, on the main thread: the lambda runs on the
+        # worker, where a Tk variable must not be touched (it raised "main
+        # thread is not in main loop" whenever Tk was pumped by update())
+        skip, native = bool(self.skip_var.get()), bool(self.keepnative_var.get())
         self.run_worker(lambda: self._bench_work(cfg, int(f["awg_ch"]),
                                                  int(f["scope_ch"]),
                                                  int(f["iterations"]),
                                                  int(f["repeats"]), f["wait"],
-                                                 self.skip_var.get(),
-                                                 self.keepnative_var.get(),
-                                                 drive_ch),
+                                                 skip, native, drive_ch),
                         "bench loop running...")
 
     def _bench_modules(self):
@@ -5147,6 +5333,973 @@ class App:
             print("instruments closed")
         print("\n" + s.loop.report())
 
+    # ------------------------------------------------------------ pair mode
+    # X1 and X2 learned side by side, the way the batch trains them and the
+    # way the ramps play in the experiment: two sessions, each with its own
+    # Model column (the two Trek chains are different amplifiers), one bench
+    # loop that plays both drives and reads both monitors from the same
+    # frozen acquisitions. Everything single-channel (Upload, Manual step,
+    # Corrections, Measure FRF, the line ripple) acts on the SHOWN session.
+
+    def _pair_col(self, k):
+        """The Model column of chain k: column 1 is X1's, column 2 X2's."""
+        return self._col1 if k == "X1" else self._col2
+
+    def _col_session(self, c):
+        """The session a Model column belongs to: X1's or X2's in pair mode,
+        the loaded one for column 1 otherwise."""
+        if self.pair is not None:
+            return self.pair.get(c.key)
+        return self.session if c is self._col1 else None
+
+    def _pair_key_of(self, s):
+        """"X1" / "X2" when s is one of the loaded pair, else ""."""
+        if self.pair is None or s is None:
+            return ""
+        return next((k for k, ps in self.pair.items() if ps is s), "")
+
+    @staticmethod
+    def _pair_path(path, what="file"):
+        """X2's file from X1's, by name: the LAST 'X1' in the file name
+        becomes 'X2' (target_S47X1.csv -> target_S47X2.csv,
+        drive_S47X1.state.npz -> drive_S47X2.state.npz). Refuses a name with
+        no X1 in it and an X2 file that is not there."""
+        d, base = os.path.split(path)
+        i = base.rfind("X1")
+        if i < 0:
+            raise RuntimeError(
+                f"pair mode: the {what} {base!r} has no 'X1' in its name, so "
+                f"X2's cannot be found by name. Pick the X1 file of the pair "
+                f"(e.g. target_S47X1.csv, drive_S47X1.state.npz), or untick "
+                f"Pair.")
+        p2 = os.path.join(d, base[:i] + "X2" + base[i + 2:])
+        if not os.path.exists(p2):
+            raise RuntimeError(
+                f"pair mode: X2's {what} is not there:\n{p2}\n(derived from "
+                f"{base} by X1 -> X2)")
+        return p2
+
+    @staticmethod
+    def _check_pair(s1, s2):
+        """Two sessions that can play as a pair: EO1 and EO2, one grid."""
+        if s1.channel != "EO1" or s2.channel != "EO2":
+            raise RuntimeError(
+                f"pair mode: X1's state is on {s1.channel} and X2's on "
+                f"{s2.channel}; a pair is EO1 + EO2")
+        if len(s1.t) != len(s2.t) or abs(float(s1.loop.dt) - float(s2.loop.dt)) > 1e-12:
+            raise RuntimeError(
+                f"pair mode: X1 ({len(s1.t)} pts, dt {s1.loop.dt*1e6:g} us) and "
+                f"X2 ({len(s2.t)} pts, dt {s2.loop.dt*1e6:g} us) are not on one "
+                f"grid -- they play together, from one trigger")
+
+    # -- the X2 column of the Model tab ----------------------------------
+    def _build_model_column_2(self):
+        """The X2 (EO2) column: a parallel set of variables (model_var_2,
+        pgain_var_2, ptau_var_2, pfn_var_2, pzeta_var_2, gamma_var_2,
+        fcut_var_2, notch_var_2, frf_var_2, fuse_var_2, fmax_var_2) with the
+        same rungs, the same show-only-the-rung's-fields behaviour, its own
+        'Replace values with a fit...' and Show FRF. The grey notes are
+        column 1's; the X2 column packs under it."""
+        vf = ttk.LabelFrame(self._model_row, text="X2 (EO2) inverse model",
+                            padding=3)
+        self.model_var_2 = tk.StringVar(value=self.model_var.get())
+        r0 = ttk.Frame(vf); r0.grid(row=0, column=0, columnspan=3, sticky="ew")
+        ttk.Label(r0, text="Model").pack(side="left")
+        mc = ttk.Combobox(r0, textvariable=self.model_var_2, state="readonly",
+                          width=30, values=[l for l, _ in MODEL_LABELS])
+        mc.pack(side="left", padx=(2, 0))
+        mc.bind("<<ComboboxSelected>>", lambda e: self._on_model_change_2())
+
+        r1 = ttk.Frame(vf); r1.grid(row=1, column=0, columnspan=3,
+                                    sticky="ew", pady=1)
+        self.pgain_var_2 = tk.StringVar()
+        self.ptau_var_2 = tk.StringVar()
+        self.pfn_var_2 = tk.StringVar()
+        self.pzeta_var_2 = tk.StringVar()
+        pv = {"gain": self.pgain_var_2, "tau": self.ptau_var_2,
+              "fn": self.pfn_var_2, "zeta": self.pzeta_var_2}
+        entries, labels = {}, {}
+        for lab, key, w in (("gain", "gain", 7), ("tau us", "tau", 6),
+                            ("fn Hz", "fn", 6), ("zeta", "zeta", 6)):
+            lw = ttk.Label(r1, text=lab)
+            lw.pack(side="left", padx=(0, 2))
+            e = ttk.Entry(r1, textvariable=pv[key], width=w)
+            e.pack(side="left", padx=(0, 8))
+            entries[key], labels[key] = e, lw
+
+        r2 = ttk.Frame(vf); r2.grid(row=2, column=0, columnspan=3,
+                                    sticky="ew", pady=1)
+        self.gamma_var_2 = tk.StringVar(value="0.6")
+        self.fcut_var_2 = tk.StringVar(value="5000")
+        ttk.Label(r2, text="gamma").pack(side="left", padx=(0, 2))
+        ttk.Entry(r2, textvariable=self.gamma_var_2, width=5).pack(
+            side="left", padx=(0, 8))
+        fl = ttk.Label(r2, text="f_cut Hz")
+        fl.pack(side="left", padx=(0, 2))
+        fe = ttk.Entry(r2, textvariable=self.fcut_var_2, width=7)
+        fe.pack(side="left", padx=(0, 6))
+
+        r3 = ttk.Frame(vf); r3.grid(row=3, column=0, columnspan=3,
+                                    sticky="ew", pady=(2, 1))
+        b = ttk.Button(r3, text="Replace values with a fit...",
+                       command=lambda: self.do_fit_dialog(self._col2))
+        b.pack(side="left", fill="x", expand=True)
+        self._actions.append(b)
+
+        self.frf_var_2 = tk.StringVar()
+        self._path_row(vf, 4, "FRF", self.frf_var_2,
+                       lambda: self._browse(self.frf_var_2, "FRF CSV",
+                                            "frf_*.csv", RUN_DIR))
+        r4 = ttk.Frame(vf); r4.grid(row=5, column=0, columnspan=3, sticky="ew")
+        self.fuse_var_2 = tk.StringVar(value="50e3")
+        self.fmax_var_2 = tk.StringVar(value="75e3")
+        l1 = ttk.Label(r4, text="full strength to Hz")
+        fu = ttk.Entry(r4, textvariable=self.fuse_var_2, width=7)
+        l2 = ttk.Label(r4, text="taper to zero at Hz")
+        fm = ttk.Entry(r4, textvariable=self.fmax_var_2, width=7)
+        taper = ((l1, dict(side="left")), (fu, dict(side="left", padx=(2, 8))),
+                 (l2, dict(side="left")), (fm, dict(side="left", padx=2)))
+        for w, opts in taper:
+            w.pack(**opts)
+        b = ttk.Button(r4, text="Show FRF",
+                       command=lambda: self.do_show_frf(self._col2))
+        b.pack(side="right")
+        self._actions.append(b)
+
+        rn = ttk.Frame(vf); rn.grid(row=6, column=0, columnspan=3,
+                                    sticky="ew", pady=1)
+        self.notch_var_2 = tk.StringVar()
+        ttk.Label(rn, text="notch Hz").pack(side="left", padx=(0, 2))
+        ttk.Entry(rn, textvariable=self.notch_var_2, width=18).pack(
+            side="left", padx=(0, 6))
+        vf.columnconfigure(1, weight=1)
+        self._col2 = types.SimpleNamespace(
+            key="X2", frame=vf, model_var=self.model_var_2, param_vars=pv,
+            param_entries=entries, param_labels=labels,
+            gamma_var=self.gamma_var_2, fcut_var=self.fcut_var_2,
+            fcut_label=fl, fcut_entry=fe, band_note=None,
+            notch_var=self.notch_var_2, frf_var=self.frf_var_2,
+            fuse_var=self.fuse_var_2, fmax_var=self.fmax_var_2,
+            fuse_entry=fu, fmax_entry=fm, taper_widgets=taper)
+        self._update_model_fields(self._col2)
+
+    def _remember_fields_2(self):
+        """The X2 column into the field memory under EO2 -- the same store
+        and the same keys column 1 writes for its channel, plus the rung
+        and band numbers column 1 keeps in the config instead."""
+        c = self._col2
+        if c is None or self._mem_model_2 is None:
+            return
+        m = self._field_mem.setdefault("EO2", {})
+        m["frf"] = c.frf_var.get().strip()
+        m["notch"] = c.notch_var.get().strip()
+        m.setdefault("models", {})[self._mem_model_2] = {
+            k: c.param_vars[k].get().strip() for k in self._MEM_KEYS}
+        m.update(model=c.model_var.get(), gamma=c.gamma_var.get().strip(),
+                 f_cut=c.fcut_var.get().strip(), f_use=c.fuse_var.get().strip(),
+                 f_max=c.fmax_var.get().strip())
+
+    def _recall_column_2(self):
+        """The X2 column from EO2's field memory: what it last held, or a
+        blank column (the prior-leak guard) and X2's own wide-probe FRF."""
+        c = self._col2
+        m = self._field_mem.get("EO2") or {}
+        lab = m.get("model")
+        c.model_var.set(lab if lab in LABEL2KEY else self.model_var.get())
+        key = self._model_key(c)
+        self._recall_params("EO2", key, blank_if_new=True, c=c)
+        c.notch_var.set(m.get("notch", ""))
+        for var, name, dflt in ((c.gamma_var, "gamma", "0.6"),
+                                (c.fcut_var, "f_cut", "5000"),
+                                (c.fuse_var, "f_use", "50e3"),
+                                (c.fmax_var, "f_max", "75e3")):
+            var.set(m.get(name) or dflt)
+        frf = m.get("frf", "")
+        parts = [p.strip() for p in frf.split(";") if p.strip()]
+        if not (parts and all(glob.glob(p) if ("*" in p or "?" in p)
+                              else os.path.exists(p) for p in parts)):
+            d = os.path.join(RUN_DIR, CH_DEFAULTS["EO2"]["frf"])
+            frf = d if os.path.exists(d) else ""
+        c.frf_var.set(frf)
+        self._mem_model_2 = key
+        self._update_model_fields(c)
+
+    def _on_model_change_2(self):
+        c = self._col2
+        key = self._model_key(c)
+        if key != self._mem_model_2:
+            self._remember_fields_2()
+            had = self._recall_params("EO2", key, blank_if_new=False, c=c)
+            self._mem_model_2 = key
+            if had:
+                shown = ", ".join(f"{k} {c.param_vars[k].get()}"
+                                  for k in PARAMS_FOR[key]
+                                  if c.param_vars[k].get().strip())
+                self.log(f"X2 {KEY2LABEL[key]}: recalled {shown or 'blank boxes'}")
+        self._update_model_fields(c)
+
+    def _fill_column(self, c, s):
+        """A loaded state's model into a column (do_load does column 1)."""
+        c.gamma_var.set(f"{s.loop.gamma:g}")
+        c.fcut_var.set(f"{s.loop.f_cut:g}")
+        c.notch_var.set(", ".join(f"{f0:g}/{bw:g}" for f0, bw in s.loop.notches))
+        self._set_param_entries(s.loop.plant, c)
+        if s.model_key:
+            c.model_var.set(KEY2LABEL.get(s.model_key, c.model_var.get()))
+            if s.model_key == "frf" and s.frf_path:
+                c.frf_var.set(s.frf_path)
+                c.fuse_var.set(f"{s.frf_use:g}")
+                c.fmax_var.set(f"{s.frf_max:g}")
+                if not os.path.exists(s.frf_path):
+                    self.log(f"NOTE: {c.key}'s recorded FRF file is missing: "
+                             f"{s.frf_path}")
+                elif s.frf_error:
+                    self.log(f"NOTE: {c.key}'s recorded FRF did NOT load, so "
+                             f"the loop is resuming without it:\n      "
+                             f"{s.frf_error}")
+        self._update_model_fields(c)
+
+    # -- the tick and the shown radio --------------------------------------
+    def _on_pair_toggle(self, quiet=False):
+        """Pair tick: on, the panel is EO1's in column 1 and EO2's in the X2
+        column, the shown radio appears and Load/Init act on both. Off: the
+        X2 column and the radio go, the X1 session stays loaded, and the
+        panel is the single-channel one it was."""
+        if self.pair_var.get():
+            if self.channel_var.get() != "EO1":
+                self.channel_var.set("EO1")
+                self._on_channel_change()
+            self._channel_cb.configure(state="disabled")
+            if self._col2 is None:
+                self._build_model_column_2()
+            self._recall_column_2()
+            self._col2.frame.pack(fill="x", pady=(4, 0))
+            self._model_frame1.configure(text="X1 (EO1) inverse model")
+            self._shown_frame.pack(side="left", padx=(0, 8),
+                                   before=self._iter_label)
+            self.shown_var.set("X1")
+            self.bench_btn.configure(text="Run bench loop (X1 + X2)")
+            self._stem_note.configure(text=STEM_NOTE_PAIR)
+            if not quiet:
+                self.log("pair mode: State and Target take the X1 file (X2's "
+                         "is the same name with X2); Load state or Init "
+                         "campaign acts on both. Model: X1 left, X2 right.")
+        else:
+            self._remember_fields_2()
+            if self._col2 is not None:
+                self._col2.frame.pack_forget()
+            self._model_frame1.configure(text=MODEL_FRAME_TEXT)
+            self._shown_frame.pack_forget()
+            self._channel_cb.configure(state="readonly")
+            self.bench_btn.configure(text="Run bench loop")
+            self._stem_note.configure(text=STEM_NOTE)
+            had = self.pair
+            self.pair = None
+            self.shown_var.set("X1")
+            if had is not None:
+                if self.session is not had["X1"]:
+                    self.session = had["X1"]
+                    self._sync_shown()
+                else:
+                    self._apply_channel_defaults()
+                    self._refresh_summary()
+            if not quiet:
+                self.log("pair mode off: single channel"
+                         + (f"; {had['X1'].stem} stays loaded" if had else ""))
+        self._refresh_run_state()
+        if not self.busy:
+            self.status.configure(text=self._hint())
+
+    def _on_shown_change(self):
+        if self.pair is None:
+            return
+        s = self.pair.get(self.shown_var.get())
+        if s is None or s is self.session:
+            return
+        self.session = s
+        self._sync_shown()
+
+    def _sync_shown(self):
+        """Everything that follows the shown session: the wiring fields
+        (Upload, Measure FRF and the line ripple act on the shown chain),
+        the Corrections box, the line switch, the summary, the plots."""
+        s = self.session
+        self._apply_channel_defaults(s.channel, wiring_only=True)
+        self._corr_pending = [dict(L) for L in s.corr_layers]
+        if s.line_fit is not None:
+            self._line_fit = s.line_fit
+        self.line_on_var.set(s.loop.line is not None)
+        self._refresh_corr_list()
+        self._refresh_line_status()
+        self._replot_corr_quiet()
+        self._refresh_summary()
+        self._show_session()
+
+    # -- Load and Init on both -------------------------------------------
+    def _ensure_pair_ui(self):
+        """The tick set without its command (a script, a test): build what
+        the tick builds before anything reads the X2 column."""
+        if self._col2 is None or not self._col2.frame.winfo_manager():
+            self._on_pair_toggle(quiet=True)
+
+    def _load_pair(self, path):
+        self._ensure_pair_ui()
+        try:
+            p2 = self._pair_path(path, "state file")
+            s1, s2 = load_session(path), load_session(p2)
+            self._check_pair(s1, s2)
+        except Exception as e:
+            return messagebox.showerror("Load state", str(e))
+        self.pair = {"X1": s1, "X2": s2}
+        self.shown_var.set("X1")
+        self._take_session(s1, path)          # column 1, Target box, X1's plots
+        self.stem_var.set(s1.stem[:-2] if s1.stem.endswith("X1") else s1.stem)
+        self._remember_fields_2()
+        self._fill_column(self._col2, s2)
+        self._mem_model_2 = self._model_key(self._col2)
+        self.log(f"loaded {p2}")
+        self.log(f"  {s2.channel} iteration {s2.iteration}, stem {s2.stem}, "
+                 f"gamma {s2.loop.gamma:g}, f_cut {s2.loop.f_cut/1e3:g} kHz "
+                 f"-- the X2 of the pair (shown: X1)")
+        self.log(f"  plant: {s2.loop.plant}")
+        recall_snapshots(s2)
+        if s2.snapshots:
+            its = sorted({sn["it"] for sn in s2.snapshots})
+            self.log(f"  recalled {len(its)} stored X2 measurement(s): "
+                     f"iterations {', '.join(str(i) for i in its)}")
+        self._refresh_run_state()
+        self._refresh_summary()
+
+    def _init_pair(self):
+        """Init campaign on both chains: X1 from the Target box and column 1,
+        X2 from the target of the same name with X2 and the X2 column. The
+        stem gets X1 / X2 appended. Nothing is written until both are built
+        and checked."""
+        self._ensure_pair_ui()
+        t1 = self.target_var.get().strip()
+        if not os.path.exists(t1):
+            return messagebox.showerror("Init", f"target not found: {t1!r}")
+        base = self.stem_var.get().strip()
+        if len(base) + 2 + 4 > NAME_LIMIT:
+            return messagebox.showerror(
+                "Init", f"name stem {base!r} is {len(base)} chars; with X1/X2 "
+                        f"and '_i00' that is {len(base) + 6}, past the "
+                        f"{NAME_LIMIT}-char cap the 4063B wedges beyond. In "
+                        f"pair mode the stem is at most {NAME_LIMIT - 6} "
+                        f"characters.")
+        try:
+            targets = {"X1": t1, "X2": self._pair_path(t1, "target")}
+            seeds = {"X1": self.seed_var.get().strip(), "X2": ""}
+            if seeds["X1"]:
+                seeds["X2"] = self._pair_path(seeds["X1"], "seed drive")
+            fc = self._floats(t_offset_us=self.toff_var, full_scale=self.fs_var)
+        except RuntimeError as e:
+            return messagebox.showerror("Init", str(e))
+        stems = {k: base + k for k in PAIR_KEYS}
+        paths = {k: os.path.join(RUN_DIR, f"drive_{stems[k]}.state.npz")
+                 for k in PAIR_KEYS}
+        there = [p for p in paths.values() if os.path.exists(p)]
+        if there and not messagebox.askyesno(
+                "A campaign already uses this stem",
+                "\n".join(there) + "\nalready exist" + ("s" if len(there) == 1
+                                                        else "") + ".\n\n"
+                "Init OVERWRITES the loops' memory: the current drives, the "
+                "iteration counters, and the error histories behind the "
+                "Convergence tab. The per-iteration files survive this press, "
+                "but the new pair restarts at i00 under the SAME names.\n\n"
+                "To keep iterating use Load state instead; to start fresh AND "
+                "keep the old pair, change the name stem.\n\nDiscard the "
+                "existing campaign(s)?"):
+            return
+        built = {}
+        for k in PAIR_KEYS:
+            r = self._init_compute(k, targets[k], self._pair_col(k),
+                                   self.shotgain_var.get() if k == "X1" else "",
+                                   seeds[k])
+            if r is None:
+                return
+            built[k] = r
+        if len(built["X1"]["t"]) != len(built["X2"]["t"]) or \
+                abs(built["X1"]["dt"] - built["X2"]["dt"]) > 1e-12:
+            return messagebox.showerror(
+                "Init", f"the X1 and X2 targets are not on one grid "
+                        f"({len(built['X1']['t'])} and {len(built['X2']['t'])} "
+                        f"points) -- they play together, from one trigger")
+        os.makedirs(RUN_DIR, exist_ok=True)
+        pair = {}
+        for k in PAIR_KEYS:
+            r = built[k]
+            s, out, gui = self._init_commit(r, stems[k], paths[k], fc)
+            if k == "X1" and self._line_fit is not None:
+                s.line_fit = self._line_fit
+                self._apply_line(s, self.line_on_var.get())
+            save_session(s)
+            pair[k] = s
+            self._set_param_entries(r["plant"], self._pair_col(k))
+            self._init_log(r, s, out, gui)
+        if self._line_fit is not None:
+            self.log("  the panel's line-ripple fit went into X1 only (it was "
+                     "measured on one monitor); show X2 and measure its own")
+        self._corr_pending = []
+        self.pair = pair
+        self.shown_var.set("X1")
+        self.session = pair["X1"]
+        self.state_var.set(paths["X1"])
+        self._apply_channel_defaults("EO1")
+        self._mem_model_2 = self._model_key(self._col2)
+        self._refresh_corr_list()
+        self._refresh_line_status()
+        self._refresh_summary()
+        self._show_session(select_tab=True)
+        self._save_config()
+
+    def _init_compute(self, k, target, c, shot_txt, seed):
+        """One chain of a pair Init, built but not written: the same steps
+        and refusals as do_init's, from column c. None after a refusal (the
+        dialog has said why)."""
+        title = f"Init {k}"
+        chname = PAIR_CHANNEL[k]
+        try:
+            f = self._floats(gamma=c.gamma_var, f_cut=c.fcut_var)
+        except RuntimeError as e:
+            return messagebox.showerror(title, str(e)) and None
+        ch = CHANNELS[chname]
+        try:
+            t, v = run_ilc.load_target(target, ch.mon_scale)
+        except (ValueError, OSError, KeyError) as e:
+            return messagebox.showerror(title, str(e)) and None
+        dt = float(np.median(np.diff(t)))
+        mode = self._model_key(c)
+        frf_rec = ("", 0.0, 0.0)
+        if mode == "frf":
+            fps = self._frf_paths(c)
+            if len(fps) != 1:
+                return messagebox.showerror(
+                    title, f"the measured-FRF model needs exactly ONE file in "
+                           f"{k}'s FRF field (it holds {len(fps)})") and None
+            if not os.path.exists(fps[0]):
+                return messagebox.showerror(title, f"FRF not found: {fps[0]!r}") and None
+            try:
+                fb = self._floats(f_use=c.fuse_var, f_max=c.fmax_var)
+                if not 0 < fb["f_use"] < fb["f_max"]:
+                    raise RuntimeError(f"the taper needs 0 < f_use < f_max "
+                                       f"(got {fb['f_use']:g}/{fb['f_max']:g})")
+                self._check_taper_band(fps[0], fb["f_use"], fb["f_max"])
+            except RuntimeError as e:
+                return messagebox.showerror(title, str(e)) and None
+            frf_rec = (fps[0], fb["f_use"], fb["f_max"])
+        seed_key = "static" if mode == "frf" else mode
+        gain_box = c.param_vars["gain"]
+        if not gain_box.get().strip() and shot_txt.strip():
+            gain_box.set(shot_txt.strip())
+            self.log(f"{k}: model gain was blank -- seeded from the first-shot gain")
+        try:
+            g_shot = self._first_shot_gain(shot_txt, c)
+            params = self._entry_params(seed_key, strict=False, c=c)
+            notches = self._notches(c)
+        except RuntimeError as e:
+            return messagebox.showerror(title, str(e)) and None
+        if params is None:
+            blank = [n for n in PARAMS_FOR[seed_key]
+                     if not c.param_vars[n].get().strip()]
+            return messagebox.showerror(
+                title, f"{k}'s {KEY2LABEL[seed_key]} model has no value for "
+                       f"{', '.join(blank)}.\n\nType it in the {k} column of "
+                       f"the Model tab, or fill it with its 'Replace values "
+                       f"with a fit...'.") and None
+        plant = self._plant_from(params, dt)
+        loop = ilc.Loop(plant=plant, target=v, dt=dt, channel=ch,
+                        gamma=f["gamma"], f_cut=f["f_cut"], limits=ch.limits,
+                        notches=notches)
+        u = loop.first_shot(gain=g_shot)
+        g_used = g_shot if g_shot is not None else plant.gain
+        if seed:
+            try:
+                u = run_ilc.load_seed_drive(seed, t)
+            except (ValueError, OSError, KeyError) as e:
+                return messagebox.showerror(title, f"seed drive: {e}") and None
+            seed = os.path.abspath(seed)
+        rep = loop.check(u)
+        if seed and not rep and not messagebox.askyesno(
+                f"{k} seed drive fails the limit check",
+                f"{rep}\n\nThe bench loop and Hold refuse to play a drive that "
+                f"fails this check. Keep it anyway (fix the file, then Init "
+                f"again)?"):
+            return None
+        return dict(k=k, chname=chname, target=target, t=t, v=v, dt=dt, ch=ch,
+                    plant=plant, loop=loop, u=u, g_used=g_used, seed=seed,
+                    rep=rep, mode=mode, frf_rec=frf_rec, seed_key=seed_key)
+
+    def _init_commit(self, r, stem, state_path, fc):
+        """Write one built chain: the i00 drive, its AWG-library copy, the
+        Session (saved by the caller)."""
+        out = os.path.join(RUN_DIR, f"drive_{stem}_i00.csv")
+        how = (f"seed drive {os.path.basename(r['seed'])}, played as-is"
+               if r["seed"] else "flat conversion, target / gain")
+        outputs.write_awg_csv(out, r["t"], r["u"],
+                              comment=f"{r['chname']} ILC iteration 0 "
+                                      f"({how})\n{r['plant']}")
+        wname = f"{stem}_i00"
+        os.makedirs(AWG_WAVEFORMS, exist_ok=True)
+        gui = outputs.write_bk_waveform(os.path.join(AWG_WAVEFORMS, wname + ".csv"),
+                                        r["u"], wname, fc["full_scale"])
+        s = Session(state_path=state_path, loop=r["loop"], t=r["t"], u=r["u"],
+                    iteration=0, stem=stem, full_scale=fc["full_scale"],
+                    t_off=fc["t_offset_us"] * 1e-6)
+        s.model_key = r["mode"]
+        s.frf_path, s.frf_use, s.frf_max = r["frf_rec"]
+        s.seed_path = r["seed"]
+        s.target_path = os.path.abspath(r["target"])
+        s.scope_channels = chanmap.record(self.cfg)
+        return s, out, gui
+
+    def _init_log(self, r, s, out, gui):
+        k, ch, plant, v, u = r["k"], r["ch"], r["plant"], r["v"], r["u"]
+        self.log(f"init {k} ({r['chname']}, {KEY2LABEL[r['seed_key']]} seed "
+                 f"from the {k} column): {plant}")
+        self.log(f"{k}   target {np.ptp(v)*ch.mon_scale:.0f} V pk-pk over "
+                 f"{r['t'][-1]*1e3:.2f} ms, {len(v)} points at {r['dt']*1e6:.3f} us"
+                 f" ({os.path.basename(r['target'])})")
+        if r["seed"]:
+            self.log(f"{k}   first shot  : SEED drive {r['seed']} played as-is")
+        else:
+            self.log(f"{k}   first shot  : flat conversion (target / "
+                     f"{r['g_used']:g}), drive peak {np.abs(u).max():.4f} V")
+        if r["mode"] == "frf":
+            self.log(f"{k}   model       : measured FRF "
+                     f"{os.path.basename(r['frf_rec'][0])}, taper "
+                     f"{r['frf_rec'][1]/1e3:g}-{r['frf_rec'][2]/1e3:g} kHz")
+        self.log(f"{k}   limit check : {r['rep']}")
+        self.log(f"{k}   wrote {out}")
+        self.log(f"{k}         {gui}")
+        self.log(f"{k}   state {s.state_path}")
+
+    # -- the bench, on both chains -----------------------------------------
+    def _pair_ready(self, what):
+        """Main thread: the pair's wiring from the Scope channels map
+        ({key: eomilc.channels.wiring}), or None after saying why not."""
+        self._ensure_pair_ui()
+        if self.pair is None:
+            messagebox.showerror(what, "pair mode: Load state or Init campaign "
+                                       "first -- either one acts on X1 and X2")
+            return None
+        w = {}
+        for k in PAIR_KEYS:
+            try:
+                w[k] = chanmap.wiring(self.cfg, k)
+            except ValueError as e:
+                messagebox.showerror(what, f"{k}: {e}")
+                return None
+            if w[k]["drive_ch"] is not None and w[k]["drive_ch"] == w[k]["mon_ch"]:
+                messagebox.showerror(what, f"{k}: scope CH{w[k]['mon_ch']} is both "
+                                           f"the monitor and the drive readback")
+                return None
+        try:
+            self._check_pair(self.pair["X1"], self.pair["X2"])
+        except RuntimeError as e:
+            messagebox.showerror(what, str(e))
+            return None
+        return w
+
+    @contextlib.contextmanager
+    def _prefixed(self, tag):
+        """Worker side: every line printed inside starts with `tag` (X1 /
+        X2), so the two chains' reports stay apart in one log."""
+        w = _Prefixed(sys.stdout, tag)
+        try:
+            with contextlib.redirect_stdout(w):
+                yield
+        finally:
+            w.flush()
+
+    def _ensure_outputs_on(self, awg, chans):
+        """_ensure_output_on for several channels with ONE question.
+        Returns (proceed, the channels this call switched on); the caller's
+        cleanup switches every played channel off regardless."""
+        off = [c for c in chans if not awg.is_on(c)]
+        if not off:
+            return True, []
+        names = " and ".join(f"CH{c}" for c in off)
+        if not self.ask_user(
+                "Outputs are OFF",
+                f"{names} {'outputs are' if len(off) > 1 else 'output is'} OFF, "
+                f"and the measurement needs both chains driving.\n\nTurn "
+                f"{names} ON and run?\n\n(Switched OFF again when the run "
+                f"ends.)"):
+            print(f"run cancelled: {names} left OFF")
+            return False, []
+        done = []
+        for c in off:
+            awg.set_output(c, True)
+            done.append(c)
+            print(f"CH{c} output ON (confirmed in dialog)")
+            if not awg.is_on(c):
+                print(f"CH{c} did not switch on -- aborting")
+                return False, done
+        self._bench_note(f"{names} output ON")
+        return True, done
+
+    def _outputs_off(self, awg, chans, why):
+        """Worker side: the played channels OFF, each on its own."""
+        done = []
+        for c in sorted(set(chans)):
+            try:
+                awg.set_output(c, False)
+                done.append(c)
+                print(f"CH{c} output OFF ({why})")
+            except Exception as e:
+                print(f"could not switch CH{c} output off: {e}")
+        if done:
+            self._bench_note(" and ".join(f"CH{c}" for c in done)
+                             + f" output OFF ({why})")
+
+    def _pair_capture(self, scope, ss, mon, repeats, wait_s):
+        """Both monitors from the same frozen acquisitions, shot by shot,
+        with the offset dither on both: _bench_capture with X2's monitor as
+        its aux channel (read between :SINGle and run, like X1's), which is
+        ilc_batch.capture_monitors' recipe with this panel's progress bar
+        and Stop. Returns {key: (mean, stack)} on X1's grid (the pair shares
+        one -- _check_pair)."""
+        s1 = ss["X1"]
+        stk = {}
+        self._bench_capture(scope, mon["X1"], s1.t, s1.t_off, repeats, wait_s,
+                            aux=(mon["X2"],), aux_store=stk)
+        grid = stk["capture"].grid
+        out = {}
+        for k in PAIR_KEYS:
+            stack = np.asarray(grid[f"CH{mon[k]}"], float)
+            out[k] = (ilc.averaged(stack), stack)
+        return out
+
+    def _do_bench_pair(self):
+        w = self._pair_ready("Bench")
+        if w is None:
+            return
+        try:
+            f = self._floats(iterations=self.iters_var, repeats=self.repeats_var,
+                             wait=self.wait_var)
+            cfg = self._gather_settings()
+        except RuntimeError as e:
+            return messagebox.showerror("Bench", str(e))
+        ss = dict(self.pair)
+        skip, native = bool(self.skip_var.get()), bool(self.keepnative_var.get())
+        self.run_worker(lambda: self._pair_bench_work(
+            ss, cfg["pair"], w, int(f["iterations"]), int(f["repeats"]),
+            f["wait"], skip, native), "pair bench loop running...")
+
+    def _pair_bench_work(self, ss, cfgs, wires, iterations, repeats, wait_s,
+                         skip, keep_native=False):
+        """The bench loop on both chains: per iteration both drives are
+        uploaded to their AWG channels, both monitors are read from one
+        acquisition per shot, and each session is updated by its own loop
+        with its own model. Same checks, files, stats and stops as the
+        single-channel loop (_bench_work); lines are prefixed X1 / X2."""
+        for k in PAIR_KEYS:
+            with self._prefixed(k):
+                self._apply_settings(cfgs[k], s=ss[k])
+        rec = chanmap.record(self.cfg)
+        for s in ss.values():
+            s.scope_channels = rec
+        print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
+        mon = {k: wires[k]["mon_ch"] for k in PAIR_KEYS}
+        for k in PAIR_KEYS:
+            if wires[k]["drive_ch"] is None:
+                print(f"  NOTE: no Cmd{k} readback channel -- {k}'s trigger "
+                      f"alignment is not verified on this run")
+        if keep_native:
+            print("  note: 'keep native-rate avg' is a single-channel option; "
+                  "pair runs keep the decimated measurements only")
+        _, awgmod = self._bench_modules()
+        self._run_id = time.time()
+        limit = getattr(awgmod, "MAX_ARB_NAME", NAME_LIMIT)
+        for s in ss.values():
+            if len(s.stem) + 4 > limit:
+                raise RuntimeError(f"stem {s.stem!r} + '_iNN' is past the "
+                                   f"{limit}-char name cap")
+        awg, scope = self._connect_pair()
+        played, switched = set(), []
+        try:
+            problems = []
+            for k in PAIR_KEYS:
+                s = ss[k]
+                p, notes = ilc_bench.check_awg_channel(
+                    awg, wires[k]["awg_ch"], full_scale=s.full_scale,
+                    expect_period=len(s.t) * s.loop.dt)
+                for n in notes:
+                    print(f"{k}     ", n)
+                problems += [f"{k}: {x}" for x in p]
+            acq = scope.get(":ACQuire:TYPE")
+            print(f"       scope acquisition {acq}, {repeats} software repeats")
+            if acq.upper().startswith("AVER"):
+                problems.append("scope is in AVER, and :SINGle takes exactly ONE "
+                                "hit of an average (measured) -- set HRES; the "
+                                "repeats do the averaging")
+            elif not acq.upper().startswith("HRES"):
+                problems.append(f"scope is in {acq}; use HRES")
+            if repeats < 16:
+                problems.append(f"{repeats} repeats is too few to dither the "
+                                f"scope's 2.5 mV word lattice (16 reaches the "
+                                f"0.16 mV floor)")
+            if problems:
+                print("Setup problems:")
+                for p in problems:
+                    print("  !", p)
+                if not skip:
+                    print("REFUSING to upload. Fix the setup (Auto-set with both "
+                          "outputs off), or tick 'skip setup checks'.")
+                    return
+            ok, switched = self._ensure_outputs_on(
+                awg, [wires[k]["awg_ch"] for k in PAIR_KEYS])
+            if not ok:
+                return
+            u = {k: ss[k].u for k in PAIR_KEYS}
+            for n in range(iterations + 1):
+                if self.stop_evt.is_set():
+                    print("stopped before the next iteration")
+                    break
+                bad = {k: ss[k].loop.check(u[k]) for k in PAIR_KEYS}
+                bad = {k: r for k, r in bad.items() if not r}
+                if bad:
+                    for k, r in bad.items():
+                        print(f"{k} limit check FAILED:", r)
+                    break
+                print()
+                for k in PAIR_KEYS:
+                    s = ss[k]
+                    wname = f"{s.stem}_i{s.iteration:02d}"
+                    nn, frac = ilc_bench.upload_drive(awg, wires[k]["awg_ch"],
+                                                      wname, u[k], s.full_scale)
+                    played.add(wires[k]["awg_ch"])
+                    print(f"{k} iter {s.iteration}: uploaded {wname} to "
+                          f"CH{wires[k]['awg_ch']} ({nn} pts, {100*frac:.1f}% of "
+                          f"DAC range, peak {np.abs(u[k]).max():.4f} V)")
+                    s.u = u[k]
+                    self._write_iteration(wname, s)
+                if n == 0:
+                    time.sleep(0.5)
+                    for k in PAIR_KEYS:
+                        if wires[k]["drive_ch"] is not None:
+                            with self._prefixed(k):
+                                ilc_bench.verify_alignment(
+                                    scope, wires[k]["drive_ch"], u[k], ss[k].t,
+                                    ss[k].t_off, wait_s)
+                caps = self._pair_capture(scope, ss, mon, repeats, wait_s)
+                for k in PAIR_KEYS:
+                    s = ss[k]
+                    y, stack = caps[k]
+                    it = s.iteration
+                    path = os.path.join(RUN_DIR, f"meas_{s.stem}_i{it:02d}.npy")
+                    np.save(path, y)
+                    m = s.loop.metrics(y)
+                    m["model"] = cfgs[k]["desc"]
+                    with self._prefixed(k):
+                        print(f"         error: peak {m['peak_err_hv']:7.1f} V   "
+                              f"rms {m['rms_err_hv']:6.2f} V   "
+                              f"({m['peak_pct']:.2f}% FS)")
+                        m.update(self._noise_floor(stack, s=s))
+                        st = self._measurement_stats(stack, path, scope, mon[k], s=s)
+                        m.update(self._stats_metrics(st))
+                        m.update(self._model_check_line(it, u[k], y, s=s))
+                    s.snapshots.append(dict(it=it, y=y, m=m, u=u[k],
+                                            t_wall=time.time(),
+                                            run_id=self._run_id, stats=st))
+                self.msgs.put(("call", self._after_pair_measurement))
+                if n < iterations and not self.stop_evt.is_set():
+                    for k in PAIR_KEYS:
+                        s = ss[k]
+                        u_new = s.loop.update(u[k], caps[k][0])
+                        h = s.loop.history[-1]
+                        h["model"] = cfgs[k]["desc"]
+                        h["update_rms"] = ilc.update_rms(u[k], u_new)
+                        h["run_id"] = self._run_id
+                        h["update_below_lsb"] = dg.update_vs_step(u_new - u[k])["below"]
+                        with self._prefixed(k):
+                            self._plateau_line(s)
+                        u[k] = u_new
+                        s.u = u_new
+                        s.iteration += 1
+                        save_session(s)
+        finally:
+            # both chains, as the single loop does for its one: a run that
+            # played anything (or switched an output on) ends with it OFF
+            if played or switched:
+                self._outputs_off(awg, set(played) | set(switched), "end of run")
+            awg.close()
+            scope.close()
+            print("instruments closed")
+        for k in PAIR_KEYS:
+            print(f"\n{k}:\n" + ss[k].loop.report())
+
+    def _after_pair_measurement(self):
+        """Main thread, after each pair measurement: the shown session's
+        summary and plots."""
+        self._refresh_summary()
+        self._wave_redraw = None
+        self._redraw_iterations()
+
+    def _do_hold_pair(self):
+        w = self._pair_ready("Hold")
+        if w is None:
+            return
+        try:
+            f = self._floats(runs=self.holdruns_var, gap_s=self.holdgap_var,
+                             repeats=self.repeats_var, wait=self.wait_var)
+        except RuntimeError as e:
+            return messagebox.showerror("Hold", str(e))
+        if f["runs"] < 1:
+            return messagebox.showerror("Hold", "runs must be at least 1")
+        drives = {}
+        for k in PAIR_KEYS:
+            try:
+                drives[k] = self._hold_drive(self.holditer_var.get(),
+                                             s=self.pair[k])
+            except RuntimeError as e:
+                return messagebox.showerror(f"Hold {k}", str(e))
+        ss = dict(self.pair)
+        self.run_worker(lambda: self._pair_hold_work(
+            ss, w, int(f["runs"]), f["gap_s"], int(f["repeats"]), f["wait"],
+            drives), "hold: re-measuring both chains...")
+
+    def _pair_hold_work(self, ss, wires, runs, gap_s, repeats, wait_s, drives):
+        """Hold on both chains: the same drive(s) re-measured `runs` times,
+        both monitors from one acquisition per shot, no update, states
+        untouched. Runs are numbered per session (iter k rN)."""
+        rec = chanmap.record(self.cfg)
+        for s in ss.values():
+            s.scope_channels = rec
+        print("scope channels: " + chanmap.describe(self.cfg).replace("\n", " | "))
+        its = {k: ss[k].iteration if drives[k][0] is None else int(drives[k][0])
+               for k in PAIR_KEYS}
+        us = {k: ss[k].u if drives[k][1] is None else np.asarray(drives[k][1], float)
+              for k in PAIR_KEYS}
+        mon = {k: wires[k]["mon_ch"] for k in PAIR_KEYS}
+        awg, scope = self._connect_pair()
+        played, switched = set(), []
+        try:
+            problems = []
+            for k in PAIR_KEYS:
+                s = ss[k]
+                p, notes = ilc_bench.check_awg_channel(
+                    awg, wires[k]["awg_ch"], full_scale=s.full_scale,
+                    expect_period=len(s.t) * s.loop.dt)
+                for n in notes:
+                    print(f"{k}     ", n)
+                problems += [f"{k}: {x}" for x in p]
+                rep = s.loop.check(us[k])
+                print(f"{k}      limit check:", rep)
+                if not rep:
+                    problems.append(f"{k}: the drive fails the limit check")
+            acq = scope.get(":ACQuire:TYPE")
+            if not acq.upper().startswith("HRES"):
+                problems.append(f"scope is in {acq}; hold uses the same "
+                                f"averaged-HRES scheme as the loop")
+            if problems:
+                print("Setup problems:")
+                for p in problems:
+                    print("  !", p)
+                print("REFUSING -- fix the setup first.")
+                return
+            for k in PAIR_KEYS:
+                s = ss[k]
+                wname = f"{s.stem}_i{its[k]:02d}"
+                nn, frac = ilc_bench.upload_drive(awg, wires[k]["awg_ch"], wname,
+                                                  us[k], s.full_scale)
+                played.add(wires[k]["awg_ch"])
+                print(f"{k} hold: uploaded {wname} ({nn} pts, {100*frac:.1f}% of "
+                      f"DAC range) -- this drive will NOT be updated")
+            ok, switched = self._ensure_outputs_on(
+                awg, [wires[k]["awg_ch"] for k in PAIR_KEYS])
+            if not ok:
+                return
+            r0 = {k: max([sn["run"] for sn in ss[k].snapshots
+                          if sn["it"] == its[k] and sn.get("run") is not None],
+                         default=0) + 1 for k in PAIR_KEYS}
+            print(f"hold: {runs} run(s), {gap_s:g} s gap, X1 i{its['X1']:02d} "
+                  f"from r{r0['X1']}, X2 i{its['X2']:02d} from r{r0['X2']}")
+            t_start = time.time()
+            for j in range(runs):
+                if self.stop_evt.is_set():
+                    print("hold stopped by user")
+                    break
+                caps = self._pair_capture(scope, ss, mon, repeats, wait_s)
+                for k in PAIR_KEYS:
+                    s = ss[k]
+                    r, it = r0[k] + j, its[k]
+                    y, stack = caps[k]
+                    path = os.path.join(os.path.dirname(s.state_path),
+                                        f"meas_{s.stem}_i{it:02d}_r{r:02d}.npy")
+                    np.save(path, y)
+                    m = s.loop.metrics(y)
+                    sn = dict(it=it, y=y, m=m, u=us[k], run=r, t_wall=time.time())
+                    s.snapshots.append(sn)
+                    with self._prefixed(k):
+                        print(f"  r{r} (+{fmt_span(time.time() - t_start)}): error "
+                              f"peak {m['peak_err_hv']:7.1f} V   "
+                              f"rms {m['rms_err_hv']:6.2f} V")
+                        m.update(self._noise_floor(stack, s=s))
+                        st = self._measurement_stats(stack, path, scope, mon[k], s=s)
+                    m.update(self._stats_metrics(st))
+                    sn["stats"] = st
+                self.msgs.put(("call", lambda: self._show_held(
+                    its.get(self._pair_key_of(self.session) or "X1", its["X1"]))))
+                if j < runs - 1 and gap_s > 0:
+                    t_end = time.time() + gap_s
+                    while time.time() < t_end:
+                        if self.stop_evt.is_set():
+                            break
+                        time.sleep(min(0.2, max(t_end - time.time(), 0.01)))
+            print("hold finished: states untouched")
+        finally:
+            if played or switched:
+                self._outputs_off(awg, set(played) | set(switched), "end of hold")
+            awg.close()
+            scope.close()
+            print("instruments closed")
+
+    def _do_autoset_pair(self):
+        w = self._pair_ready("Auto-set")
+        if w is None:
+            return
+        items = []
+        for k in PAIR_KEYS:
+            s = self.pair[k]
+            items.append(dict(
+                key=k, period=float(s.t[-1]) + float(s.loop.dt),
+                u_lo=float(s.u.min()), u_hi=float(s.u.max()),
+                v_lo=float(s.loop.target.min()), v_hi=float(s.loop.target.max()),
+                fs=s.full_scale, awg_ch=int(w[k]["awg_ch"]),
+                scope_ch=int(w[k]["mon_ch"]),
+                wname=f"{s.stem}_i{s.iteration:02d}", drive_ch=w[k]["drive_ch"]))
+        keep_vert = bool(self.keepvert_var.get())
+        self.run_worker(lambda: self._pair_autoset_work(items, keep_vert),
+                        "auto-setting both chains...")
+
+    def _pair_autoset_work(self, items, keep_vert):
+        """Auto-set for both chains in one session of the instruments: both
+        AWG channels, the scope window, and the drive and monitor verticals
+        of both. FRQ moves only with BOTH outputs off."""
+        awg, scope = self._connect_pair()
+        try:
+            live = [it["awg_ch"] for it in items if awg.is_on(it["awg_ch"])]
+            if live:
+                print("REFUSING to auto-set: "
+                      + " and ".join(f"CH{c}" for c in live)
+                      + (" output is" if len(live) == 1 else " outputs are")
+                      + " ON. In pair mode FRQ/AMP are changed only with BOTH "
+                        "outputs off -- a live output carries real voltage to "
+                        "its chain. Switch it off first.")
+                return
+            for it in items:
+                with self._prefixed(it["key"]):
+                    self._autoset_on(awg, scope, it["period"], it["u_lo"],
+                                     it["u_hi"], it["v_lo"], it["v_hi"], it["fs"],
+                                     it["awg_ch"], it["scope_ch"], it["wname"],
+                                     keep_vert, it["drive_ch"])
+        finally:
+            awg.close()
+            scope.close()
+            print("instruments closed")
+
     # ---------------------------------------------------------------- batch
     def do_batch(self):
         if self._batch_win is None:
@@ -5254,6 +6407,9 @@ class App:
             self._batch_win.event(kind, info)
 
     def _batch_follow(self, states):
+        if self.pair_var.get() and all(os.path.exists(states.get(k, ""))
+                                       for k in PAIR_KEYS):
+            return self._batch_follow_pair(states)
         path = states.get(self.batchfollowch_var.get()) or next(iter(states.values()))
         if not os.path.exists(path):
             return
@@ -5267,6 +6423,27 @@ class App:
         else:
             self.state_var.set(path)
             self.do_load()
+
+    def _batch_follow_pair(self, states):
+        """Pair mode follows a batch campaign as a pair: both states, shown
+        on the Batch window's follow channel."""
+        k = self.batchfollowch_var.get() if self.batchfollowch_var.get() in PAIR_KEYS else "X1"
+        if self.pair is not None and all(_same_file(self.pair[c].state_path, states[c])
+                                         for c in PAIR_KEYS):
+            for c in PAIR_KEYS:            # same campaign: reload both quietly
+                s = load_session(states[c])
+                recall_snapshots(s)
+                self.pair[c] = s
+            self.shown_var.set(k)
+            self.session = self.pair[k]
+            self._refresh_summary()
+            self._show_session()
+            return
+        self.state_var.set(states["X1"])
+        self.do_load()
+        if self.pair is not None and k != self.shown_var.get():
+            self.shown_var.set(k)
+            self._on_shown_change()
 
     def do_measure_frf(self):
         """Automated system ID: build a Schroeder multitone on the session's
@@ -5730,10 +6907,14 @@ class App:
     def _adopt_frf(self, path):
         """Main thread: point the FRF field at the fresh measurement and
         show it. Switching the MODEL to 'measured FRF' stays the user's
-        call -- measuring is not consenting to drive with it."""
-        self.frf_var.set(path)
-        self.log(f"FRF field now points at {os.path.basename(path)}")
-        self.do_show_frf()
+        call -- measuring is not consenting to drive with it. In pair mode
+        the FRF belongs to the shown chain, so it lands in that column."""
+        c = (self._pair_col(self.shown_var.get())
+             if self.pair is not None and self._col2 is not None else self._col1)
+        c.frf_var.set(path)
+        self.log(f"{c.key + ' ' if self.pair is not None else ''}FRF field now "
+                 f"points at {os.path.basename(path)}")
+        self.do_show_frf(c)
 
     def _ensure_output_on(self, awg, awg_ch):
         """Worker-side: switching ON is the direction that puts voltage into
@@ -7467,13 +8648,13 @@ class App:
         ax.grid(True, alpha=0.3)
         self._draw(self.fig_dac)
 
-    def _frf_paths(self):
+    def _frf_paths(self, c=None):
         """The FRF field, expanded: semicolon-separated entries, each a
         path or a glob (Windows paths carry spaces, so ';' separates).
         Show FRF overlays every match -- amplitude families side by side;
         the measured-FRF MODEL requires exactly one."""
         out = []
-        for part in self.frf_var.get().split(";"):
+        for part in (c or self._col1).frf_var.get().split(";"):
             part = part.strip()
             if not part:
                 continue
@@ -7484,8 +8665,9 @@ class App:
         seen = set()
         return [p for p in out if not (p in seen or seen.add(p))]
 
-    def do_show_frf(self):
-        paths = self._frf_paths()
+    def do_show_frf(self, c=None):
+        c = c or self._col1
+        paths = self._frf_paths(c)
         if not paths:
             return messagebox.showerror("FRF", "the FRF field is empty "
                                         "(or the glob matched nothing)")
@@ -7493,7 +8675,7 @@ class App:
         if missing:
             return messagebox.showerror("FRF", f"not found: {missing[0]!r}")
         try:
-            f = self._floats(f_use=self.fuse_var, f_max=self.fmax_var)
+            f = self._floats(f_use=c.fuse_var, f_max=c.fmax_var)
         except RuntimeError as e:
             return messagebox.showerror("FRF", str(e))
         axm, axp, axc = self.ax_frf
@@ -7536,11 +8718,11 @@ class App:
         # in: this is the model-vs-chain comparison that decided the campaign
         # (see docs/REPORT.md section 5) and it is what shows how much each
         # rung of the model ladder explains.
-        key = self._model_key()
+        key = self._model_key(c)
         overlay = None
         if key != "frf":
             try:
-                overlay = self._entry_params(key, strict=False)
+                overlay = self._entry_params(key, strict=False, c=c)
             except RuntimeError:
                 overlay = None
         if overlay:
@@ -7551,7 +8733,8 @@ class App:
             # drift from the one the loop is judged on -- and a new rung
             # (third order) overlays correctly without touching this block.
             # response() is continuous, so dt does not enter.
-            dt_ov = self.session.loop.dt if self.session is not None else 2e-6
+            sess = self._col_session(c)
+            dt_ov = sess.loop.dt if sess is not None else 2e-6
             H = self._plant_from(overlay, dt_ov).response(fg)
             axm.loglog(fg, np.abs(H), "--", lw=1.1, color="#c68000",
                        label=f"model: {DESC_FOR[key]}")
