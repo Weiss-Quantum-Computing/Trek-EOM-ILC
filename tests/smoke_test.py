@@ -2084,6 +2084,242 @@ assert "ell14: COM3: in use" in app.log_text.get("1.0", "end")
 print("[56] hardware tab: four rows, checks in order, status + time per row, in-use in red, "
       "detail in the log; check_awg on the simulated generator reads both outputs OFF")
 
+# [57] Pair mode (13 Oct 2026): X1 and X2 learned side by side, each with its
+# own model, from one scope acquisition. A generated target pair in SCRATCH,
+# Init on both with a different model in each column, Auto-set and two
+# iterations of the pair bench loop on the simulated bench (cabled by the
+# panel's channel map), the shown-channel switch, and back to single mode.
+# Dialogs, the instruments and the AWG library are stubbed / redirected here
+# and put back at the end, so the block stands alone (smoke_block.py 57).
+import time as _time57
+import run_ilc as _ri57
+import ilc_bench as _ib57
+from eomilc import simbench as _sb57
+from eomilc import diagnostics as _dg57
+_mb57 = ilc_gui.messagebox
+_saved57 = (_mb57.askyesno, _mb57.showerror, _mb57.showinfo, ilc_gui.AWG_WAVEFORMS)
+_asked57 = []
+_mb57.askyesno = lambda title, msg, **k: (_asked57.append(title), True)[1]
+_mb57.showerror = lambda title, msg, **k: _asked57.append(("error", title, msg))
+_mb57.showinfo = lambda title, msg, **k: _asked57.append(("info", title, msg))
+ilc_gui.AWG_WAVEFORMS = os.path.join(SCRATCH, "Waveforms57")
+
+
+def _pump57(limit_s=300):
+    _t0 = _time57.time()
+    root.update()
+    while app.busy and _time57.time() - _t0 < limit_s:
+        root.update()
+        _time57.sleep(0.02)
+    for _ in range(10):
+        root.update()
+        _time57.sleep(0.01)
+    assert not app.busy, "the worker did not finish"
+
+
+try:
+    # the pair: the ILC header, the 2 us grid, 0 -> 5 kV at the EOM (5 V on
+    # the 1 V/kV monitor, like the fixtures) -> 0 over an 11 ms record
+    _tus = np.arange(5501) * 2.0
+    _ramp = np.clip(np.minimum((_tus - 500) / 3000, (10500 - _tus) / 3000), 0, 1)
+    _v57 = 5000 * 0.5 * (1 - np.cos(np.pi * _ramp))
+    for _k in ("X1", "X2"):
+        np.savetxt(os.path.join(SCRATCH, f"target_PAIR{_k}.csv"), np.c_[_tus, _v57],
+                   delimiter=",", header="time_us,voltage_V", comments="", fmt="%.6g")
+    _bad = os.path.join(SCRATCH, "target_LONE.csv")
+    shutil.copy(os.path.join(SCRATCH, "target_PAIRX1.csv"), _bad)
+
+    app._set_channels(ilc_gui.chanmap.DEFAULT_CHANNELS)   # CH1 PD, CH2 CmdX1, CH3 MonX1, CH4 MonX2
+    app.cmpsel_var.set("")
+    app.line_on_var.set(False)
+    app.pair_var.set(True)
+    app._on_pair_toggle()
+    root.update()
+    assert app.channel_var.get() == "EO1" and str(app._channel_cb.cget("state")) == "disabled"
+    assert app._col2.frame.winfo_manager() == "pack" and app._shown_frame.winfo_manager() == "pack"
+    assert app.bench_btn.cget("text") == "Run bench loop (X1 + X2)"
+    # a name with no X1 in it is refused, by name
+    app.target_var.set(_bad)
+    app.stem_var.set("PAIR")
+    app.do_init()
+    assert app.pair is None and _asked57[-1][0] == "error" and "no 'X1'" in _asked57[-1][2], _asked57[-1]
+
+    # X1's column third order, X2's resonant -- each chain its own model
+    app.target_var.set(os.path.join(SCRATCH, "target_PAIRX1.csv"))
+    app.seed_var.set("")
+    app.shotgain_var.set("")
+    app.toff_var.set("0")
+    app.fs_var.set("10.0")
+    app.model_var.set(ilc_gui.KEY2LABEL["third_order"])
+    app._on_model_change()
+    for _var, _val in ((app.pgain_var, "0.557"), (app.ptau_var, "3.03"), (app.pfn_var, "12564"),
+                       (app.pzeta_var, "2.209"), (app.gamma_var, "0.6"), (app.fcut_var, "20000"),
+                       (app.notch_var, "")):
+        _var.set(_val)
+    app.model_var_2.set(ilc_gui.KEY2LABEL["resonant"])
+    app._on_model_change_2()
+    for _var, _val in ((app.pgain_var_2, "0.6116"), (app.pfn_var_2, "7823"), (app.pzeta_var_2, "1.474"),
+                       (app.gamma_var_2, "0.5"), (app.fcut_var_2, "15000"), (app.notch_var_2, "")):
+        _var.set(_val)
+    root.update()
+    assert app._col2.param_entries["tau"].winfo_manager() == "" and \
+        app._col2.param_entries["fn"].winfo_manager() == "pack"          # only the rung's fields
+    _n57 = len(_asked57)
+    app.do_init()
+    root.update()
+    _p57 = app.pair
+    assert _p57 is not None and len(_asked57) == _n57, _asked57[_n57:]
+    assert (_p57["X1"].channel, _p57["X2"].channel) == ("EO1", "EO2")
+    assert (_p57["X1"].stem, _p57["X2"].stem) == ("PAIRX1", "PAIRX2")
+    assert app.session is _p57["X1"] and "(X1 of a pair)" in app.summary.cget("text")
+    _st57 = {k: _ri57.load_state(_p57[k].state_path) for k in ("X1", "X2")}
+    assert str(_st57["X1"]["model"]) == "third_order" and str(_st57["X2"]["model"]) == "resonant"
+    assert abs(float(_st57["X1"]["fn"]) - 12564) < 1 and abs(float(_st57["X2"]["fn"]) - 7823) < 1
+    assert float(_st57["X1"]["tau"]) > 0 and float(_st57["X2"]["tau"]) == 0
+    assert float(_st57["X1"]["f_cut"]) == 20000 and float(_st57["X2"]["f_cut"]) == 15000
+    assert float(_st57["X2"]["gamma"]) == 0.5
+    assert str(_st57["X2"]["target_path"]).endswith("target_PAIRX2.csv")
+    app._save_config()
+    assert app._field_mem["EO2"]["models"]["resonant"]["fn"] == "7823"   # X2's memory is EO2's
+
+    # the simulated bench: one bench object for every connect, cabled by the map
+    _bench57 = _sb57.make_bench({1: os.path.join(REPO, "run", "frf_WIDE_X1.csv"),
+                                 2: os.path.join(REPO, "run", "frf_WIDE_X2.csv")}, channels=app.cfg)
+    _awg57, _scope57, _mod57 = _bench57
+
+    def _fake_pair57():
+        _ib57._AWGMOD = _mod57
+        return _awg57, _scope57
+    app._connect_pair = _fake_pair57
+    app._bench_modules = lambda: (None, _mod57)
+    assert "X2 (EO2): AWG CH2 -> monitor CH4, readback none" in app.run_state.cget("text")
+
+    # Auto-set: refused while either output is ON; then both channels and all four verticals
+    _awg57.set_output(2, True)
+    app.do_autoset()
+    _pump57()
+    assert _awg57.ch[1]["frq"] == 100.0 and _awg57.ch[2]["frq"] == 100.0
+    _awg57.set_output(2, False)
+    app.do_autoset()
+    _pump57()
+    _per57 = 5501 * 2e-6
+    assert all(abs(_awg57.ch[c]["frq"] * _per57 - 1) < 1e-9 for c in (1, 2))
+    assert all(_scope57.settings[f":CHANnel{c}:OFFSet"] != "0.0" for c in (2, 3, 4))
+    assert _scope57.settings[":CHANnel1:OFFSet"] == "0.0"                    # the PD is not a chain's
+
+    # two iterations of the pair loop: one question, both ON, both OFF at the end
+    app.iters_var.set("2")
+    app.repeats_var.set("16")
+    app.wait_var.set("5")
+    app.skip_var.set(False)
+    app.keepnative_var.set(False)
+    _n57 = len(_asked57)
+    _shots0 = _scope57.shots
+    app.do_bench()
+    _pump57()
+    assert _asked57[_n57:] == ["Outputs are OFF"], _asked57[_n57:]
+    assert not _awg57.is_on(1) and not _awg57.is_on(2)
+    assert not any(e[0] == "FRQ_UNDER_LIVE_OUTPUT" for e in _awg57.log)
+    # one frozen acquisition per shot serves both monitors: 3 measurements x
+    # 16 shots, plus X1's alignment shot (X2 has no CmdX2 channel)
+    assert _scope57.shots - _shots0 == 3 * 16 + 1, _scope57.shots - _shots0
+    _ups = [e[1:] for e in _awg57.log if e[0] == "upload"]
+    assert (1, "PAIRX1_i02") in _ups and (2, "PAIRX2_i02") in _ups
+    for _k, _s in app.pair.items():
+        assert _s.iteration == 2, (_k, _s.iteration)
+        for _i in range(3):
+            _f = os.path.join(ilc_gui.RUN_DIR, f"meas_{_s.stem}_i{_i:02d}.npy")
+            assert os.path.exists(_f) and os.path.exists(_dg57.stats_path(_f)), _f
+        _st = _ri57.load_state(_s.state_path)
+        assert int(_st["iteration"]) == 2
+        assert _st["history"][-1]["model"] == {"X1": "3rd order", "X2": "2nd order"}[_k]
+    _log57 = app.log_text.get("1.0", "end")
+    assert re.search(r"^X2\s+error: peak", _log57, re.M) and re.search(r"^X1\s+error: peak", _log57, re.M)
+    assert "CH1 and CH2 output OFF (end of run)" in app.run_state.cget("text")
+
+    # the shown switch: the Error plot redraws from the other session
+    app.itersel_var.set("")
+    app._redraw_iterations()
+    root.update()
+
+    def _err57(s):
+        y = app._snaps_by_it(s)[2]["y"]
+        return (s.loop.target - s.loop._seen(y)) * s.loop.channel.mon_scale
+    assert np.allclose(app.ax_err.lines[1].get_ydata(), _err57(app.pair["X1"]))
+    app.shown_var.set("X2")
+    app._on_shown_change()
+    root.update()
+    assert app.session is app.pair["X2"] and "(X2 of a pair)" in app.summary.cget("text")
+    assert "X2 of the pair" in app.status.cget("text")
+    assert np.allclose(app.ax_err.lines[1].get_ydata(), _err57(app.pair["X2"]))
+    assert not np.allclose(_err57(app.pair["X1"]), _err57(app.pair["X2"]))
+    assert app.awgch_var.get() == "2" and app.scopech_var.get() == "4"   # single tools follow X2
+    _gs = app._gather_settings()
+    assert _gs["mode"] == "resonant" and set(_gs["pair"]) == {"X1", "X2"} and \
+        _gs["pair"]["X1"]["mode"] == "third_order"
+
+    # Hold on both: one run each from one acquisition per shot, no update
+    app.holdruns_var.set("1")
+    app.holdgap_var.set("0")
+    app.holditer_var.set("")
+    _n57 = len(_asked57)
+    _shots0 = _scope57.shots
+    app.do_hold()
+    _pump57()
+    assert _asked57[_n57:] == ["Outputs are OFF"], _asked57[_n57:]
+    assert _scope57.shots - _shots0 == 16 and not _awg57.is_on(1) and not _awg57.is_on(2)
+    for _k, _s in app.pair.items():
+        assert os.path.exists(os.path.join(ilc_gui.RUN_DIR, f"meas_{_s.stem}_i02_r01.npy"))
+        assert _s.iteration == 2 and int(_ri57.load_state(_s.state_path)["iteration"]) == 2
+        assert any(sn.get("run") == 1 and sn["it"] == 2 for sn in _s.snapshots)
+
+    # the X2 column's own fit: Fit to FRF fills X2's boxes and leaves X1's
+    app.frf_var_2.set(os.path.join(REPO, "run", "frf_WIDE_X2.csv"))
+    app.do_fit_frf(app._frf_paths(app._col2)[0], "resonant", 30e3, gain=0.6116, c=app._col2)
+    _pump57()
+    assert app.pgain_var_2.get() == "0.6116" and app.pfn_var_2.get() and \
+        app.pfn_var.get() == "12564" and "WIDE_X2" in app.ax_frf[0].get_title()
+
+    # Load state in pair mode brings both back, each column its own model
+    app.model_var_2.set(ilc_gui.KEY2LABEL["static"])
+    app._on_model_change_2()
+    app.state_var.set(app.pair["X1"].state_path)
+    app.do_load()
+    root.update()
+    assert app.pair["X2"].iteration == 2 and app.model_var_2.get() == ilc_gui.KEY2LABEL["resonant"]
+    assert app.model_var.get() == ilc_gui.KEY2LABEL["third_order"] and app.stem_var.get() == "PAIR"
+    assert len({sn["it"] for sn in app.pair["X2"].snapshots}) == 3
+
+    # untick: single mode as before -- one session, one column, one channel
+    app.pair_var.set(False)
+    app._on_pair_toggle()
+    root.update()
+    assert app.pair is None and app._col2.frame.winfo_manager() == "" and \
+        app._shown_frame.winfo_manager() == ""
+    assert app.session.stem == "PAIRX1" and str(app._channel_cb.cget("state")) == "readonly"
+    assert "pair" not in app._gather_settings()
+    app.stem_var.set("SNGL")
+    app.do_init()
+    root.update()
+    assert app.session.stem == "SNGL" and app.pair is None
+    app.iters_var.set("1")
+    _shots0 = _scope57.shots
+    app.do_bench()
+    _pump57()
+    assert app.session.iteration == 1 and os.path.exists(os.path.join(ilc_gui.RUN_DIR, "meas_SNGL_i01.npy"))
+    assert _scope57.shots - _shots0 == 2 * 16 + 1 and not _awg57.is_on(1)
+    assert not any(e[1] == 2 and e[2].startswith("SNGL") for e in _awg57.log if e[0] == "upload")
+finally:
+    _mb57.askyesno, _mb57.showerror, _mb57.showinfo, ilc_gui.AWG_WAVEFORMS = _saved57
+    for _a in ("_connect_pair", "_bench_modules"):
+        app.__dict__.pop(_a, None)
+print("[57] pair mode: X1/X2 Init from one target name (a name with no X1 refused), each "
+      "state with its own model; Auto-set refused with an output ON, then both channels; "
+      "two pair iterations from one acquisition per shot (49 shots), both meas + stats "
+      "written, both at i02, outputs OFF; the shown switch redraws the Error plot from X2; "
+      "pair Hold (16 shots, both r01); X2's own Fit to FRF; Load brings both back; untick -> "
+      "single mode runs as before")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the
