@@ -241,6 +241,138 @@ def main():
         with np.load(os.path.join(plan["_run_dir"], "drive_S25X1.state.npz"), allow_pickle=True) as st1,                 np.load(os.path.join(plan["_run_dir"], "drive_S25X2.state.npz"), allow_pickle=True) as st2:
             check(float(st1["fn"]) == 7823 and float(st2["fn"]) == 13729 and float(st1["f_cut"]) == 20e3
                   and float(st2["f_cut"]) == 60e3, "each state records its own model")
+        print("[11] the optical stage in simulation: two passes, stopped in pass 2 and resumed")
+        import threading
+        path = write_plan(tmp, ["S25"], name="t11")
+        raw = json.load(open(path))
+        raw["run_dir"] = os.path.join(tmp, "run11")
+        raw["optical"] = {"scan": {"angles": "0:359:45", "shots": 2}, "gains": [0.7, 1.0],
+                          "iterations": 2, "pd_delay_us": 0.0, "figs": False}
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)            # PD on CH1: the polarimeter's map
+        msgs = []
+        ilc_batch.dry_run(plan, log=msgs.append)
+        want = "optical: 2 passes gains 0.7/1.0, 2 iterations each, scan 0:359:45 x 2 shots, band 5 kHz"
+        check(any(want in m for m in msgs), f"the dry run prints '{want}'")
+        stop = threading.Event()
+
+        def stop_at_verify2(kind, info):
+            if kind == "optical" and info.get("step") == "scan" and info.get("pass") == 2 \
+                    and not info["scan"].endswith("_before"):
+                stop.set()                       # as if Stop were pressed as pass 2's verification starts
+        awg11, scope11 = bench(bench_cfg)
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, stop=stop, on_event=stop_at_verify2,
+                                  bench=(awg11, scope11))
+        check(man["campaigns"]["S25"]["status"] == "stopped" and not awg11.is_on(1) and not awg11.is_on(2),
+              "stopped in pass 2, outputs off")
+        odir = os.path.join(plan["_run_dir"], "optical")
+        v1 = os.path.join(odir, "S25_opt1", "S25_opt1_scan.json")
+        check(os.path.exists(os.path.join(odir, "S25_opt1_before", "S25_opt1_before_scan.json"))
+              and os.path.exists(v1), "pass 1's scans on disk (S25_opt1_before, S25_opt1)")
+        stamp = os.path.getmtime(v1)
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        awg11, scope11 = bench(bench_cfg)
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=(awg11, scope11))
+        c = man["campaigns"]["S25"]
+        o = c.get("optical") or {}
+        P = o.get("passes") or []
+        check(c["status"] == "done" and o.get("status") == "done" and len(P) == 2
+              and [p["status"] for p in P] == ["done", "done"] and [p["gain"] for p in P] == [0.7, 1.0],
+              f"resumed: done, two passes ({o.get('status')}, {[p.get('status') for p in P]})")
+        check(any("optical pass 1: done in an earlier run" in m for m in msgs)
+              and not any(m.startswith("  scan S25_opt1") for m in msgs) and os.path.getmtime(v1) == stamp,
+              "pass 1 is not repeated (no scan of it, its verification scan untouched)")
+        check(any("S25_opt2: on disk" in m and "resumed" in m for m in msgs),
+              "pass 2's verification scan resumes from disk")
+        check(not awg11.is_on(1) and not awg11.is_on(2), "outputs off at the end")
+        if len(P) == 2:
+            check(P[1]["scan"] == P[0]["verify_scan"] and P[1]["verdict_before"] == P[0]["verdict_after"],
+                  "pass 2's correction comes from pass 1's verification")
+            files = [f for p in P for f in p["corr_files"].values()] + list(P[1]["verify_corr_files"].values())
+            check(len(files) == 6 and all(os.path.exists(f) for f in files),
+                  "correction files on disk (2 per pass + the last verification's)")
+            check(all(set(p["applied"]) == {"X1", "X2"} and all(a["gain"] == p["gain"] and a["status"] == "applied"
+                                                                 and a["kept_peak_V"] > 1.0 for a in p["applied"].values())
+                      for p in P),
+                  "both channels applied each pass ("
+                  + ", ".join(f"{k} {a['kept_peak_V']:.1f} V" for p in P for k, a in p["applied"].items()) + ")")
+            for p in P:
+                b, a = p["verdict_before"]["legs"][0], p["verdict_after"]["legs"][0]
+                print(f"       pass {p['pass']} x{p['gain']}: ramp top light-target {b['top_lt_mdeg']:+.0f} -> "
+                      f"{a['top_lt_mdeg']:+.0f} mdeg, light-monitors {b['top_lm_mdeg']:+.0f} -> "
+                      f"{a['top_lm_mdeg']:+.0f} mdeg; rms light-target {b['lt_rms_mdeg']:.0f} -> "
+                      f"{a['lt_rms_mdeg']:.0f} mdeg")
+            # What the closure removes in simulation is the rotator error, a
+            # light - monitors term that varies along the ramp (+-0.5 deg). The
+            # ramp-top extremes barely move: light - target there is mostly a
+            # constant ~-0.5 deg monitors - target offset of the simulated
+            # comparison (there at rest too; it is in the monitors, so no optical
+            # correction is meant to take it out) and light - monitors is the
+            # light's own term, which stays. The comparison's light - target
+            # spread (its std about that offset) is what falls, and the monitors
+            # leave the target by the correction (monitors - target spread rises).
+            b0, a0, a1 = (P[0]["verdict_before"]["legs"][0], P[0]["verdict_after"]["legs"][0],
+                          P[1]["verdict_after"]["legs"][0])
+            check(a0["lt_std_mdeg"] < b0["lt_std_mdeg"] and a1["lt_std_mdeg"] < 0.6 * b0["lt_std_mdeg"],
+                  f"light - target spread falls pass by pass: {b0['lt_std_mdeg']:.0f} -> {a0['lt_std_mdeg']:.0f} "
+                  f"-> {a1['lt_std_mdeg']:.0f} mdeg")
+            check(a1["mt_std_mdeg"] > b0["mt_std_mdeg"] + 50,
+                  f"the monitors leave the target by the correction: monitors - target spread "
+                  f"{b0['mt_std_mdeg']:.0f} -> {a1['mt_std_mdeg']:.0f} mdeg")
+            check(abs(a1["top_lm_mdeg"]) > 0.5 * abs(b0["top_lm_mdeg"]),
+                  f"light - monitors at the ramp top stays (the rotator error is the light's own): "
+                  f"{b0['top_lm_mdeg']:+.0f} -> {a1['top_lm_mdeg']:+.0f} mdeg")
+            for k in ("X1", "X2"):
+                ch = c["channels"][k]
+                check(ch["keeper_iteration"] == P[1]["kept"][k] and os.path.exists(ch["keeper_file"]),
+                      f"{k} keeper is pass 2's last iteration (i{ch['keeper_iteration']:02d})")
+                with np.load(ch["state"], allow_pickle=True) as st:
+                    has = all(x in st.files for x in ("base_target", "corr_total", "corrections"))
+                    lay = json.loads(str(st["corrections"])) if has else []
+                    ok = has and np.allclose(st["target"], st["base_target"] + st["corr_total"])
+                check(ok and len(lay) == 1 and lay[0]["gain"] == 1.0 and lay[0]["slot"] == "optical"
+                      and lay[0]["path"] == os.path.abspath(P[1]["corr_files"]["EO" + k[-1]]),
+                      f"{k} state: target = base_target + corr_total, one layer (pass 2's file x1.0 replaced pass 1's)")
+            check(json.load(open(o["record"]))["status"] == "done", "the stage's own record is written")
+
+        print("[12] a refused correction is recorded; the campaign keeps its electrical keeper")
+        path = write_plan(tmp, ["S25"], name="t12")
+        raw = json.load(open(path))
+        raw["run_dir"] = os.path.join(tmp, "run12")
+        raw["optical"] = {"scan": {"angles": "0:359:45", "shots": 2}, "gains": [1.0], "iterations": 2,
+                          "pd_delay_us": 0.0, "figs": False, "cap_v": 300}
+        raw["campaigns"] = [{"stem": "S25", "optical": {"cap_v": 1.0}}]     # per campaign wins
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        s12 = ilc_batch.optical_settings(plan, plan["campaigns"][0])
+        check(s12["cap_v"] == 1.0 and s12["scan"]["angles"] == "0:359:45" and s12["scan"]["points"] == 20000,
+              "settings: the campaign's over the root's over the defaults")
+        awg12, scope12 = bench(bench_cfg)
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=(awg12, scope12))
+        c = man["campaigns"]["S25"]
+        o = c.get("optical") or {}
+        P = o.get("passes") or [{}]
+        check(c["status"] == "done" and o.get("status") == "refused" and P[0].get("status") == "refused"
+              and any("cap" in f for f in P[0].get("refused", [])),
+              f"refused for the cap, recorded ({(P[0].get('refused') or ['?'])[0][:70]})")
+        check(any("correction REFUSED" in m for m in msgs), "the log says so")
+        for k in ("X1", "X2"):
+            ch = c["channels"][k]
+            late = [h for h in ch["history"] if h["it"] >= 3]
+            best = min(late, key=lambda h: h["rms_v"])
+            with np.load(ch["state"], allow_pickle=True) as st:
+                clean = "base_target" not in st.files and "corrections" not in st.files
+            check(ch["keeper_iteration"] == best["it"] and os.path.exists(ch["keeper_file"]) and clean,
+                  f"{k}: electrical keeper i{best['it']:02d}, target untouched")
+        check(not awg12.is_on(1) and not awg12.is_on(2), "outputs off")
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(redo=True, no_optical=True), log=msgs.append, bench=bench(bench_cfg))
+        check("optical" not in man["campaigns"]["S25"] and any("skipped (--no-optical)" in m for m in msgs),
+              "--no-optical skips the stage")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

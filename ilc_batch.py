@@ -7,6 +7,7 @@
     python ilc_batch.py run <suite>/batch_tier1.json --dry-run
     python ilc_batch.py run <suite>/batch_tier1.json --simulate
     python ilc_batch.py run <suite>/batch_tier1.json --allow-output-on
+    python ilc_batch.py run <suite>/batch_tier1.json --allow-output-on --no-optical
 
 The GUI's Batch window (ilc_gui.py, "Batch..." in the Bench loop box) builds,
 checks, simulates and runs the same plans through run_batch() below.
@@ -71,6 +72,30 @@ more than `diverge_factor` x its best for 3 measurements in a row (it then
 reverts to its best drive); or a drive failing the limit check. The keeper is
 the measured iteration with the lowest rms error at or after `min_iterations`
 (or overall, if it stopped before that).
+
+OPTICAL STAGE
+-------------
+With an "optical" block in the plan (at its root, or per campaign, which wins;
+"optical": false in a campaign switches it off; --no-optical skips it for the
+run) the campaign does not end at its keepers. The ILC makes the MONITORS
+follow the target; the light leaves them at the ramp top and after the fall,
+which no monitor shows. So: both keepers play (outputs ON, the same
+--allow-output-on rule), the rotating-analyzer polarimeter scans the light
+(eomilc.optical: scan, compare), minus (light - monitors) goes onto each
+channel's TARGET (optical.apply_correction, gain gains[pass]), `iterations`
+more iterations of the normal loop learn the moved target (iterate_once, both
+channels, the stop rules per pass), and a verification scan + compare reads
+the after. The next pass applies the verification's correction at the next
+gain; it REPLACES the previous one in its slot. The keeper is then the last
+measured iteration after the last applied correction. A refused correction
+ends the stage for that campaign, recorded, and the campaign keeps its keeper.
+Every pass is in the manifest entry's "optical" block and in
+<outdir>/<stem>_optical.json; a pass whose verification scan is on disk is
+not repeated on a resumed run. --simulate plays the drives into the rampol
+simulated bench (optical.open_devices(simulate=True) + sim_play), where the
+only light-only term is its rotator error (sim_rot_err, 0.5 deg); what it
+plays is what the simbench chains make of the drives (sim_bridge, see
+_sim_drives) and it is cabled without a command channel (_optical_cfg).
 """
 from __future__ import annotations
 
@@ -114,6 +139,17 @@ DEFAULT_SETTINGS = {
     "X2": dict(model="frf", frf="run/frf_WIDE_X2.csv", f_use=50e3, f_max=75e3,
                gamma=0.6, f_cut=40e3),
 }
+# The optical stage's settings (docs/OPTICAL_CLOSE_DESIGN.md section 3): band
+# 5 kHz for the 0.3 ms ramp-top feature, PD delay 1.7 us (the bench's; 0 in
+# simulation unless the plan says otherwise), split 0.5 for parallel shapes.
+# cap_v: the gate's cap at the EOM (V), None = the panel's 300 V. sim_rot_err:
+# the simulated rotator error (deg) that gives the closure something to do.
+DEFAULT_OPTICAL = dict(
+    scan=dict(angles="0:359:22.5", shots=8, points=20000, ref_every=9, hold_null=True,
+              settle_s=1.0),
+    band_hz=5000.0, pd_delay_us=1.7, split=0.5, gains=[0.7, 1.0], iterations=5,
+    name="{stem}_opt{pass}", outdir="", verify=True, require_keeper=True, cap_v=None,
+    figs=True, sim_rot_err=0.5, sim_bridge=True)
 
 
 class BatchError(RuntimeError):
@@ -144,6 +180,7 @@ def load_plan(path, cfg=None):
     plan["timing"] = {**DEFAULT_TIMING, **plan.get("timing", {})}
     if cfg is None:
         cfg = channels.load_panel_config()
+    plan["_polarimeter_path"] = str((cfg or {}).get("polarimeter_path") or "")
     wiring, notes = {}, []
     for k in DEFAULT_WIRING:
         try:
@@ -243,6 +280,14 @@ class ChannelRun:
     run_id: float = 0.0
     bad_streak: int = 0
     scope_channels: str = ""     # eomilc.channels.record() of the map in force
+    # Learned target corrections, as the panel keeps them (Session.base_target /
+    # corr_total / corr_layers; state keys base_target, corr_total, corrections):
+    # the target before them (monitor V), what was added (monitor V), the layers.
+    base_target: object = None
+    corr_total: object = None
+    corr_layers: list = field(default_factory=list)
+    since: int = 0               # decide()'s divergence best counts from measured[since:]
+    extra: dict = field(default_factory=dict)      # other state keys carried through (line_fit)
 
     @property
     def channel(self):
@@ -301,9 +346,14 @@ def build_run(plan, camp, key, log=print):
     state_path = os.path.join(plan["_run_dir"], f"drive_{stem}.state.npz")
     plant_p, loop_p, rec, src = _settings_for(plan, key)
     lp = plan["loop"]
+    carried = {}
     if os.path.exists(state_path):
         st = run_ilc.load_state(state_path)
-        if len(st["target"]) != len(v) or not np.allclose(st["target"], v, rtol=1e-6, atol=1e-9):
+        carried = run_ilc.passthrough(st)
+        # a state with learned corrections holds base + corrections as its
+        # target: the target file is its BASE
+        held = carried["base_target"] if "base_target" in carried else st["target"]
+        if len(held) != len(v) or not np.allclose(held, v, rtol=1e-6, atol=1e-9):
             raise BatchError(f"{state_path} exists but holds a different target than {tpath}; "
                              f"move it aside or rename the campaign")
         loop = run_ilc.build_loop(st)
@@ -334,9 +384,26 @@ def build_run(plan, camp, key, log=print):
                     state_path=state_path, target_path=os.path.abspath(tpath),
                     model_key=rec["model"], frf_path=rec["frf"], frf_use=rec["f_use"], frf_max=rec["f_max"])
     cr.scope_channels = plan.get("_scope_channels", "")
+    restore_corrections(cr, carried)
     if resumed:
         restore_measured(cr, plan["_run_dir"])
     return cr
+
+
+def restore_corrections(cr, carried):
+    """The panel's correction keys from a state (run_ilc.passthrough) onto a
+    ChannelRun, so a resumed campaign keeps its corrected target's record."""
+    if "base_target" in carried:
+        cr.base_target = np.asarray(carried["base_target"], float)
+        if "corr_total" in carried:
+            cr.corr_total = np.asarray(carried["corr_total"], float)
+    if "corrections" in carried:
+        try:
+            cr.corr_layers = list(json.loads(str(carried["corrections"])))
+        except ValueError:
+            cr.corr_layers = []
+    if "line_fit" in carried:
+        cr.extra["line_fit"] = str(carried["line_fit"])
 
 
 def restore_measured(cr, run_dir):
@@ -380,7 +447,19 @@ def save_state(cr):
 
 
 def _savez_state(f, cr, lp):
-    np.savez(f, t=cr.t, target=lp.target, u=cr.u, dt=lp.dt,
+    # the panel's extra keys (run_ilc.PASS_THROUGH), written only when set,
+    # as ilc_gui.save_session writes them
+    extra = {}
+    if getattr(cr, "base_target", None) is not None:
+        extra["base_target"] = np.asarray(cr.base_target, float)
+        if getattr(cr, "corr_total", None) is not None:
+            extra["corr_total"] = np.asarray(cr.corr_total, float)
+    if getattr(cr, "corr_layers", None):
+        extra["corrections"] = json.dumps(cr.corr_layers, default=float)
+    if getattr(lp, "line", None) is not None:
+        extra["line_ref"] = np.asarray(lp.line, float)
+    extra.update(getattr(cr, "extra", None) or {})
+    np.savez(f, **extra, t=cr.t, target=lp.target, u=cr.u, dt=lp.dt,
              channel=lp.channel.name, gain=lp.plant.gain, tau=lp.plant.tau,
              offset=lp.plant.offset, tau2=lp.plant.tau2, fn=lp.plant.fn,
              zeta=lp.plant.zeta, full_scale=cr.full_scale, name=cr.stem,
@@ -592,7 +671,9 @@ def decide(cr, m, stack, lp, log):
     k = cr.iteration
     cr.measured.append((k, m["rms_err_hv"], m["peak_err_hv"]))
     cr.drives[k] = cr.u.copy()
-    best = min(r[1] for r in cr.measured)
+    # since: a moved target (the optical stage) starts a new best; the rms
+    # against the old target says nothing about divergence from the new one
+    best = min(r[1] for r in (cr.measured[getattr(cr, "since", 0):] or cr.measured))
     if m["rms_err_hv"] > lp["diverge_factor"] * best:
         cr.bad_streak += 1
     else:
@@ -624,9 +705,75 @@ def keeper(cr, lp):
     return min(late, key=lambda r: r[1]) if late else None
 
 
+def iterate_once(awg, scope, runs, plan, args, log=print, stop=None,
+                 emit=lambda kind, **kw: None, stem=None, loop_for=None):
+    """One iteration of the bench loop for `runs` (ChannelRuns playing
+    together): every monitor from the same frozen acquisitions
+    (capture_monitors), then per ACTIVE channel the metrics, the measurement
+    saved (meas_<stem>_iNN.npy), decide(), and either a stop (state saved; a
+    diverged channel goes back to its best drive) or the update, the limit
+    check, the state and drive CSV saved; the new drives are uploaded and
+    "saved" is emitted. Returns the ChannelRuns whose drive changed.
+
+    `args` needs .gui_names. `stem`: the campaign's name for the events
+    (default: the first channel's stem without its key). `loop_for`: {key:
+    loop settings} in place of plan["loop"] for decide() and the keeper (the
+    optical stage's per-pass iteration caps); the capture always uses the
+    plan's. Raises BatchStopped when `stop` is set, BatchError when the
+    scope does not trigger."""
+    from eomilc import ilc
+    _stopped(stop)
+    if stem is None:
+        stem = runs[0].stem[:-len(runs[0].key)] if runs[0].stem.endswith(runs[0].key) else runs[0].stem
+    states = {cr.key: cr.state_path for cr in runs}
+    caps = capture_monitors(scope, runs, plan, log, stop)
+    changed = []
+    for cr in runs:
+        y, stack = caps[cr.key]
+        if not cr.active:
+            continue
+        lp = (loop_for or {}).get(cr.key) or plan["loop"]
+        m = cr.loop.metrics(y)
+        np.save(os.path.join(plan["_run_dir"], f"meas_{cr.stem}_i{cr.iteration:02d}.npy"), y)
+        why = decide(cr, m, stack, lp, log)
+        log(f"  {cr.stem} i{cr.iteration:02d}: rms {m['rms_err_hv']:6.2f} V  peak {m['peak_err_hv']:7.1f} V"
+            + (f"  -> stop ({why})" if why else ""))
+        emit("iteration", stem=stem, key=cr.key, it=cr.iteration, rms_v=m["rms_err_hv"],
+             peak_v=m["peak_err_hv"], stop=why, states=states)
+        if why:
+            cr.active, cr.reason = False, why
+            cr.loop.history.append({**m, "run_id": cr.run_id})
+            if why == "diverged":
+                kb = keeper(cr, lp)
+                cr.u = cr.drives[kb[0]].copy()
+                changed.append(cr)
+                log(f"  {cr.stem}: back to its best drive, i{kb[0]:02d}")
+            save_state(cr)
+            continue
+        u_new = cr.loop.update(cr.u, y)
+        cr.loop.history[-1]["update_rms"] = ilc.update_rms(cr.u, u_new)
+        cr.loop.history[-1]["run_id"] = cr.run_id
+        rep = cr.loop.check(u_new)
+        if not rep:
+            cr.active, cr.reason = False, f"limit check: {rep}"
+            log(f"  {cr.stem}: the next drive fails the limit check ({rep}); stopping this channel")
+            save_state(cr)
+            continue
+        cr.u, cr.iteration = u_new, cr.iteration + 1
+        save_state(cr)
+        write_iteration(cr, plan["_run_dir"])
+        changed.append(cr)
+    for cr in changed:
+        upload(awg, cr, args.gui_names, log)
+    # after the saves: a follower reloading the state sees this iteration
+    emit("saved", stem=stem, states=states)
+    return changed
+
+
 def run_campaign(awg, scope, plan, camp, args, log=print, stop=None, emit=lambda kind, **kw: None):
-    from eomilc import ilc, outputs
+    from eomilc import outputs
     lp = plan["loop"]
+    opt = optical_settings(plan, camp)          # a plan error refuses before anything plays
     keys = camp.get("channels", ["X1", "X2"])
     runs = [build_run(plan, camp, k, log) for k in keys]
     n = {len(cr.t) for cr in runs}
@@ -639,69 +786,36 @@ def run_campaign(awg, scope, plan, camp, args, log=print, stop=None, emit=lambda
     for cr in runs:
         write_iteration(cr, plan["_run_dir"])
     resumed_at = {cr.key: cr.iteration for cr in runs}
-    states = {cr.key: cr.state_path for cr in runs}
     while any(cr.active for cr in runs):
-        _stopped(stop)
-        caps = capture_monitors(scope, runs, plan, log, stop)
-        changed = []
-        for cr in runs:
-            y, stack = caps[cr.key]
-            if not cr.active:
-                continue
-            m = cr.loop.metrics(y)
-            np.save(os.path.join(plan["_run_dir"], f"meas_{cr.stem}_i{cr.iteration:02d}.npy"), y)
-            why = decide(cr, m, stack, lp, log)
-            log(f"  {cr.stem} i{cr.iteration:02d}: rms {m['rms_err_hv']:6.2f} V  peak {m['peak_err_hv']:7.1f} V"
-                + (f"  -> stop ({why})" if why else ""))
-            emit("iteration", stem=camp["stem"], key=cr.key, it=cr.iteration, rms_v=m["rms_err_hv"],
-                 peak_v=m["peak_err_hv"], stop=why, states=states)
-            if why:
-                cr.active, cr.reason = False, why
-                cr.loop.history.append({**m, "run_id": cr.run_id})
-                if why == "diverged":
-                    kb = keeper(cr, lp)
-                    cr.u = cr.drives[kb[0]].copy()
-                    changed.append(cr)
-                    log(f"  {cr.stem}: back to its best drive, i{kb[0]:02d}")
-                save_state(cr)
-                continue
-            u_new = cr.loop.update(cr.u, y)
-            cr.loop.history[-1]["update_rms"] = ilc.update_rms(cr.u, u_new)
-            cr.loop.history[-1]["run_id"] = cr.run_id
-            rep = cr.loop.check(u_new)
-            if not rep:
-                cr.active, cr.reason = False, f"limit check: {rep}"
-                log(f"  {cr.stem}: the next drive fails the limit check ({rep}); stopping this channel")
-                save_state(cr)
-                continue
-            cr.u, cr.iteration = u_new, cr.iteration + 1
-            save_state(cr)
-            write_iteration(cr, plan["_run_dir"])
-            changed.append(cr)
-        for cr in changed:
-            upload(awg, cr, args.gui_names, log)
-        # after the saves: a follower reloading the state sees this iteration
-        emit("saved", stem=camp["stem"], states=states)
+        iterate_once(awg, scope, runs, plan, args, log, stop, emit, stem=camp["stem"])
     outputs_off(awg, runs, log)
+    final, opt_rec = {}, None
+    if opt is not None and getattr(args, "no_optical", False):
+        log("  optical stage: skipped (--no-optical)")
+    elif opt is not None:
+        opt_rec, final = optical_stage(awg, scope, runs, plan, camp, args, opt, log, stop, emit)
     result = {"channels": {}}
     kept, targets = {}, {}
     for cr in runs:
         targets[cr.key] = cr.target_path
-        kb = keeper(cr, lp)
+        kb = final.get(cr.key) or keeper(cr, lp)
         u_keep = cr.drives[kb[0]]
         kdir = os.path.join(plan["_run_dir"], "keep")
         os.makedirs(kdir, exist_ok=True)
         kpath = os.path.join(kdir, f"drive_{cr.stem}_keep.csv")
+        why = cr.reason + ("; the last iteration after the optical correction" if cr.key in final else "")
         outputs.write_awg_csv(kpath, cr.t, u_keep,
                               comment=f"{cr.loop.channel.name} keeper: {cr.stem} i{kb[0]:02d}, rms {kb[1]:.2f} V, "
-                                      f"peak {kb[2]:.1f} V (ilc_batch, stopped: {cr.reason})")
+                                      f"peak {kb[2]:.1f} V (ilc_batch, stopped: {why})")
         kept[cr.key] = kpath
         result["channels"][cr.key] = dict(state=cr.state_path, stop=cr.reason, iterations=cr.iteration,
                                           resumed_at=resumed_at[cr.key],
                                           keeper_iteration=kb[0], keeper_rms_v=kb[1], keeper_peak_v=kb[2],
                                           keeper_file=kpath,
                                           history=[dict(it=a, rms_v=b, peak_v=c) for a, b, c in cr.measured])
-        log(f"  {cr.stem}: keeper i{kb[0]:02d} (rms {kb[1]:.2f} V, peak {kb[2]:.1f} V), stopped: {cr.reason}")
+        log(f"  {cr.stem}: keeper i{kb[0]:02d} (rms {kb[1]:.2f} V, peak {kb[2]:.1f} V), stopped: {why}")
+    if opt_rec is not None:
+        result["optical"] = opt_rec
     if plan.get("card") and len(kept) == 2:
         try:
             result["card"] = card_files(kept, targets, plan["card"], log)
@@ -709,6 +823,484 @@ def run_campaign(awg, scope, plan, camp, args, log=print, stop=None, emit=lambda
             result["card_error"] = str(e)
             log(f"  card files NOT written: {e}")
     return result
+
+
+# ------------------------------------------------------------ optical stage
+class OpticalError(RuntimeError):
+    """The polarimeter side of the optical stage failed (devices, scan,
+    comparison): the stage ends for this campaign, recorded, and the
+    campaign keeps the keeper it has."""
+
+
+def _num(x):
+    """0.7 -> "0.7", 1 -> "1.0": gains read as gains."""
+    s = f"{float(x):g}"
+    return s if ("." in s or "e" in s) else s + ".0"
+
+
+def optical_settings(plan, camp):
+    """The optical stage's settings for one campaign, or None when it has
+    none: DEFAULT_OPTICAL under the plan root's "optical" under the
+    campaign's (per-campaign wins, key by key; "scan" merges key by key too).
+    "optical": true takes the defaults; a campaign's "optical": false
+    switches a root block off for it. "_given" lists the keys the plan set.
+    Raises BatchError for settings that cannot run."""
+    root, own = plan.get("optical"), camp.get("optical")
+    if own is False or (own is None and not root):
+        return None
+    s = json.loads(json.dumps(DEFAULT_OPTICAL))          # a deep copy
+    given = set()
+    for layer in (root, own):
+        if not isinstance(layer, dict):
+            continue
+        for k, v in layer.items():
+            if k == "scan" and isinstance(v, dict):
+                s["scan"].update(v)
+            else:
+                s[k] = v
+            given.add(k)
+    g = s["gains"]
+    s["gains"] = [float(x) for x in (g if isinstance(g, (list, tuple)) else [g])]
+    s["iterations"] = int(s["iterations"])
+    if not s["gains"] or any(not (0.0 < x <= 2.0) for x in s["gains"]):
+        raise BatchError(f"{camp['stem']}: optical gains {g} -- each must be in (0, 2]")
+    if s["iterations"] < 1:
+        raise BatchError(f"{camp['stem']}: optical iterations {s['iterations']} -- at least 1")
+    try:
+        s["name"].format_map({"stem": camp["stem"], "pass": 1})
+    except (KeyError, IndexError, ValueError) as e:
+        raise BatchError(f"{camp['stem']}: optical name {s['name']!r} ({e}); "
+                         f"use {{stem}} and {{pass}}")
+    s["_given"] = sorted(given)
+    return s
+
+
+def optical_line(s):
+    """The optical settings as one line (dry_run, the log)."""
+    n, sc = len(s["gains"]), s["scan"]
+    line = (f"optical: {n} pass{'es' if n != 1 else ''} gains {'/'.join(_num(g) for g in s['gains'])}, "
+            f"{s['iterations']} iterations each, scan {sc['angles']} x {sc['shots']} shots, "
+            f"band {float(s['band_hz'])/1e3:g} kHz")
+    if not s["verify"]:
+        line += ", no verification scans"
+    if s.get("cap_v") is not None:
+        line += f", gate cap {float(s['cap_v']):g} V"
+    return line
+
+
+def _scan_done(folder):
+    """A polarimeter scan folder whose every step is done."""
+    if not folder:
+        return False
+    p = os.path.join(folder, f"{os.path.basename(os.path.normpath(folder))}_scan.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            steps = json.load(fh)["steps"]
+    except (OSError, ValueError, KeyError):
+        return False
+    return bool(steps) and all(st.get("status") == "done" for st in steps)
+
+
+def _write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=1, default=float)
+    os.replace(tmp, path)
+
+
+def _advance(cr, u, run_dir):
+    """`u` becomes the drive measured next, under an iteration number of its
+    own (one past the last measured), its drive CSV written and the state
+    saved: every measurement keeps its own drive/measurement pair on disk."""
+    cr.u = np.asarray(u, float).copy()
+    last = max((r[0] for r in cr.measured), default=-1)
+    if cr.iteration <= last:
+        cr.iteration = last + 1
+    write_iteration(cr, run_dir)
+    save_state(cr)
+
+
+def _ends_deg(cr):
+    """The rotation at the ramp top (deg): 90 x the BASE target's peak at the
+    EOM / the chain's V90 (eomilc.config, the 1 Sep calibration); None when
+    the chain has no V90."""
+    ch = cr.channel
+    v90 = float(getattr(ch, "v90_hv", float("nan")))
+    if not np.isfinite(v90) or v90 <= 0:
+        return None
+    base = cr.base_target if cr.base_target is not None else cr.loop.target
+    return 90.0 * float(np.max(base)) * ch.mon_scale / v90
+
+
+def _optical_cfg(plan, simulate, log=print):
+    """The config optical.open_devices reads: the plan's Scope channels map
+    (PD, MonX1, MonX2 required) and the panel's polarimeter_path.
+
+    Simulated, the polarimeter is a scope of its own (rampol.sim), cabled
+    PD / MonX1 / MonX2 where the plan's map has them (the bench's default
+    channels where it has not) and NO command channel: rampol.sim derives
+    its command from its monitor (0.92 x monitor / gain), which lags the
+    learned, pre-emphasized drive by the chain's response, and compare's
+    CmdX1-vs-drive time map then misplaces the target by tens of us -- ~3
+    deg of monitors - target on the slopes of a 180 deg shape. Without it
+    compare maps the monitor against the target, which in simulation is
+    exact."""
+    rec = plan.get("_scope_channels")
+    chans = channels.from_record(rec) if rec else None
+    cfg = {"scope_channels": chans or channels.normalise(channels.DEFAULT_CHANNELS)}
+    if plan.get("_polarimeter_path"):
+        cfg["polarimeter_path"] = plan["_polarimeter_path"]
+    if simulate:
+        try:
+            missing = [r for r in ("PD", "MonX1", "MonX2") if channels.channel_for(cfg, r) is None]
+        except ValueError:
+            missing = ["(a role on two channels)"]
+        if missing:
+            log(f"  the Scope channels map has no {', '.join(missing)}: the simulated polarimeter "
+                f"is cabled by the bench's default map")
+            cfg["scope_channels"] = channels.normalise(channels.DEFAULT_CHANNELS)
+        cfg["scope_channels"] = {ch: (c if c["role"] in ("PD", "MonX1", "MonX2") else {"role": "off", "name": ""})
+                                 for ch, c in channels.channels_of(cfg).items()}
+        log("  simulated polarimeter cabled " + ", ".join(
+            f"CH{ch} {c['role']}" for ch, c in cfg["scope_channels"].items() if c["role"] != "off")
+            + " (no command channel: its time map would be the simulation's, not the bench's)")
+    return cfg
+
+
+def _sim_drives(byc, dev, scope, dt, bridge):
+    """What optical.sim_play is given: the drives, or with `bridge` (a
+    simulated run whose batch scope is eomilc.simbench's) what the simbench
+    chains make of them divided by rampol.sim's own AWG -> monitor gain. The
+    two simulations model the chain differently (rampol.sim: the drive x
+    0.5594 / 0.5924; simbench: the measured FRFs, ~0.58 / ~0.62 at the
+    hold), and a drive the ILC learned on simbench reads ~5 % off its target
+    in rampol.sim's monitors -- ~10 deg at the top of a 180 deg parallel shape,
+    which the polarimeter sees in its monitors too, so no optical correction
+    could take it out. Bridged, the polarimeter's monitors are the ILC's."""
+    out = {}
+    for c in ("EO1", "EO2"):
+        cr = byc[c]
+        u = np.asarray(cr.u, float)
+        if bridge and dev.sim is not None:
+            ch = int(c[-1])
+            u = scope.chains[cr.wiring["awg_ch"]].respond(u, dt) / float(dev.sim.awg_gain[ch])
+        out[c] = u
+    return out
+
+
+def _optical(what, fn, *a, stop=None, **kw):
+    """An eomilc.optical call: Stop (rampol's Cancelled) becomes BatchStopped,
+    anything else an OpticalError naming the step."""
+    try:
+        return fn(*a, **kw)
+    except (BatchStopped, KeyboardInterrupt):
+        raise
+    except Exception as e:
+        if type(e).__name__ == "Cancelled" or (stop is not None and stop.is_set()):
+            raise BatchStopped("stopped") from e
+        raise OpticalError(f"{what}: {type(e).__name__}: {e}") from e
+
+
+def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
+                  emit=lambda kind, **kw: None):
+    """The optical close for one campaign whose electrical keepers are
+    chosen (outputs OFF on entry and on exit). Returns (record, final):
+    record is the manifest's "optical" block (also written to
+    <outdir>/<stem>_optical.json, which a resumed run reads); final is
+    {key: (it, rms_v, peak_v)}, the last measured iteration after the last
+    applied correction per channel, or {} when nothing was applied (the
+    campaign then keeps its electrical keeper).
+
+    Per pass p (gain gains[p-1]): the correction comes from the previous
+    pass's verification comparison, or for pass 1 (and without
+    verification) from a scan of its own, <name>_before; it is applied to
+    both channels' targets or to neither (optical.apply_correction; a
+    refusal ends the stage, recorded); `iterations` iterations of the loop
+    (iterate_once, both channels, the stop rules with the caps of the pass);
+    then the verification scan <name> and its comparison. A pass whose
+    verification scan is complete on disk and recorded done is not
+    repeated. Stop raises BatchStopped (the scan on disk resumes)."""
+    from eomilc import corrections as corrmod, optical
+    lp = plan["loop"]
+    stem = camp["stem"]
+    sim = bool(getattr(args, "simulate", False))
+    run_dir = plan["_run_dir"]
+    outdir = s.get("outdir") or os.path.join(run_dir, "optical")
+    if not os.path.isabs(outdir):
+        outdir = os.path.join(run_dir, outdir)
+    os.makedirs(outdir, exist_ok=True)
+    rpath = os.path.join(outdir, f"{stem}_optical.json")
+    try:
+        with open(rpath) as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        rec = {}
+    rec.update(settings={k: v for k, v in s.items() if not k.startswith("_")}, outdir=outdir,
+               record=rpath, simulated=sim, status="running")
+    rec.pop("error", None)
+    passes = rec.setdefault("passes", [])
+    gains, n_it, sc = s["gains"], s["iterations"], s["scan"]
+    byc = {cr.channel.name: cr for cr in runs}
+    final = {}
+    olog = lambda m: log("    " + str(m))                              # noqa: E731
+    log(f"  {optical_line(s)}")
+
+    def save():
+        _write_json(rpath, rec)
+
+    def end(status, why=""):
+        rec["status"] = status
+        if why:
+            rec["error"] = why
+        log(f"  optical stage {status}" + (f": {why}" if why else ""))
+        save()
+        emit("optical", stem=stem, step="end", status=status)
+        return rec, final
+
+    if set(byc) != {"EO1", "EO2"}:
+        return end("skipped", "the optical close needs both crystals (EO1 and EO2) in the campaign")
+    if s["require_keeper"]:
+        bad = [f"{cr.key} {cr.reason or 'nothing measured'}" for cr in runs
+               if not cr.measured or cr.reason == "diverged" or cr.reason.startswith("limit check")]
+        if bad:
+            return end("skipped", "no keeper to correct (" + "; ".join(bad) + ")")
+    if not args.allow_output_on:
+        return end("refused", "outputs are off and this run may not switch them on "
+                              "(pass --allow-output-on)")
+
+    def done_pass(i):
+        p = passes[i] if i < len(passes) else None
+        return bool(p) and p.get("status") == "done" and (not s["verify"] or _scan_done(p.get("verify_scan")))
+
+    def kept_of(p):
+        out = {}
+        for k, it in (p.get("kept") or {}).items():
+            cr = next((c for c in runs if c.key == k), None)
+            hit = [r for r in (cr.measured if cr else []) if r[0] == it]
+            if hit:
+                out[k] = hit[-1]
+        return out
+
+    p0 = 0
+    while p0 < len(gains) and done_pass(p0):
+        log(f"  optical pass {p0 + 1}: done in an earlier run "
+            f"({os.path.basename(passes[p0].get('verify_scan') or passes[p0].get('scan') or '')}), not repeated")
+        p0 += 1
+    del passes[p0:]
+    if p0:
+        final = kept_of(passes[p0 - 1])
+    if p0 >= len(gains):
+        return end("done")
+
+    # the keepers play
+    for cr in runs:
+        kb = final.get(cr.key) or keeper(cr, lp)
+        _advance(cr, cr.drives[kb[0]], run_dir)
+        log(f"  {cr.stem}: {'pass ' + str(p0) + ' ' if cr.key in final else ''}keeper i{kb[0]:02d} "
+            f"(rms {kb[1]:.2f} V, peak {kb[2]:.1f} V) plays as i{cr.iteration:02d}")
+    dev = None
+    status, why = "done", ""
+    try:
+        # the analyzer first: a polarimeter that cannot scan (no ELL14, the old
+        # scope-grab module) refuses before anything is switched on
+        cfg = _optical_cfg(plan, sim, log)
+        dev = _optical("polarimeter", optical.open_devices, None if sim else scope, cfg, log=olog,
+                       simulate=sim, stop=stop)
+        for cr in runs:
+            name, n, frac = upload(awg, cr, args.gui_names, log)
+            log(f"  {cr.stem} i{cr.iteration:02d} uploaded as {name} ({n} pts, {100*frac:.1f}% of DAC range)")
+        for cr in runs:
+            awg.set_output(cr.wiring["awg_ch"], True)
+            if not awg.is_on(cr.wiring["awg_ch"]):
+                raise BatchError(f"CH{cr.wiring['awg_ch']} did not switch on")
+        log("  outputs ON: " + ", ".join(f"CH{cr.wiring['awg_ch']}" for cr in runs))
+        time.sleep(lp["settle_s"])
+        check_alignment(scope, runs, plan, log)
+        pd = float(s["pd_delay_us"])
+        bridge = False
+        if sim:
+            dev.sim.rot_err = float(s["sim_rot_err"])
+            log(f"  simulated light: the monitors' rotation + a {dev.sim.rot_err:g} deg rotator error "
+                f"(the light-only term the closure has to remove)")
+            bridge = bool(s["sim_bridge"]) and all(hasattr(getattr(scope, "chains", {}).get(cr.wiring["awg_ch"]),
+                                                           "respond") for cr in runs)
+            if bridge:
+                log("  simulated polarimeter: it plays what the simulated ILC chains make of the drives "
+                    "(their monitor / its own gain), so both simulations read the same monitors")
+            else:
+                log("  simulated polarimeter: its monitors are the drive x its own chain gain (rampol.sim), "
+                    "not the simulated ILC chain's -- light - target carries their difference, "
+                    "light - monitors is what the closure acts on")
+            if "pd_delay_us" not in s["_given"]:
+                pd = 0.0
+                log("  simulated PD has no delay: compared at PD delay 0 us (1.7 us is the bench's)")
+        e1, e2 = _ends_deg(byc["EO1"]), _ends_deg(byc["EO2"])
+        ends = {"X1": e1, "X2": e2} if e1 is not None and e2 is not None else None
+        if ends:
+            log(f"  ramp tops: X1 {e1:.1f} deg, X2 {e2:.1f} deg (from the targets' peaks and V90)")
+        t, dt = byc["EO1"].t, float(byc["EO1"].loop.dt)
+        states = {"x1": byc["EO1"].state_path, "x2": byc["EO2"].state_path}
+        gate = None
+        if s.get("cap_v") is not None:
+            gate = corrmod.GateSettings(band_hz=float(s["band_hz"]),
+                                        **dict(optical.GATE_DEFAULTS, cap_out=float(s["cap_v"])))
+        cancelled = (lambda: stop is not None and stop.is_set())
+
+        def do_scan(name, p):
+            optical.sim_play(dev, _sim_drives(byc, dev, scope, dt, bridge), dt=dt)
+            emit("optical", stem=stem, step="scan", scan=name, **{"pass": p})
+            log(f"  scan {name}: analyzer {sc['angles']} deg x {sc['shots']} shots, {sc['points']} points")
+            folder = _optical(f"scan {name}", optical.scan, dev, outdir, name, t, log=olog,
+                              cancelled=cancelled, angles=sc["angles"], shots=int(sc["shots"]),
+                              points=int(sc["points"]), ref_every=int(sc["ref_every"]),
+                              hold_null=bool(sc["hold_null"]), ends_deg=ends,
+                              settle_s=float(sc["settle_s"]), states=states, stop=stop,
+                              extra={"ilc_batch": {"plan": plan.get("_path", ""), "campaign": stem,
+                                                   "pass": p, "gain": gains[p - 1]}})
+            log(f"  scan {name}: {folder}")
+            return folder
+
+        def do_compare(folder, p, when):
+            emit("optical", stem=stem, step="compare", scan=os.path.basename(folder), **{"pass": p})
+            log(f"  compare {os.path.basename(folder)}: band {float(s['band_hz'])/1e3:g} kHz, "
+                f"PD delay {pd:g} us, split {float(s['split']):g}")
+            summ = _optical(f"compare {os.path.basename(folder)}", optical.compare, folder,
+                            states["x1"], states["x2"], band_hz=float(s["band_hz"]), pd_delay_us=pd,
+                            split=float(s["split"]), log=olog, figs=bool(s["figs"]), stop=stop)
+            v = optical.verdict(summ)
+            for line in optical.verdict_lines(v):
+                log(f"  {when}: {line}")
+            return summ, v
+
+        carry = None                  # this run's previous verification: (folder, summary, verdict)
+        for i in range(p0, len(gains)):
+            p, g = i + 1, gains[i]
+            name = s["name"].format_map({"stem": stem, "pass": p})
+            prec = {"pass": p, "gain": g, "name": name, "status": "running",
+                    "started": f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}"}
+            passes.append(prec)
+            save()
+            log(f"  optical pass {p}/{len(gains)}: gain {_num(g)}")
+            prev = passes[i - 1] if i > 0 else None
+            if carry is not None:
+                src, summ, vb = carry
+                log(f"  the correction is pass {p - 1}'s verification ({os.path.basename(src)})")
+            elif prev and s["verify"] and prev.get("verify_corr_files") and all(
+                    os.path.exists(f) for f in prev["verify_corr_files"].values()):
+                src = prev["verify_scan"]
+                summ = {"files": prev["verify_corr_files"], "played": prev.get("verify_played", {})}
+                vb = prev.get("verdict_after")
+                log(f"  the correction is pass {p - 1}'s verification ({os.path.basename(src)}, on disk)")
+            elif prev and s["verify"] and _scan_done(prev.get("verify_scan")):
+                src = prev["verify_scan"]
+                summ, vb = do_compare(src, p, "before")
+            else:
+                src = do_scan(name + "_before", p)
+                summ, vb = do_compare(src, p, "before")
+            prec.update(scan=src, corr_files=dict(summ["files"]),
+                        played_targets=dict(summ.get("played") or {}), verdict_before=vb)
+            save()
+            # both targets move, or neither
+            emit("optical", stem=stem, step="apply", **{"pass": p})
+            snap = {c: (np.array(cr.loop.target, float),
+                        dict(cr.loop.history[-1]) if cr.loop.history and isinstance(cr.loop.history[-1], dict)
+                        else None) for c, cr in byc.items()}
+            applied = {}
+            try:
+                for c in ("EO1", "EO2"):
+                    cr = byc[c]
+                    path = summ["files"].get(c)
+                    if not path:
+                        raise optical.CorrectionRefused([("fail", f"the comparison wrote no correction for {c}")])
+                    try:
+                        applied[c] = optical.apply_correction(cr.loop, cr.t, cr.u, cr.full_scale, path, gain=g,
+                                                              settings=gate, base_target=cr.base_target,
+                                                              layers=cr.corr_layers)
+                    except optical.CorrectionRefused as e:
+                        e.channel = cr.key
+                        raise
+            except optical.CorrectionRefused as e:
+                for c, (tg, h) in snap.items():
+                    byc[c].loop.target = tg
+                    if h is not None:
+                        byc[c].loop.history[-1] = h
+                fails = [t_ for lev, t_ in e.notes if lev == "fail"]
+                who = getattr(e, "channel", "")
+                prec.update(status="refused", refused_channel=who, refused=fails,
+                            notes=[list(n_) for n_ in e.notes])
+                for f_ in fails:
+                    log(f"  {who} correction REFUSED: {f_}")
+                status, why = "refused", f"pass {p}: {who} correction refused: " + "; ".join(fails)
+                break
+            prec["applied"] = {}
+            for c, a in applied.items():
+                cr = byc[c]
+                cr.base_target, cr.corr_total, cr.corr_layers = a.base_target, a.corr_total, a.layers
+                path = os.path.abspath(summ["files"][c])
+                L = next((L for L in a.layers if L.get("path") == path), a.layers[-1])
+                moved = float(np.max(np.abs(a.corr_total))) * cr.channel.mon_scale
+                prec["applied"][cr.key] = dict(file=path, gain=g, kept_peak_V=float(L.get("kept_peak", 0.0)),
+                                               resolved=float(L.get("resolved", 0.0)), status=L.get("status", ""),
+                                               target_moved_V=moved,
+                                               notes=[list(n_) for n_ in a.notes if n_[0] not in ("ok", "info")])
+                log(f"  {cr.stem}: {os.path.basename(path)} applied x{_num(g)}: {float(L.get('kept_peak', 0)):.1f} V "
+                    f"peak kept at the EOM, {100*float(L.get('resolved', 0)):.0f}% resolved; target = base "
+                    f"+ {moved:.1f} V peak")
+                for lev, txt in a.notes:
+                    if lev not in ("ok", "info"):
+                        log(f"    {lev}: {txt}")
+            save()
+            # the loop learns the moved targets
+            caps, first = {}, {}
+            for cr in runs:
+                _advance(cr, cr.u, run_dir)
+                cr.active, cr.reason, cr.bad_streak = True, "", 0
+                cr.since, cr.run_id = len(cr.measured), time.time()
+                first[cr.key] = cr.iteration
+                caps[cr.key] = dict(lp, max_iterations=cr.iteration + n_it - 1,
+                                    min_iterations=cr.iteration + min(int(lp["min_iterations"]), n_it - 1))
+            emit("optical", stem=stem, step="learn", **{"pass": p})
+            log(f"  {n_it} iteration{'s' if n_it != 1 else ''} on the corrected targets")
+            for _ in range(n_it + 1):
+                if not any(cr.active for cr in runs):
+                    break
+                iterate_once(awg, scope, runs, plan, args, log, stop, emit, stem=stem, loop_for=caps)
+            kept = {}
+            for cr in runs:
+                kb = keeper(cr, caps[cr.key]) if cr.reason == "diverged" else cr.measured[-1]
+                kept[cr.key] = kb
+                log(f"  {cr.stem}: pass {p} keeps i{kb[0]:02d} (rms {kb[1]:.2f} V, peak {kb[2]:.1f} V), "
+                    f"stopped: {cr.reason}")
+            prec.update(iterations={k: [first[k], kept[k][0]] for k in kept},
+                        kept={k: kb[0] for k, kb in kept.items()},
+                        kept_rms_v={k: kb[1] for k, kb in kept.items()},
+                        stops={cr.key: cr.reason for cr in runs})
+            final = dict(kept)
+            save()
+            if s["verify"]:
+                vfolder = do_scan(name, p)
+                vs, va = do_compare(vfolder, p, "after")
+                prec.update(verify_scan=vfolder, verify_corr_files=dict(vs["files"]),
+                            verify_played=dict(vs.get("played") or {}), verdict_after=va)
+                carry = (vfolder, vs, va)
+            else:
+                prec["verdict_after"] = None
+                carry = None
+            prec.update(status="done", finished=f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
+            save()
+    except (OpticalError, BatchError) as e:
+        status, why = "error", str(e)
+        if passes and passes[-1].get("status") == "running":
+            passes[-1].update(status="error", error=str(e))
+        log(f"  optical stage FAILED: {e}")
+    finally:
+        try:
+            outputs_off(awg, runs, log)
+        finally:
+            if dev is not None:
+                optical.close_devices(dev)
+            save()
+    return end(status, why if status != "done" else "")
 
 
 def card_files(kept, targets, card, log=print):
@@ -802,15 +1394,25 @@ def dry_run(plan, log=print):
         except BatchError as e:
             log(f"model {k}: REFUSED: {e}")
     rows = plan_rows(plan)
+    bad_opt = []
     for r in rows:
         if not r["n"]:
             log(f"  {r['stem']:8s} REFUSED: {r['error']}")
             continue
         log(f"  {r['stem']:8s} {r['n']:5d} pts, {r['period_ms']:7.3f} ms (FRQ {1e3/r['period_ms']:8.3f} Hz), "
             f"~{r['est_s']/60:4.1f} min | " + " | ".join(r["lines"]))
-    bad = sum(not r["ok"] for r in rows)
+    for camp in plan["campaigns"]:
+        try:
+            s = optical_settings(plan, camp)
+        except BatchError as e:
+            log(f"  {camp['stem']:8s} optical: REFUSED: {e}")
+            bad_opt.append(camp["stem"])
+            continue
+        if s is not None:
+            log(f"  {camp['stem']:8s} {optical_line(s)}")
+    bad = sum(not r["ok"] or r["stem"] in bad_opt for r in rows)
     log(f"total ~{sum(r['est_s'] for r in rows)/3600:.1f} h at {lp['max_iterations']} iterations each "
-        f"(early stops shorten it); {bad} campaign(s) with problems")
+        f"(early stops shorten it; an optical stage adds its scans); {bad} campaign(s) with problems")
     return bad == 0
 
 
@@ -866,9 +1468,11 @@ def _all_off(awg, log, why):
 def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
     """Run a loaded plan's campaigns in order; returns the manifest.
 
-    opts: .simulate, .allow_output_on, .redo, .gui_names. `stop` is a
+    opts: .simulate, .allow_output_on, .redo, .gui_names (and .no_optical,
+    absent = False: the plan's optical stage runs). `stop` is a
     threading.Event checked before every shot; `on_event(kind, info)` hears
-    "batch", "campaign", "iteration", "saved", "campaign_end" and "batch_end"
+    "batch", "campaign", "iteration", "saved", "optical" (a step of the
+    optical stage: stem, step, pass), "campaign_end" and "batch_end"
     (it runs on the batch's thread and must not block). `bench` = (awg, scope)
     replaces the instruments: the GUI passes the pair it opened, the tests a
     simulated pair they can inspect. The instruments are closed at the end.
@@ -973,6 +1577,8 @@ def main():
                    help="let the batch switch the AWG outputs on (after one typed confirmation)")
     r.add_argument("--yes", action="store_true", help="skip the typed confirmation")
     r.add_argument("--redo", action="store_true", help="repeat campaigns the manifest lists as done")
+    r.add_argument("--no-optical", action="store_true",
+                   help="skip the plan's optical stage (the campaigns end at their electrical keepers)")
     r.add_argument("--gui-names", action="store_true",
                    help="upload every iteration under its own <stem>_iNN name, as the GUI does, "
                         "instead of two alternating slots per channel")
