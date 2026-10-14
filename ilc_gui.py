@@ -798,6 +798,11 @@ class BatchWindow:
             ("ms", "record ms", 72), ("est", "~min", 46),
             ("status", "status", 88), ("X1", "X1", 150), ("X2", "X2", 150),
             ("note", "note", 280))
+    OCOLS = (("pass", "pass", 38), ("scan", "scan", 190),
+             ("top", "top light-target", 100), ("fall", "after fall", 76),
+             ("rms", "lt rms", 56), ("lm", "top light-mon", 90),
+             ("corr", "correction X1 / X2 mdeg", 140), ("zero", "analyzer zero", 110),
+             ("status", "status", 70))
     LOOP = (("max iterations", "max_iterations", 4, int),
             ("min", "min_iterations", 3, int),
             ("stop at rms V", "stop_rms_v", 5, float),
@@ -853,6 +858,22 @@ class BatchWindow:
         self.tree.bind("<Double-1>", lambda ev: self.open_selected())
         # Esc clears the selection, so Preview draws the whole plan again
         self.tree.bind("<Escape>", lambda ev: self.tree.selection_set(()))
+        # the optical stage of the selected campaign: one row per scan, from
+        # <run>/optical/<stem>_optical.json as the stage writes it (during the
+        # run, after it, after a restart); a scan row draws that scan on the
+        # Optical tab, the campaign's row the passes overview (14 Oct 2026)
+        of = ttk.LabelFrame(top, text="optical stage of the selected campaign "
+                                      "(a scan row draws it on the Optical tab)")
+        of.pack(fill="x", pady=(0, 3))
+        self.otree = ttk.Treeview(of, columns=[c[0] for c in self.OCOLS], show="headings",
+                                  height=5, selectmode="browse")
+        for key, head, width in self.OCOLS:
+            self.otree.heading(key, text=head)
+            self.otree.column(key, width=width, stretch=(key == "scan"), anchor="w")
+        self.otree.pack(fill="x")
+        self.otree.bind("<<TreeviewSelect>>", lambda ev: self._on_scan_select())
+        self.tree.bind("<<TreeviewSelect>>", lambda ev: self._on_select())
+        self._scans, self._review_stem = [], None
 
         r = ttk.Frame(top)
         r.pack(fill="x")
@@ -933,6 +954,8 @@ class BatchWindow:
             self.loop_vars[key].set(f"{self.plan['loop'][key]:g}")
         for c in self.plan["campaigns"]:
             self.tree.insert("", "end", iid=c["stem"], values=(c["stem"],))
+        self.otree.delete(*self.otree.get_children())
+        self._scans, self._review_stem = [], None
         self.view_sim = False
         self.show_manifest()
         n = len(self.plan["campaigns"])
@@ -1026,6 +1049,7 @@ class BatchWindow:
         sel = self.tree.selection()
         if not sel or self.plan is None:
             return
+        self.app._release_follow(sel[0], self)
         paths = self.state_paths(sel[0])
         p = paths.get(self.app.batchfollowch_var.get()) or next(iter(paths.values()))
         if not os.path.exists(p):
@@ -1058,6 +1082,86 @@ class BatchWindow:
         elif kind == "batch_end":
             self.show_manifest()
             self.status.configure(text="batch ended -- see the log")
+
+    # -- the optical stage on review (14 Oct 2026) ---------------------------
+    def _run_base(self):
+        return self.plan["_run_dir"] + (os.sep + "sim" if self.view_sim else "")
+
+    def optical_record(self, stem):
+        """The campaign's optical record (<run>/optical/<stem>_optical.json),
+        None without one."""
+        if self.plan is None:
+            return None
+        p = os.path.join(self._run_base(), "optical", f"{stem}_optical.json")
+        try:
+            with open(p, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _scan_cols(s):
+        """A scan's table row: the worst leg's light - target at the ramp top
+        and after the fall, its rms, light - monitors at the top, the
+        correction per crystal, the analyzer zero."""
+        v = s.get("verdict") or {}
+        legs = v.get("legs") or []
+        worst = max(legs, key=lambda x: abs(x.get("top_lt_mdeg", 0.0))) if legs else {}
+        cr = (v.get("correction") or {}).get("crystals") or {}
+        corr = " / ".join(f"{cr[c]['peak_mdeg']:.0f}" for c in ("EO1", "EO2") if c in cr)
+        zero = ""
+        if v and np.isfinite(v.get("zero_off_deg", float("nan"))):
+            zero = (f"{v['psi_rest_deg']:+.2f} "
+                    + ("(OK)" if v.get("zero_ok") else f"(OFF {v['zero_off_deg']:+.2f})"))
+        elif v and np.isfinite(v.get("psi_rest_deg", float("nan"))):
+            zero = f"{v['psi_rest_deg']:+.2f}"
+
+        def f(k):
+            return f"{worst[k]:+.0f}" if k in worst else ""
+        return (str(s["pass"]), f"{s['label']}: {s['scan']}", f("top_lt_mdeg"),
+                f("after_fall_lt_mdeg"),
+                f"{worst['lt_rms_mdeg']:.0f}" if "lt_rms_mdeg" in worst else "",
+                f("top_lm_mdeg"), corr, zero, "" if v else s.get("status", ""))
+
+    def show_optical(self, stem, draw=True, raise_fig=True):
+        """The optical table for `stem` and, with draw, the passes overview
+        on the Optical tab (raised with raise_fig). Returns the scans."""
+        self.otree.delete(*self.otree.get_children())
+        rec = self.optical_record(stem)
+        self._scans = optical.record_scans(rec) if rec else []
+        self._review_stem = stem
+        for i, s in enumerate(self._scans):
+            self.otree.insert("", "end", iid=str(i), values=self._scan_cols(s))
+        if rec is None:
+            self.otree.insert("", "end", iid="none",
+                              values=("", f"{stem}: no optical stage on disk", "", "", "", "", "", "", ""))
+        elif draw:
+            self.app._plot_opt_passes(stem, self._scans, rec)
+            if raise_fig:
+                self.app._show_fig(self.app.fig_optp)
+        return self._scans
+
+    def _on_select(self):
+        sel = self.tree.selection()
+        if not sel or self.plan is None:
+            return
+        self.app._release_follow(sel[0], self)
+        self.show_optical(sel[0])
+
+    def _on_scan_select(self):
+        sel = self.otree.selection()
+        if not sel or not sel[0].isdigit():
+            return
+        i = int(sel[0])
+        self.app._release_follow(self._review_stem, self)
+        self.app._review_scan(self._scans[i], optical.scan_before(self._scans, i))
+
+    def refresh_live(self, stem, raise_fig=False):
+        """A running batch's optical event: the table and the passes overview
+        follow the running campaign, unless another one is under review."""
+        if self._review_stem not in (None, stem):
+            return
+        self.show_optical(stem, draw=True, raise_fig=raise_fig)
 
     # -- new plan -------------------------------------------------------------
     def new_plan(self):
@@ -1593,6 +1697,8 @@ class App:
         self.holditer_var = tk.StringVar(value="")
         # the Batch window's settings live here, so they outlast the window
         self._batch_win = None
+        self._batch_live = {}        # the running batch: run_dir, simulated, stem
+        self._scan_live = None       # the optical scan polled for the live view
         self.batchplan_var = tk.StringVar(value=self.cfg.get("batch_plan", ""))
         self.batchfollow_var = tk.BooleanVar(
             value=bool(self.cfg.get("batch_follow", True)))
@@ -1836,6 +1942,12 @@ class App:
                                                          tab="Optical", view="correction")
         self.fig_optva, (self.ax_optva,) = self._tab("Optical before / after", 1,
                                                      tab="Optical", view="before / after")
+        # the batch's optical stage on review: the passes overview and the
+        # live view of a running scan (14 Oct 2026)
+        self.fig_optp, (self.ax_optp, self.ax_optp2) = self._tab(
+            "Optical passes", 2, sharex=True, tab="Optical", view="passes")
+        self.fig_optl, (self.ax_optl, self.ax_optl2) = self._tab(
+            "Scan live", 2, sharex=True, tab="Optical", view="scan live")
         # Batch: the Batch window's Preview -- a plan's targets before it runs
         # (one panel per campaign), or one campaign with its first drive; the
         # axes are rebuilt on every preview (_batch_preview_show)
@@ -7771,6 +7883,246 @@ class App:
         ax.grid(True, axis="x", alpha=0.3)
         self._draw(self.fig_optva)
 
+    # ------------------------------------------------ optical stage on review
+    PASS_COLOURS = ("#7f7f7f", "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b")
+
+    def _release_follow(self, stem, bw=None):
+        """Reviewing a campaign other than the running one: following would
+        pull the running campaign's state back into the panel at its next
+        iteration, so it is switched off, and said."""
+        running = self._batch_live.get("stem")
+        if self.busy and running and stem and stem != running and self.batchfollow_var.get():
+            self.batchfollow_var.set(False)
+            msg = f"follow off while you review {stem}; tick it to go back to {running}"
+            self.log(msg)
+            if bw is not None:
+                bw.status.configure(text=msg)
+
+    def _optical_outdir(self, stem):
+        """Where the running batch's optical stage writes (its record's outdir)."""
+        # the batch event's run_dir is the run folder itself (run\sim when simulated)
+        base = self._batch_live.get("run_dir") or RUN_DIR
+        out = os.path.join(base, "optical")
+        try:
+            with open(os.path.join(out, f"{stem}_optical.json"), encoding="utf-8") as fh:
+                return json.load(fh).get("outdir") or out
+        except (OSError, ValueError):
+            return out
+
+    @staticmethod
+    def _load_compare(s):
+        p = os.path.join(s["folder"], "analysis", "target_compare", "target_compare.npz")
+        try:
+            return np.load(p)
+        except (OSError, ValueError):
+            return None
+
+    def _plot_opt_passes(self, stem, scans, rec):
+        """The campaign's optical stage at a glance: light - target over the
+        record through the passes (before, after pass 1, after pass 2, ...)
+        and, below, the attribution: light - monitors with X1 alone, X2
+        alone, their sum, and both together. From the comparison folders'
+        target_compare.npz, low-passed at the comparison band."""
+        ax, ax2 = self.ax_optp, self.ax_optp2
+        ax.clear()
+        ax2.clear()
+        for a in list(self.fig_optp.axes):
+            if a not in (ax, ax2):
+                a.remove()                   # an earlier draw's target axis
+        joint = [s for s in scans if s["kind"] in ("before", "verify")]
+        solo = {s["kind"]: s for s in scans if s["kind"] in ("X1", "X2") and s["pass"] == 1}
+        band = float((rec.get("settings") or {}).get("band_hz") or 5000.0)
+        shaded = False
+        for j, s in enumerate(joint):
+            z = self._load_compare(s)
+            if z is None:
+                continue
+            tl = z["t_leg1"]
+            ms, dt = (tl - tl[0]) * 1e3, float(np.median(np.diff(tl)))
+            col = self.PASS_COLOURS[min(j, len(self.PASS_COLOURS) - 1)]
+            v = s.get("verdict") or {}
+            legs = sorted(int(m.group(1)) for m in
+                          (re.match(r"leg(\d+)_d_light$", f) for f in z.files) if m)
+            for k in legs:
+                d = z[f"leg{k}_d_light"]
+                lab = ("before" if s["kind"] == "before" else f"after pass {s['pass']}") + f": {s['scan']}"
+                if v.get("legs"):
+                    L = max(v["legs"], key=lambda x: abs(x.get("top_lt_mdeg", 0.0)))
+                    lab += (f" -- top {L['top_lt_mdeg']:+.0f}, after the fall "
+                            f"{L['after_fall_lt_mdeg']:+.0f}, rms {L['lt_rms_mdeg']:.0f} mdeg")
+                ax.plot(ms, d * 1e3, color=col, lw=0.4, alpha=0.25)
+                ax.plot(ms, corrmod.lowpass(d, dt, band) * 1e3, color=col,
+                        lw=1.1 if k == 1 else 0.8, ls="-" if k == 1 else "--",
+                        label=lab if k == 1 else None)
+            if not shaded and v.get("legs"):
+                for win, c in optical.verdict_windows(v):
+                    ax.axvspan(win[0], win[1], color=c, alpha=0.5, lw=0, zorder=0)
+                shaded = True
+            if j == 0:
+                axt = ax.twinx()
+                axt.plot(ms, z["phi_target"], color=TARGET_COLOUR, lw=0.6, ls=":", alpha=0.6)
+                axt.set_ylabel("target (deg)", color="#666666")
+                axt.tick_params(axis="y", colors="#666666")
+        ax.axhline(0, color="k", lw=0.4)
+        ax.set_ylabel("light - target (mdeg)")
+        ax.set_title(f"{stem}: light against the base target through the optical passes "
+                     f"(low-passed at {band:g} Hz; shaded: ramp top, first ms after the fall)")
+        if len(ax.lines) > 1:
+            ax.legend(fontsize=7, loc="best")
+        else:
+            self._plot_note(ax, "no comparison on disk yet for this campaign")
+        total, ms_total = None, None
+        for key, s in sorted(solo.items()):
+            z = self._load_compare(s)
+            if z is None:
+                continue
+            tl = z["t_leg1"]
+            ms, dt = (tl - tl[0]) * 1e3, float(np.median(np.diff(tl)))
+            d = corrmod.lowpass(z["leg1_d_lm"], dt, band) * 1e3
+            col = CH_DEFAULTS[PAIR_CHANNEL[key]]["colour"]
+            v = s.get("verdict") or {}
+            L = max(v["legs"], key=lambda x: abs(x.get("top_lm_mdeg", 0.0))) if v.get("legs") else {}
+            ax2.plot(ms, d, color=col, lw=1.0, label=f"{key} alone: {s['scan']}"
+                     + (f" -- top {L['top_lm_mdeg']:+.0f} mdeg" if L else ""))
+            if total is None:
+                total, ms_total = d, ms
+            elif len(total) == len(d):
+                total = total + d
+        if total is not None and len(solo) == 2:
+            ax2.plot(ms_total, total, color="k", lw=0.7, ls=":", label="X1 alone + X2 alone")
+        for s in joint[:1]:
+            z = self._load_compare(s)
+            if z is None:
+                continue
+            tl = z["t_leg1"]
+            ms, dt = (tl - tl[0]) * 1e3, float(np.median(np.diff(tl)))
+            ax2.plot(ms, corrmod.lowpass(z["leg1_d_lm"], dt, band) * 1e3, color="#7f7f7f",
+                     lw=1.0, label=f"both (before): {s['scan']}")
+        ax2.axhline(0, color="k", lw=0.4)
+        ax2.set_ylabel("light - monitors (mdeg)")
+        ax2.set_xlabel("time from the leg start (ms)")
+        ax2.set_title("Attribution: what each crystal's light misses its own monitor by, "
+                      "alone and both together (the same before and after a correction)")
+        if len(ax2.lines) > 1:
+            ax2.legend(fontsize=7, loc="best")
+        for a in (ax, ax2):
+            a.grid(True, alpha=0.3)
+        self._draw(self.fig_optp)
+
+    def _review_scan(self, s, before=None):
+        """A scan from the Batch window's optical table on the Optical tab:
+        its rotation and correction views and, for a verification, the
+        before / after view against the joint scan it was measured after."""
+        summary = optical.scan_summary(s["folder"])
+        if summary is None:
+            self.log(f"optical review: {s['scan']} has no comparison on disk")
+            self.status.configure(text=f"optical review: {s['scan']} has no comparison on disk")
+            return
+        self._plot_optical(summary)
+        if (before is not None and s["kind"] == "verify" and s.get("verdict")
+                and before.get("verdict")):
+            rows, _halved = self._opt_table(before["verdict"], s["verdict"])
+            self._plot_optical_verdict(rows, (before["scan"], s["scan"]))
+            self._show_fig(self.fig_optva)
+        else:
+            self._show_fig(self.fig_opt)
+        self.status.configure(text=f"optical review: {s['label']} {s['scan']}")
+
+    # -- the live view of a running optical scan ---------------------------
+    LIVE_POLL_MS = 4000
+
+    def _scan_live_start(self, folder, name, stem):
+        """Poll a scan folder every few seconds and draw what it holds: the
+        read runs in a thread (a fresh 21-step scan takes ~10 s to load, a
+        new step well under a second with the cache), the drawing on the
+        main thread."""
+        self._scan_live = dict(folder=folder, name=name, stem=stem, cache={}, busy=False,
+                               stop=False, ticks=0, failed=0)
+        self.root.after(800, self._scan_live_tick)
+
+    def _scan_live_stop(self):
+        """The scan step is over: one last read, then no more polling."""
+        L = self._scan_live
+        if L is not None and not L["stop"]:
+            L["stop"] = True
+            self._scan_live_tick(final=True)
+
+    def _scan_live_tick(self, final=False):
+        L = self._scan_live
+        if L is None or (L["stop"] and not final):
+            return
+        if L["busy"]:
+            self.root.after(self.LIVE_POLL_MS, self._scan_live_tick, final)
+            return
+        L["busy"] = True
+
+        def work():
+            try:
+                live = optical.live_scan(L["folder"], cache=L["cache"], cfg=self.cfg)
+                self.msgs.put(("call", lambda: self._scan_live_draw(L, live)))
+            except Exception as e:              # a manifest mid-write, no capture yet
+                L["failed"] += 1
+                if L["failed"] in (1, 5, 20):
+                    self.msgs.put(("log", f"live scan view: {type(e).__name__}: {e}"))
+            finally:
+                L["busy"] = False
+                if not L["stop"]:
+                    self.msgs.put(("call", lambda: self.root.after(self.LIVE_POLL_MS,
+                                                                     self._scan_live_tick)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _scan_live_draw(self, L, live):
+        if self._scan_live is not L:
+            return
+        L["ticks"] += 1
+        self._plot_scan_live(live)
+        if L["ticks"] == 1 and self.batchfollow_var.get():
+            self._show_fig(self.fig_optl)
+
+    def _plot_scan_live(self, live):
+        """The polarization as it is being measured: the PD intensity per
+        analyzer angle measured so far (top; the last one bold) and the
+        light's rotation fitted from those angles against the monitors'
+        (bottom). Redrawn every few seconds while a scan runs."""
+        import matplotlib.cm as cm
+        ax, ax2 = self.ax_optl, self.ax_optl2
+        ax.clear()
+        ax2.clear()
+        name, done, total = live["name"], live["steps_done"], live["steps_total"]
+        last = live.get("last") or {}
+        state = "running" if live["running"] else "complete"
+        ax.set_title(f"scan {name}: {done} of {total} steps ({state})"
+                     + (f", last {last.get('kind', '')} at {last.get('target', float('nan')):.1f} deg"
+                        if last else ""))
+        t, I, th = live.get("t_ms"), live.get("I"), live.get("theta")
+        if t is not None and I is not None and len(th):
+            for j in np.argsort(th):
+                col = cm.twilight(float(th[j] % 360.0) / 360.0)
+                bold = bool(last) and abs(float(th[j]) - float(last.get("target", -1e9))) < 1.0
+                ax.plot(t, I[j], color=col, lw=1.4 if bold else 0.6,
+                        label=f"{th[j]:.1f} deg" + (" (last)" if bold else ""), **self._dot_kw(len(t)))
+            ax.legend(fontsize=6, loc="upper right", ncols=3 if len(th) > 6 else 1)
+        else:
+            self._plot_note(ax, live.get("note") or "no capture read yet")
+        ax.set_ylabel("PD (V, dark-subtracted)")
+        ax.grid(True, alpha=0.3)
+        rot = live.get("rotation_deg")
+        if rot is not None and t is not None:
+            ax2.plot(t, rot, color="#1f77b4", lw=0.8,
+                     label=f"light, fitted from {len(th)} angles (rest at {live['rest_deg']:+.2f} deg "
+                           f"in the analyzer frame)")
+            if live.get("mon_deg") is not None and len(live["mon_deg"]) == len(t):
+                ax2.plot(t, live["mon_deg"], color="#7f7f7f", lw=0.8, ls="--",
+                         label="monitors, X1 + X2 (the last step)")
+            ax2.legend(fontsize=7, loc="best")
+            self._plot_note(ax2, live.get("note", ""))
+        else:
+            self._plot_note(ax2, live.get("note") or "the rotation needs 3 angles")
+        ax2.set_ylabel("rotation (deg)")
+        ax2.set_xlabel("time from the trigger (ms)")
+        ax2.grid(True, alpha=0.3)
+        self._draw(self.fig_optl)
+
     # ---------------------------------------------------------------- batch
     def do_batch(self):
         if self._batch_win is None:
@@ -8141,6 +8493,28 @@ class App:
             self._bprog = progmod.BatchProgress()
         now = time.time()
         self._bprog.event(kind, info, now)
+        if kind == "batch":
+            self._batch_live = dict(run_dir=info.get("run_dir", ""),
+                                    simulated=bool(info.get("simulated")), stem=None)
+            self._scan_live = None
+        elif kind == "campaign":
+            self._batch_live["stem"] = info["stem"]
+        elif kind == "optical":
+            # the live scan view while a scan runs; the Batch window's optical
+            # table and the passes overview after every step
+            stem = info.get("stem") or self._batch_live.get("stem")
+            if info.get("step") == "scan" and info.get("scan"):
+                self._scan_live_start(os.path.join(self._optical_outdir(stem), info["scan"]),
+                                      info["scan"], stem)
+            else:
+                self._scan_live_stop()
+            if self._batch_win is not None and stem:
+                self._batch_win.refresh_live(stem, raise_fig=bool(self.batchfollow_var.get())
+                                             and info.get("step") != "scan")
+        elif kind in ("campaign_end", "batch_end"):
+            self._scan_live_stop()
+            if self._batch_win is not None and info.get("stem"):
+                self._batch_win.refresh_live(info["stem"], raise_fig=False)
         if kind in ("batch", "campaign", "iteration", "optical", "campaign_end", "batch_end"):
             self.progress.configure(maximum=max(self._bprog.n, 1), value=self._bprog.fraction())
             short = self._bprog.text(now, short=True)

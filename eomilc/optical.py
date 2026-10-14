@@ -309,12 +309,13 @@ def open_devices(scope, cfg, log=print, simulate=False, pcfg=None):
         from rampol import sim
         sg = _scope_grab(None, pc)
         bench = sim.Bench(**SIM_BENCH)
-        # the simulated zero set from rest, as the bench's is: analyzer 0 is
-        # the bench's rest polarization (its mount_of_rest_pol), not the
-        # config's bench number, so the hold-null angles and the zero check
-        # mean the same thing in simulation
-        sc, ell, bench = sim.make(sg, roles=roles, bench=bench,
-                                  zero_offset_deg=float(bench.mount_of_rest_pol))
+        # the simulated zero as the bench's: analyzer 0 CROSSED to the rest
+        # polarization (the polarimeter's convention, seq_crossed_deg), i.e.
+        # the rest's transmission maximum (mount_of_rest_pol) at crossed + 90,
+        # not the config's bench number -- so the hold-null angles and the
+        # zero check mean the same thing in simulation
+        zero_sim = (float(bench.mount_of_rest_pol) - crossed_rest_deg(pc) - 90.0) % 360.0
+        sc, ell, bench = sim.make(sg, roles=roles, bench=bench, zero_offset_deg=zero_sim)
         sc.noise_per_div = SIM_NOISE_PER_DIV
         # the AWG outputs on and at zero: nothing plays until sim_play
         n = 16
@@ -661,10 +662,14 @@ def _extremes(summary, folder, sg, played, band_hz, pd_delay_us, lock_tol=0.006)
     pol = an.polarization(d)
     # where the rest polarization sits in the analyzer frame: the Malus fit
     # over the pre-trigger stretch of every capture, so each scan localises
-    # the analyzer's zero for free. 0 means the polarimeter's zero (its
-    # "Set zero from rest") still holds; the hold-null angles assume it does.
+    # the analyzer's zero for free. The polarimeter's convention (its config's
+    # seq_crossed_deg, 0 = the Find zero): analyzer 0 is CROSSED to the rest
+    # polarization, so the rest's transmission maximum is expected at
+    # crossed + 90 (the bench on 14 Oct 2026 read +89.96); the hold-null
+    # angles assume it. zero_off_deg is how far it is from there, mod 180.
     psi_rest = float(pol["psi_rest"])
     zero = float((d.manifest.get("rotator") or {}).get("zero_deg", float("nan")))
+    expected, off = rest_expected(psi_rest)
     v90 = {1: summary["V90_mon"][0], 2: summary["V90_mon"][1]}
     sign = float(summary["rotation_sign_vs_target"])
     t, rot, pm, lm, _mon = it.light_minus_monitors(d, pol, sign, v90, pd_delay_us)
@@ -700,7 +705,27 @@ def _extremes(summary, folder, sg, played, band_hz, pd_delay_us, lock_tol=0.006)
         out.append(rec)
     return {"band_hz": float(band_hz), "pd_delay_us": float(pd_delay_us),
             "source": "eomilc.optical: whole record, low-passed at the band", "legs": out,
-            "psi_rest_deg": psi_rest, "analyzer_zero_deg": zero}
+            "psi_rest_deg": psi_rest, "analyzer_zero_deg": zero,
+            "rest_expected_deg": expected, "zero_off_deg": off}
+
+
+def crossed_rest_deg(pcfg=None) -> float:
+    """The analyzer angle crossed to the rest polarization, from the
+    polarimeter's config (awg.seq_crossed_deg; 0 = its Find zero)."""
+    try:
+        pc = _pcfg(pcfg)
+        return float((pc.get("awg") or {}).get("seq_crossed_deg", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def rest_expected(psi_rest, pcfg=None):
+    """(expected rest azimuth, how far psi_rest is from it in (-90, 90]):
+    the rest polarization's transmission maximum is expected 90 deg from the
+    crossed angle."""
+    expected = (crossed_rest_deg(pcfg) + 90.0) % 180.0
+    off = (float(psi_rest) - expected + 90.0) % 180.0 - 90.0
+    return float(expected), float(off)
 
 
 def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0.5,
@@ -774,8 +799,8 @@ def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0
     summary["states_compared"] = [os.path.abspath(x1), os.path.abspath(x2)]
     if extremes:
         summary["extremes"] = _extremes(summary, folder, sg, by_c, band_hz, pd_delay_us)
-        summary["psi_rest_deg"] = summary["extremes"]["psi_rest_deg"]
-        summary["analyzer_zero_deg"] = summary["extremes"]["analyzer_zero_deg"]
+        for k in ("psi_rest_deg", "analyzer_zero_deg", "rest_expected_deg", "zero_off_deg"):
+            summary[k] = summary["extremes"][k]
     return summary
 
 
@@ -1029,12 +1054,17 @@ def verdict(summary) -> dict:
         crystals[ch] = {"peak_V": pk, "peak_mdeg": pk * 90.0 / (v90[min(i, 1)] * 1000.0) * 1e3,
                         "rms_V_active": float(pc.get("rms_V_active", float("nan")))}
     psi = float(summary.get("psi_rest_deg", float("nan")))
+    if "zero_off_deg" in summary:
+        expected, off = float(summary["rest_expected_deg"]), float(summary["zero_off_deg"])
+    else:                                     # a summary from before 14 Oct 2026
+        expected, off = rest_expected(psi) if np.isfinite(psi) else (float("nan"), float("nan"))
     return {"scan": summary.get("scan"), "legs": legs,
             "correction": {"peak_mdeg": float(corr["peak_mdeg"]),
                            "rms_mdeg_active": float(corr.get("rms_mdeg_active", float("nan"))),
                            "crystals": crystals},
             "psi_rest_deg": psi, "analyzer_zero_deg": float(summary.get("analyzer_zero_deg", float("nan"))),
-            "zero_ok": bool(np.isfinite(psi) and abs(psi) <= ZERO_TOL_DEG),
+            "rest_expected_deg": expected, "zero_off_deg": off,
+            "zero_ok": bool(np.isfinite(off) and abs(off) <= ZERO_TOL_DEG),
             "source": ext.get("source", "")}
 
 
@@ -1062,10 +1092,176 @@ def verdict_lines(v) -> list:
     psi = v.get("psi_rest_deg", float("nan"))
     if np.isfinite(psi):
         z = v.get("analyzer_zero_deg", float("nan"))
-        out.append(f"analyzer zero: the rest polarization sits at {psi:+.2f} deg in the analyzer frame"
+        exp_, off = v.get("rest_expected_deg", float("nan")), v.get("zero_off_deg", float("nan"))
+        out.append(f"analyzer zero: the rest polarization sits at {psi:+.2f} deg in the analyzer frame, "
+                   f"expected {exp_:+.2f} (crossed angle + 90)"
                    + (f" (zero = mount {z:.3f} deg)" if np.isfinite(z) else "")
-                   + (f" -- OK within {ZERO_TOL_DEG:g} deg" if v.get("zero_ok") else
-                      f" -- OFF by more than {ZERO_TOL_DEG:g} deg: the hold-null angles miss the null; "
-                      f"set the zero from this scan's rest in the polarimeter (Set zero from rest) and "
-                      f"Copy from polarimeter"))
+                   + (f" -- OK, {off:+.2f} deg off, within {ZERO_TOL_DEG:g}" if v.get("zero_ok") else
+                      f" -- OFF by {off:+.2f} deg (more than {ZERO_TOL_DEG:g}): the hold-null angles miss "
+                      f"the null; the analyzer zero or the polarimeter's seq_crossed_deg has moved -- "
+                      f"fix it there and Copy from polarimeter"))
     return out
+
+
+# ---------------------------------------------------------- review helpers
+# What the panel's Batch window shows of a campaign's optical stage, from
+# the files the stage leaves on disk (<outdir>/<stem>_optical.json and the
+# scan folders' analysis/target_compare), with no instrument open -- during
+# the run, after it, and after a restart (14 Oct 2026).
+
+SCAN_KINDS = {"before": "before (both)", "X1": "X1 alone", "X2": "X2 alone", "verify": "verify (both)"}
+
+
+def record_scans(rec) -> list:
+    """The scans of a campaign's optical record, in the order they ran:
+    dicts (pass, gain, kind, label, scan, folder, verdict, status). A pass's
+    "before" that is the previous pass's verification (pass >= 2) is not
+    repeated. `rec` is the dict in <stem>_optical.json."""
+    out, seen = [], set()
+    for p in rec.get("passes") or []:
+        n, g = int(p.get("pass", 0)), p.get("gain")
+
+        def add(kind, folder, verdict):
+            if not folder or folder in seen:
+                return
+            seen.add(folder)
+            if verdict and "zero_off_deg" not in verdict and np.isfinite(
+                    verdict.get("psi_rest_deg", float("nan"))):
+                # a record from before the crossed-zero convention (14 Oct 2026)
+                verdict = dict(verdict)
+                exp_, off = rest_expected(verdict["psi_rest_deg"])
+                verdict.update(rest_expected_deg=exp_, zero_off_deg=off,
+                               zero_ok=abs(off) <= ZERO_TOL_DEG)
+            out.append(dict(**{"pass": n}, gain=g, kind=kind, label=SCAN_KINDS[kind],
+                            scan=os.path.basename(folder), folder=folder, verdict=verdict,
+                            status=p.get("status", "")))
+        # "before_scan" with separate attribution, "scan" with joint
+        add("before", p.get("before_scan") or p.get("scan"), p.get("verdict_before"))
+        for key in ("X1", "X2"):
+            add(key, (p.get("solo_scans") or {}).get(key), (p.get("verdicts_solo") or {}).get(key))
+        add("verify", p.get("verify_scan"), p.get("verdict_after"))
+    return out
+
+
+def verdict_windows(v):
+    """The windows a verdict reads, for shading: [(ms_lo, ms_hi), colour]
+    per transport (the ramp top with its pad, the first ms after the fall),
+    from the leg when the verdict has no transports."""
+    out = []
+    for L in v.get("legs") or []:
+        tr = L.get("transports") or []
+        if tr:
+            for t in tr:
+                a, b, c, d = (float(x) for x in t["landmarks_ms"])
+                out.append(((b - TOP_PAD * 1e3, c + TOP_PAD * 1e3), "#ffe9a8"))
+                out.append(((d, d + AFTER_FALL * 1e3), "#cfe8ff"))
+        else:
+            for win, col in ((L.get("top_window_ms"), "#ffe9a8"),
+                             (L.get("after_fall_window_ms"), "#cfe8ff")):
+                if win:
+                    out.append(((float(win[0]), float(win[1])), col))
+    return out
+
+
+def scan_before(scans, i):
+    """The joint scan a verification is measured against: the latest earlier
+    joint scan (a before or a verification) in `scans`, else None."""
+    for s in reversed(scans[:i]):
+        if s["kind"] in ("before", "verify") and s.get("verdict"):
+            return s
+    return None
+
+
+def scan_summary(folder):
+    """The comparison summary of a scan folder as the panel's rotation and
+    correction views take it (analysis/target_compare/summary.json with
+    "out", "scan" and "files" {EO1/EO2: the correction csv}); None when the
+    scan has no comparison yet."""
+    out = os.path.join(folder, "analysis", "target_compare")
+    path = os.path.join(out, "summary.json")
+    if not os.path.exists(path):
+        return None
+    import json
+    with open(path, encoding="utf-8") as fh:
+        s = json.load(fh)
+    s["out"] = out
+    s.setdefault("scan", os.path.basename(folder))
+    files = {}
+    for f in (s.get("correction") or {}).get("files") or []:
+        b = os.path.basename(f)
+        if b.startswith("corr_") and b.endswith(".csv"):
+            files["EO1" if "X1_" in b else "EO2" if "X2_" in b else b] = f
+    s["files"] = files
+    return s
+
+
+def live_scan(folder, cache=None, load_capture=None, cfg=None):
+    """A scan as far as it got, for the panel's live view: the PD intensity
+    per analyzer angle and the light's rotation fitted from the angles
+    measured so far. Reads only the new steps when `cache` (a dict the
+    caller keeps) is passed. Returns a dict:
+      name, steps_total, steps_done, running (any step not done),
+      last (the last done step: target deg, kind), t_ms,
+      theta (deg, the angles with data), I (K x N volts, dark-subtracted),
+      rotation_deg (N; None with fewer than 3 angles), rest_deg, sign,
+      mon_deg (the monitors of the last step in degrees, None without them),
+      note.
+    Raises OSError when the folder has no manifest yet. `cfg` is the ILC
+    config (its polarimeter_path), as open_devices takes it."""
+    import json
+    _rampol(cfg)
+    from rampol import analysis as an
+    if load_capture is None:
+        load_capture = _scope_grab(None, _pcfg(None)).load_capture
+    d = an.load_scan(folder, load_capture, cache=cache)
+    steps = d.manifest.get("steps") or []
+    done = [s for s in steps if s.get("status") == "done"]
+    out = dict(name=d.name, steps_total=len(steps), steps_done=len(done),
+               running=any(s.get("status") not in ("done",) for s in steps),
+               last=None, t_ms=None, theta=np.zeros(0), I=None, rotation_deg=None,
+               rest_deg=float("nan"), sign=1.0, mon_deg=None, note="")
+    if done:
+        out["last"] = dict(target=float(done[-1].get("target", float("nan"))), kind=done[-1].get("kind"))
+    if d.t is None:
+        out["note"] = "no capture read yet"
+        return out
+    t = np.asarray(d.t, float)
+    out["t_ms"] = t * 1e3
+    th, I, sem, used = an.scan_matrix(d, "scan")
+    out["theta"], out["I"] = th, I
+    # the monitors' rotation from the last step with them, in the target's degrees
+    for s in reversed(d.steps):
+        v = s.get("v") or {}
+        if "MonX1" in v and "MonX2" in v:
+            v90 = _v90_mon()
+            out["mon_deg"] = 90.0 * (np.asarray(v["MonX1"], float) / v90[0]
+                                     + np.asarray(v["MonX2"], float) / v90[1])
+            break
+    if len(th) < 3:
+        out["note"] = f"{len(th)} angle(s) so far -- the rotation needs 3"
+        return out
+    fit = an.harmonic_fit(th, I, sem)
+    psi = an.unwrap_psi(fit["psi"])
+    rest_m = t < 0
+    rest = float(np.median(psi[rest_m])) if rest_m.any() else float(np.median(psi[: max(1, len(psi) // 50)]))
+    rot = psi - rest
+    rest = rest % 180.0                 # the azimuth is defined mod 180: report it as the bench does (+90)
+    # the light's sense against the monitors' (the target's): measured per
+    # scan, so the view needs no configured sign
+    sign = 1.0
+    if out["mon_deg"] is not None and len(out["mon_deg"]) == len(rot):
+        m = out["mon_deg"] - np.median(out["mon_deg"][rest_m]) if rest_m.any() else out["mon_deg"]
+        c = float(np.dot(rot, m))
+        sign = -1.0 if c < 0 else 1.0
+    out.update(rotation_deg=sign * rot, rest_deg=rest, sign=sign,
+               note=f"{len(th)} angles fitted" + ("" if sign > 0 else ", sign flipped to the monitors' sense"))
+    return out
+
+
+def _v90_mon():
+    """Monitor volts for 90 deg per crystal (the polarimeter's calibration)."""
+    try:
+        from rampol import ilc_target as it
+        return [float(it.V90["EO1"]), float(it.V90["EO2"])]
+    except Exception:
+        return [5.1283, 5.1374]

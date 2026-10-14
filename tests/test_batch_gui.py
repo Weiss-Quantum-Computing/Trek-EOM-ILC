@@ -169,6 +169,50 @@ def main():
         app._save_config()
         cfg = json.load(open(ilc_gui.CONFIG_PATH))
         check(cfg.get("batch_plan") == plan_path and cfg.get("batch_follow_ch") == "X1", "remembered in the config")
+        print("[8] an optical campaign: the window's optical table, the passes view, the live view")
+        bw = app._batch_win
+        raw = json.load(open(plan_path))
+        raw["campaigns"] = [c for c in raw["campaigns"] if c["stem"] == "S25"]
+        raw["campaigns"][0]["optical"] = {"gains": [1.0], "iterations": 1, "attribution": "joint",
+                                          "figs": False, "cap_v": 150,
+                                          "scan": {"angles": "0:179:45", "shots": 2, "hold_null": False}}
+        raw["name"] = "gui_opt"
+        plan2 = os.path.join(tmp, "batch_gui_opt.json")
+        json.dump(raw, open(plan2, "w"))
+        app.batchplan_var.set(plan2)
+        bw.load()
+        app.batchfollow_var.set(True)
+        app.batchredo_var.set(False)
+        ticks = []
+        orig_draw = app._scan_live_draw
+
+        def count_draw(L, live):
+            orig_draw(L, live)
+            ticks.append(live["steps_done"])
+        app._scan_live_draw = count_draw
+        app.do_batch_run("sim")
+        check(pump(root, app, 900), "simulated optical campaign finished")
+        for _ in range(20):                       # the last live read lands through the queue
+            root.update()
+            time.sleep(0.1)
+        app._scan_live_draw = orig_draw
+        rows = [bw.otree.item(i, "values") for i in bw.otree.get_children()]
+        check(len(rows) == 2 and rows[0][1].startswith("before (both)") and rows[1][1].startswith("verify (both)")
+              and rows[1][2] != "" and "(OK)" in rows[1][7],
+              f"optical table: {[r[1] for r in rows]}, zero {rows[1][7] if len(rows) > 1 else ''}")
+        check(len(app.ax_optp.lines) >= 3 and len(ticks) >= 1,
+              f"passes view drawn ({len(app.ax_optp.lines)} lines), live view drawn {len(ticks)} time(s)")
+        bw.otree.selection_set("1")
+        root.update()
+        check(app.status.cget("text").startswith("optical review: verify") and bool(app.ax_optva.lines),
+              "a verification row draws the before / after view")
+        app.busy = True
+        app._batch_live["stem"] = "SW50"
+        app.batchfollow_var.set(True)
+        app._release_follow("S25", bw)
+        check(not app.batchfollow_var.get() and "follow off" in bw.status.cget("text"),
+              "reviewing another campaign than the running one switches follow off")
+        app.busy = False
     finally:
         root.destroy()
         shutil.rmtree(tmp, ignore_errors=True)

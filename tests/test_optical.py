@@ -191,9 +191,43 @@ def main():
         for line in optical.verdict_lines(v):
             print("       " + line)
         check(math.isfinite(v["psi_rest_deg"]) and math.isfinite(s["psi_rest_deg"]) and v["zero_ok"]
-              and any(l.startswith("analyzer zero: the rest polarization sits at") and "OK within" in l
+              and any(l.startswith("analyzer zero: the rest polarization sits at") and "-- OK" in l
                       for l in optical.verdict_lines(v)),
               f"the comparison localises the analyzer zero: rest at {v['psi_rest_deg']:+.2f} deg, OK")
+
+        print("[3b] the review helpers (the Batch window's optical table, the live view)")
+        rec = {"passes": [{"pass": 1, "gain": 1.0, "status": "done", "before_scan": folder,
+                           "verdict_before": v, "solo_scans": {"X1": folder + "_X1"},
+                           "verdicts_solo": {"X1": v}, "verify_scan": folder + "_v",
+                           "verdict_after": v},
+                          {"pass": 2, "gain": 1.0, "status": "running",
+                           "before_scan": folder + "_v", "verdict_before": v}]}
+        sc = optical.record_scans(rec)
+        check([x["kind"] for x in sc] == ["before", "X1", "verify"] and sc[2]["pass"] == 1
+              and optical.scan_before(sc, 2) is sc[0] and sc[0]["label"] == "before (both)"
+              and sc[1]["scan"] == f"{STEM}_opt0_X1",
+              "record_scans lists each scan once, in order; a verification's before is the joint scan before it")
+        old = {k: x for k, x in v.items() if k not in ("rest_expected_deg", "zero_off_deg")}
+        old["zero_ok"] = False
+        sc2 = optical.record_scans({"passes": [{"pass": 1, "before_scan": folder, "verdict_before": old}]})
+        check(sc2[0]["verdict"]["zero_ok"] and abs(sc2[0]["verdict"]["zero_off_deg"]) <= optical.ZERO_TOL_DEG,
+              "a record from before the crossed-zero convention gets its zero judged again")
+        ss = optical.scan_summary(folder)
+        check(ss is not None and ss["out"].endswith("target_compare") and set(ss["files"]) == {"EO1", "EO2"}
+              and ss["scan"] == f"{STEM}_opt0", "scan_summary reads the comparison back with out and files")
+        check(optical.scan_summary(os.path.join(scans, "nothing")) is None, "no comparison: None")
+        wins = optical.verdict_windows(v)
+        check(len(wins) >= 2 and all(w[0] < w[1] for w, _c in wins), f"verdict_windows: {len(wins)} windows")
+        cache = {}
+        live = optical.live_scan(folder, cache=cache)
+        check(live["steps_done"] == live["steps_total"] and not live["running"] and len(live["theta"]) == 8
+              and live["rotation_deg"] is not None and live["mon_deg"] is not None,
+              f"live_scan: {live['steps_done']} steps, {len(live['theta'])} angles, rest {live['rest_deg']:+.2f} deg")
+        rot, mon = live["rotation_deg"], live["mon_deg"]
+        check(abs(float(rot.max()) - float(mon.max())) < 2.0 and float(np.max(np.abs(rot - mon))) < 5.0,
+              f"the fitted light follows the monitors: tops {rot.max():.1f} / {mon.max():.1f} deg")
+        live2 = optical.live_scan(folder, cache=cache)
+        check(live2["steps_done"] == live["steps_done"] and len(cache) > 0, "the cache serves a reload")
 
         print("[4] apply")
         applied = {}
