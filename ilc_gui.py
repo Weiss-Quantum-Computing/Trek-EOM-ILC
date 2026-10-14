@@ -6457,16 +6457,26 @@ class App:
     # Every step is a worker that opens the scope and the AWG for itself
     # (_connect_pair) and closes them again WITHOUT touching the outputs:
     # only step 7 switches them OFF (and a step that dies on the way).
+    #
+    # Solo play (13 Oct 2026, the design's addendum): step 1 can play ONE
+    # crystal's keeper with the other channel parked flat at its idle
+    # (optical.park_drive, uploaded as PARK1 / PARK2; the output stays ON).
+    # A scan of that is compared with solo= so the whole light - monitors
+    # goes to the crystal that drove; the correction files ACCUMULATE in
+    # self._opt["files"] (X1 alone, X2 alone, then Apply both), and the
+    # verification is always a joint scan (both playing: the light the
+    # atoms get).
 
     OPT_HINTS = {
-        1: "uploads both sessions' current drives, outputs ON (one question); "
-           "they stay ON until 7",
+        1: "uploads the sessions' current drives (both, or one with the other "
+           "parked flat at its idle), outputs ON (one question); they stay ON "
+           "until 7",
         2: "the analyzer steps through the angles while the keepers play; "
            "the scan lands in run\\optical",
         3: "light - monitors and light - target per leg, and a correction "
-           "file per crystal",
-        4: "moves both TARGETS by the gated correction (base targets kept); "
-           "a refusal changes nothing",
+           "file per crystal (a solo scan: the driving crystal's only)",
+        4: "moves the TARGETS by the gated corrections held, one file per "
+           "crystal (base targets kept); a refusal changes nothing",
         5: "the pair loop learns the moved targets; the outputs stay ON",
         6: "a second scan and comparison; before / after in the log and on "
            "the Optical plot tab",
@@ -6485,7 +6495,8 @@ class App:
         numbers are in Settings... (WORKFLOW_GUI.md 10, 11)."""
         oc = self.cfg.get("optical") or {}
         self._opt_vars = {}
-        self._pair_playing = {}      # {X1/X2: {wname, u}}: what the AWG was last given
+        # {X1/X2: {wname, u[, parked]}}: what the AWG was last given
+        self._pair_playing = {}
         self._opt = {"outputs": ("not reported this session", "", "")}
         self._opt_reset(None)
         self._opt_auto = None        # the name the Scan box was last filled with
@@ -6500,6 +6511,7 @@ class App:
             self._opt_vars[key] = v
             return v
         self.optname_var = tk.StringVar(value="")
+        self.optplay_var = tk.StringVar(value="both")      # "both" / "X1" / "X2"
         self.optangles_var = sv("angles", "0:359:22.5")
         self.optshots_var = sv("shots", "8")
         self.optband_var = sv("band_hz", "5000")
@@ -6549,7 +6561,11 @@ class App:
             self._actions.append(b)
             self._opt_btns[i] = b
 
-        button(1, "Play keepers (both, outputs ON)", self.do_opt_play)
+        button(1, "Play (outputs ON)", self.do_opt_play)
+        ttk.Label(rows[1], text="play:").pack(side="left", padx=(6, 2))
+        for val, lab in (("both", "both"), ("X1", "X1 alone"), ("X2", "X2 alone")):
+            ttk.Radiobutton(rows[1], text=lab, value=val,
+                            variable=self.optplay_var).pack(side="left", padx=(0, 3))
         field(rows[2], "name", self.optname_var, 12)
         field(rows[2], "angles", self.optangles_var, 10)
         field(rows[2], "shots", self.optshots_var, 3)
@@ -6563,7 +6579,7 @@ class App:
         field(rows[3], "split X1", self.optsplit_var, 4)
         button(3, "Compare", self.do_opt_compare)
         field(rows[4], "gain", self.optgain_var, 4)
-        button(4, "Apply to both targets", self.do_opt_apply)
+        button(4, "Apply to the targets", self.do_opt_apply)
         field(rows[5], "iterations", self.optiters_var, 3)
         button(5, "Learn (pair loop, outputs stay ON)", self.do_opt_learn)
         button(6, "Verify (scan + compare)", self.do_opt_verify)
@@ -6613,11 +6629,18 @@ class App:
     # -- state, prerequisites ----------------------------------------------
     def _opt_reset(self, key):
         """Forget the step results: a different pair (Load, Init) starts the
-        close over. What the outputs were last seen doing is kept."""
+        close over. What the outputs were last seen doing is kept.
+
+        files / files_from / files_meta: the correction files held for Apply,
+        {EO1/EO2: path}, {EOn: the scan it came from}, {EOn: {band, peak_V}}.
+        They ACCUMULATE over compares (a solo compare sets its crystal's and
+        keeps the other's); scan_solo: what played during the last scan
+        ("X1" / "X2" alone, None both); playing: mirrors _opt_playing()."""
         self._opt = dict(pair_key=key, outputs=self._opt["outputs"], scan=None,
-                         scan_name=None, compare=None, verdict=None, before=None,
-                         applied=None, learned=None, verify=None, table=None,
-                         verdict_line=None, done={})
+                         scan_name=None, scan_solo=None, compare=None, verdict=None,
+                         before=None, applied=None, learned=None, verify=None, table=None,
+                         verdict_line=None, done={}, files={}, files_from={},
+                         files_meta={}, playing=self._opt_playing())
 
     def _opt_mark_outputs(self, state, why):
         """Any thread: what the outputs were last seen or set to."""
@@ -6657,11 +6680,34 @@ class App:
         return name
 
     def _opt_default_name(self):
+        """<base>_optN, or <base>_optN_X1 / _X2 while one crystal plays
+        alone: N the first number without a complete scan of that name."""
         out = os.path.join(RUN_DIR, "optical")
+        pl = self._opt_playing()
+        suffix = f"_{pl}" if pl in PAIR_KEYS else ""
         base, n = self._opt_base(), 1
-        while self._opt_scan_complete(os.path.join(out, f"{base}_opt{n}")):
+        while self._opt_scan_complete(os.path.join(out, f"{base}_opt{n}{suffix}")):
             n += 1
-        return f"{base}_opt{n}"
+        return f"{base}_opt{n}{suffix}"
+
+    def _opt_playing(self):
+        """What the AWG was last given, as a play mode: "both", "X1" / "X2"
+        (that crystal's keeper, the other parked), or None (nothing of a
+        pair). Read from _pair_playing, which every pair upload writes (the
+        Run tab's loop and Hold included, so a Learn makes it "both")."""
+        pp = getattr(self, "_pair_playing", None) or {}
+        if not all(k in pp for k in PAIR_KEYS):
+            return None
+        parked = [k for k in PAIR_KEYS if pp[k].get("parked")]
+        if not parked:
+            return "both"
+        driving = [k for k in PAIR_KEYS if k not in parked]
+        return driving[0] if len(driving) == 1 else None
+
+    @staticmethod
+    def _opt_play_text(pl):
+        return {"both": "playing both", "X1": "X1 alone, X2 parked",
+                "X2": "X2 alone, X1 parked"}.get(pl, "nothing of a pair")
 
     def _opt_prereq(self, i):
         """(ok, why not) for step i, from what the panel holds."""
@@ -6681,6 +6727,8 @@ class App:
             c = o["compare"]
             if not c or c.get("folder") != o["scan"]:
                 return False, "needs step 3: the last scan is not compared yet"
+            if not o["files"]:
+                return False, "needs step 3: no correction file held"
             return True, ""
         on = o["outputs"][0] == "ON"
         if i == 5:
@@ -6689,14 +6737,21 @@ class App:
             if not on:
                 return False, f"needs step 1: outputs {o['outputs'][0]} -- Play keepers"
             return True, ""
-        if i == 6 and not o["learned"]:
-            return False, "needs step 5: the loop has not learned the corrected targets"
-        # 2 and 6: the light must come from the drives the sessions hold
+        if i == 6:
+            pl = self._opt_playing()
+            if pl in PAIR_KEYS:
+                return False, ("Verify needs both playing: step 1 with 'both', or Learn "
+                               f"(now {self._opt_play_text(pl)})")
+            if not o["learned"]:
+                return False, "needs step 5: the loop has not learned the corrected targets"
+        # 2 and 6: the light must come from the drives the sessions hold --
+        # each chain's current drive, or its park drive when it is parked
         if not on:
             return False, f"needs step 1: outputs {o['outputs'][0]} -- Play keepers"
         for k in PAIR_KEYS:
             pl = self._pair_playing.get(k)
-            if pl is None or len(pl["u"]) != len(p[k].u) or not np.array_equal(pl["u"], p[k].u):
+            want = optical.park_drive(p[k].u) if pl and pl.get("parked") else p[k].u
+            if pl is None or len(pl["u"]) != len(want) or not np.array_equal(pl["u"], want):
                 return False, (f"needs step 1: the AWG holds "
                                f"{pl['wname'] if pl else 'nothing of this pair'}, {k} "
                                f"is at i{p[k].iteration:02d} -- Play keepers again")
@@ -6733,14 +6788,18 @@ class App:
                 self._opt_auto = auto
         st, when, why = o["outputs"]
         lines.append(f"outputs  {st}" + (f" at {when} ({why})" if when else ""))
+        o["playing"] = self._opt_playing()
         pl = [self._pair_playing[k]["wname"] for k in PAIR_KEYS if k in self._pair_playing]
         if pl:
-            lines.append("AWG got  " + ", ".join(pl))
+            lines.append("AWG got  " + ", ".join(pl)
+                         + (f" ({self._opt_play_text(o['playing'])})" if o["playing"] else ""))
         lines.append("scan     " + (o["scan_name"] or "none yet")
                      + (f" -> verify {os.path.basename(o['verify'])}" if o["verify"] else ""))
-        if o["verdict"]:
-            cr = o["verdict"]["correction"]["crystals"]
-            txt = "corr pk  " + ", ".join(f"{ch} {x['peak_V']:.1f} V" for ch, x in cr.items())
+        if o["files"]:
+            lines.append("corrections: " + ", ".join(
+                f"{ch} from {o['files_from'].get(ch, '?')}" for ch in sorted(o["files"])))
+            txt = "corr pk  " + ", ".join(f"{ch} {o['files_meta'][ch]['peak_V']:.1f} V"
+                                          for ch in sorted(o["files"]))
             if o["applied"]:
                 txt += f"; applied x{o['applied']['gain']:g}: " + ", ".join(
                     f"{x:.1f}" for x in o["applied"]["peak"].values()) + " V"
@@ -6799,35 +6858,50 @@ class App:
         if w is None:
             return
         ss = dict(self.pair)
-        self.run_worker(lambda: self._opt_play_work(ss, w),
-                        "optical 1: playing both keepers...")
+        which = self.optplay_var.get()
+        if which not in ("both",) + PAIR_KEYS:
+            which = "both"
+        self.run_worker(lambda: self._opt_play_work(ss, w, which),
+                        "optical 1: " + ("playing both keepers..." if which == "both"
+                                         else f"playing {which} alone..."))
 
-    def _opt_play_work(self, ss, wires):
-        """Both sessions' current drives uploaded and selected, both outputs
-        ON (one question), and LEFT ON: the light is what steps 2-6 measure.
-        A setup or limit problem refuses before anything is uploaded; a
-        failure after an output went on switches it off again."""
+    def _opt_play_work(self, ss, wires, which="both"):
+        """The driving sessions' current drives uploaded and selected, both
+        outputs ON (one question), and LEFT ON: the light is what steps 2-6
+        measure. which "X1" / "X2": that crystal's keeper alone, the other
+        channel PARKED -- optical.park_drive of its drive (flat at the
+        record's idle, the same length, so FRQ and the trigger hold) uploaded
+        as optical.PARK_NAMES[it], its output ON like the other's (an output
+        is never switched off to park). A setup or limit problem refuses
+        before anything is uploaded; a failure after an output went on
+        switches it off again."""
         _, awgmod = self._bench_modules()
         limit = getattr(awgmod, "MAX_ARB_NAME", NAME_LIMIT)
+        parked = {k for k in PAIR_KEYS if which in PAIR_KEYS and k != which}
+        drives = {k: (optical.park_drive(ss[k].u) if k in parked else np.array(ss[k].u, float))
+                  for k in PAIR_KEYS}
+        wnames = {k: (optical.PARK_NAMES[k] if k in parked
+                      else f"{ss[k].stem}_i{ss[k].iteration:02d}") for k in PAIR_KEYS}
         awg, scope = self._connect_pair()
         switched, ok_end = [], False
         try:
             problems = []
             for k in PAIR_KEYS:
                 s = ss[k]
-                if len(s.stem) + 4 > limit:
-                    problems.append(f"{k}: stem {s.stem!r} + '_iNN' is past the "
-                                    f"{limit}-char name cap")
+                if len(wnames[k]) > limit:
+                    problems.append(f"{k}: {wnames[k]!r} is past the {limit}-char name cap")
                 p, notes = ilc_bench.check_awg_channel(
                     awg, wires[k]["awg_ch"], full_scale=s.full_scale,
                     expect_period=len(s.t) * s.loop.dt)
                 for n in notes:
                     print(f"{k}     ", n)
                 problems += [f"{k}: {x}" for x in p]
-                rep = s.loop.check(s.u)
-                print(f"{k}      limit check:", rep)
+                rep = s.loop.check(drives[k])
+                print(f"{k}      limit check" + (" (park drive)" if k in parked else "")
+                      + ":", rep)
                 if not rep:
-                    problems.append(f"{k}: the drive fails the limit check")
+                    problems.append(f"{k}: the {'park ' if k in parked else ''}drive fails "
+                                    f"the limit check")
             if problems:
                 print("Setup problems:")
                 for p in problems:
@@ -6837,12 +6911,16 @@ class App:
                 return
             for k in PAIR_KEYS:
                 s = ss[k]
-                wname = f"{s.stem}_i{s.iteration:02d}"
-                nn, frac = ilc_bench.upload_drive(awg, wires[k]["awg_ch"], wname,
-                                                  s.u, s.full_scale)
-                self._pair_playing[k] = dict(wname=wname, u=np.array(s.u, float))
-                print(f"{k} keeper: uploaded {wname} to CH{wires[k]['awg_ch']} "
-                      f"({nn} pts, {100*frac:.1f}% of DAC range)")
+                nn, frac = ilc_bench.upload_drive(awg, wires[k]["awg_ch"], wnames[k],
+                                                  drives[k], s.full_scale)
+                self._pair_playing[k] = dict(wname=wnames[k], u=drives[k])
+                if k in parked:
+                    self._pair_playing[k]["parked"] = True
+                    print(f"{k} parked: uploaded {wnames[k]} to CH{wires[k]['awg_ch']} "
+                          f"({nn} pts, flat at the idle {drives[k][0]:+.4f} V)")
+                else:
+                    print(f"{k} keeper: uploaded {wnames[k]} to CH{wires[k]['awg_ch']} "
+                          f"({nn} pts, {100*frac:.1f}% of DAC range)")
             chans = [wires[k]["awg_ch"] for k in PAIR_KEYS]
             ok, switched = self._ensure_outputs_on(
                 awg, chans, until="They stay ON through the Optical steps, until "
@@ -6851,14 +6929,18 @@ class App:
                 return
             ok_end = True
             names = " and ".join(f"CH{c}" for c in chans)
-            print(f"{names} ON, playing {', '.join(self._pair_playing[k]['wname'] for k in PAIR_KEYS)}"
-                  " -- left ON for the Optical steps")
+            if parked:
+                (other,) = parked
+                what = f"{which} keeper {wnames[which]}, {other} parked ({wnames[other]})"
+            else:
+                what = "playing " + ", ".join(wnames[k] for k in PAIR_KEYS)
+            print(f"{names} ON, {what} -- left ON for the Optical steps")
             self._bench_note(f"{names} output ON (Optical: kept ON until step 7)")
             self._opt_mark_outputs("ON", "step 1")
             stamp = datetime.datetime.now().strftime("%H:%M")
-            done = (f"{stamp}: playing "
-                    + ", ".join(self._pair_playing[k]["wname"] for k in PAIR_KEYS))
+            done = f"{stamp}: {what}"
             self.msgs.put(("call", lambda: (self._opt["done"].__setitem__(1, done),
+                                            self._opt.__setitem__("playing", which),
                                             self._refresh_optical())))
         finally:
             if switched and not ok_end:
@@ -6880,12 +6962,15 @@ class App:
         except RuntimeError as e:
             return messagebox.showerror("Optical 2", str(e))
         ss = dict(self.pair)
+        pl = self._opt_playing()
+        solo = pl if pl in PAIR_KEYS else None
 
         def work():
-            folder = self._opt_scan_work(ss, w, name, kw)
+            folder = self._opt_scan_work(ss, w, name, kw, solo=solo)
             if folder:
-                self.msgs.put(("call", lambda: self._opt_scan_done(folder, name)))
-        self.run_worker(work, f"optical 2: scanning {name}...")
+                self.msgs.put(("call", lambda: self._opt_scan_done(folder, name, solo)))
+        self.run_worker(work, f"optical 2: scanning {name}"
+                        + (f" ({solo} alone)..." if solo else "..."))
 
     def _optical_devices(self, scope, cfg):
         """Worker side: the polarimeter's devices beside the ILC's open
@@ -6896,13 +6981,17 @@ class App:
         return optical.open_devices(scope, cfg, log=print)
 
     @staticmethod
-    def _opt_ends(ss):
+    def _opt_ends(ss, solo=None):
         """{X1: deg, X2: deg}: each chain's hold rotation, 90 deg x the
         target's peak at the EOM / that chain's V90 (eomilc.config v90_hv).
-        The scan's hold-null angles come from their sum. None when a
-        channel has no V90."""
+        The scan's hold-null angles come from their sum. solo "X1" / "X2":
+        the other crystal is parked at its idle and adds nothing (0 deg).
+        None when a driving channel has no V90."""
         out = {}
         for k in PAIR_KEYS:
+            if solo is not None and k != solo:
+                out[k] = 0.0
+                continue
             s = ss[k]
             ch = s.loop.channel
             tgt = s.base_target if s.base_target is not None else s.loop.target
@@ -6912,12 +7001,15 @@ class App:
             out[k] = 90.0 * float(np.max(tgt)) * ch.mon_scale / v90
         return out
 
-    def _opt_scan_work(self, ss, wires, name, kw):
+    def _opt_scan_work(self, ss, wires, name, kw, solo=None):
         """Worker side: one scan while the keepers play. Opens the scope and
         the AWG, refuses when either output is OFF, opens the analyzer beside
         the scope, scans into run\\optical, and closes everything WITHOUT
         touching the outputs. Returns the scan folder, or None (refused, or
-        stopped -- a stopped scan is saved and resumes under its name)."""
+        stopped -- a stopped scan is saved and resumes under its name).
+        solo "X1" / "X2": that crystal drove alone, the other parked (the
+        park drive is in _pair_playing); recorded in the scan's manifest as
+        "solo" so the scan says how it must be compared."""
         outdir = os.path.join(RUN_DIR, "optical")
         os.makedirs(outdir, exist_ok=True)
         awg, scope = self._connect_pair()
@@ -6936,7 +7028,12 @@ class App:
             drives = {PAIR_CHANNEL[k]: (self._pair_playing[k]["u"] if k in self._pair_playing
                                         else ss[k].u) for k in PAIR_KEYS}
             optical.sim_play(dev, drives, dt=ss["X1"].loop.dt)
-            ends = self._opt_ends(ss) if kw["hold_null"] else None
+            if solo:
+                other = "X2" if solo == "X1" else "X1"
+                print(f"{solo} alone: {self._pair_playing[solo]['wname']} plays, {other} parked "
+                      f"({self._pair_playing[other]['wname']}, flat at "
+                      f"{self._pair_playing[other]['u'][0]:+.4f} V)")
+            ends = self._opt_ends(ss, solo) if kw["hold_null"] else None
             if ends:
                 print("hold rotation " + ", ".join(f"{k} {v:.1f} deg" for k, v in ends.items())
                       + " (90 deg x target peak / V90): hold-null angles from their sum")
@@ -6950,7 +7047,7 @@ class App:
                     cancelled=self.stop_evt.is_set, angles=kw["angles"], shots=kw["shots"],
                     points=kw["points"], ref_every=kw["ref_every"],
                     hold_null=kw["hold_null"], ends_deg=ends, settle_s=kw["settle_s"],
-                    preset=kw["preset"] or None,
+                    preset=kw["preset"] or None, extra={"solo": solo},
                     states={"x1": ss["X1"].state_path, "x2": ss["X2"].state_path})
             except Exception as e:
                 if type(e).__name__ != "Cancelled":       # rampol.hw.Cancelled
@@ -6965,13 +7062,15 @@ class App:
             scope.close()
             print("instruments closed (outputs left as they were)")
 
-    def _opt_scan_done(self, folder, name):
+    def _opt_scan_done(self, folder, name, solo=None):
+        """A new scan: the step results after it start over, except the
+        correction files held (a solo pass collects one per crystal)."""
         o = self._opt
-        o.update(scan=folder, scan_name=name, compare=None, verdict=None, applied=None,
-                 learned=None, verify=None, table=None, verdict_line=None)
+        o.update(scan=folder, scan_name=name, scan_solo=solo, compare=None, verdict=None,
+                 applied=None, learned=None, verify=None, table=None, verdict_line=None)
         o["done"] = {1: o["done"].get(1)} if o["done"].get(1) else {}
-        o["done"][2] = (f"{datetime.datetime.now():%H:%M}: {name} -> "
-                        f"{elide(folder, 48)}")
+        o["done"][2] = (f"{datetime.datetime.now():%H:%M}: {name}"
+                        + (f" ({solo} alone)" if solo else "") + f" -> {elide(folder, 40)}")
         self._refresh_optical()
 
     # -- 3 Compare ---------------------------------------------------------
@@ -6982,38 +7081,65 @@ class App:
             ck = self._opt_compare_kw()
         except RuntimeError as e:
             return messagebox.showerror("Optical 3", str(e))
-        ss, folder = dict(self.pair), self._opt["scan"]
+        o = self._opt
+        ss, folder, solo, name = dict(self.pair), o["scan"], o["scan_solo"], o["scan_name"]
 
         def work():
-            summary, v = self._opt_compare_work(ss, folder, ck)
-            self.msgs.put(("call", lambda: self._opt_compare_done(summary, v)))
-        self.run_worker(work, f"optical 3: comparing {os.path.basename(folder)}...")
+            summary, v = self._opt_compare_work(ss, folder, ck, solo=solo)
+            self.msgs.put(("call", lambda: self._opt_compare_done(summary, v, name)))
+        self.run_worker(work, f"optical 3: comparing {os.path.basename(folder)}"
+                        + (f" ({solo} alone)..." if solo else "..."))
 
-    def _opt_compare_work(self, ss, folder, ck):
+    def _opt_compare_work(self, ss, folder, ck, solo=None):
         """Worker side: eomilc.optical.compare on a scan with both states
-        (their BASE targets when corrected), and its verdict, logged."""
+        (their BASE targets when corrected), and its verdict, logged. solo
+        "X1" / "X2": the scan was taken with that crystal alone (what played
+        at the scan, not now), so the whole correction is its own and only
+        its file is expected."""
         print(f"compare {os.path.basename(folder)} with {ss['X1'].stem} / {ss['X2'].stem}: "
-              f"band {ck['band']:g} Hz, PD delay {ck['delay']:g} us, split X1 {ck['split']:g}")
+              f"band {ck['band']:g} Hz, PD delay {ck['delay']:g} us, "
+              + (f"{solo} alone (split forced)" if solo else f"split X1 {ck['split']:g}"))
         summary = optical.compare(folder, ss["X1"].state_path, ss["X2"].state_path,
                                   band_hz=ck["band"], pd_delay_us=ck["delay"],
-                                  split=ck["split"], log=print, figs=ck["figs"])
-        missing = [ch for ch in ("EO1", "EO2") if ch not in summary["files"]]
+                                  split=ck["split"], log=print, figs=ck["figs"], solo=solo)
+        want = [PAIR_CHANNEL[solo]] if solo else ["EO1", "EO2"]
+        missing = [ch for ch in want if ch not in summary["files"]]
         if missing:
             raise RuntimeError(f"the comparison wrote no correction for {', '.join(missing)}")
         summary["folder"] = folder
         v = optical.verdict(summary)
         for line in optical.verdict_lines(v):
             print("  " + line)
-        for ch in ("EO1", "EO2"):
+        for ch in want:
             print(f"  {ch}: {summary['files'][ch]}")
         return summary, v
 
-    def _opt_compare_done(self, summary, v):
+    def _opt_hold_files(self, summary, v, name):
+        """Main thread: the comparison's correction files join the ones held
+        for Apply -- both from a joint compare, the driving crystal's from a
+        solo one (the other crystal's file, if any, is kept)."""
         o = self._opt
-        o.update(compare=summary, verdict=v, before=(o["scan_name"], v))
-        o["done"][3] = (f"{datetime.datetime.now():%H:%M}: correction peak "
-                        + ", ".join(f"{ch} {x['peak_V']:.1f} V"
-                                    for ch, x in v["correction"]["crystals"].items()))
+        for ch, path in summary["files"].items():
+            o["files"][ch] = path
+            o["files_from"][ch] = name
+            o["files_meta"][ch] = dict(
+                band=float(summary.get("f_cut_Hz", 5000.0)),
+                peak_V=float(v["correction"]["crystals"].get(ch, {}).get("peak_V", float("nan"))))
+
+    def _opt_compare_done(self, summary, v, name=None):
+        o = self._opt
+        name = name or o["scan_name"]
+        o.update(compare=summary, verdict=v)
+        if not summary.get("solo"):
+            o["before"] = (name, v)       # only a JOINT comparison is a verify's before
+        self._opt_hold_files(summary, v, name)
+        parts = []
+        for ch in sorted(o["files"]):
+            if ch in summary["files"]:
+                parts.append(f"{ch} {o['files_meta'][ch]['peak_V']:.1f} V (from {name})")
+            else:
+                parts.append(f"{ch} from {o['files_from'][ch]} held")
+        o["done"][3] = f"{datetime.datetime.now():%H:%M}: " + "; ".join(parts)
         self._plot_optical(summary)
         self._show_fig(self.fig_opt)
         self._refresh_optical()
@@ -7032,25 +7158,34 @@ class App:
             return messagebox.showerror("Optical 4", "gain must be a number")
         except RuntimeError as e:
             return messagebox.showerror("Optical 4", str(e))
-        summ = self._opt["compare"]
-        # the comparison's band (the 0.3 ms ramp-top feature needs ~5 kHz),
-        # the Corrections tab's limits for everything else
-        st = corrmod.GateSettings(band_hz=float(summ.get("f_cut_Hz", 5000.0)),
-                                  k_sigma=lim.k_sigma, floor_out=lim.floor_out,
-                                  cap_out=lim.cap_out, fade_s=lim.fade_s,
-                                  active_only=lim.active_only)
-        ss, files = dict(self.pair), dict(summ["files"])
-        self.run_worker(lambda: self._opt_apply_work(ss, files, gain, st),
+        o = self._opt
+        # each file at the band of the comparison it came from (the 0.3 ms
+        # ramp-top feature needs ~5 kHz), the Corrections tab's limits for
+        # everything else; the chains without a file held are left alone
+        files, sts, froms = {}, {}, {}
+        for k in PAIR_KEYS:
+            ch = PAIR_CHANNEL[k]
+            if ch not in o["files"]:
+                continue
+            files[k], froms[k] = o["files"][ch], o["files_from"].get(ch, "?")
+            sts[k] = corrmod.GateSettings(
+                band_hz=float(o["files_meta"].get(ch, {}).get("band", 5000.0)),
+                k_sigma=lim.k_sigma, floor_out=lim.floor_out, cap_out=lim.cap_out,
+                fade_s=lim.fade_s, active_only=lim.active_only)
+        ss = dict(self.pair)
+        self.run_worker(lambda: self._opt_apply_work(ss, files, gain, sts, froms),
                         "optical 4: applying the corrections...")
 
-    def _opt_apply_work(self, ss, files, gain, st):
+    def _opt_apply_work(self, ss, files, gain, sts, froms):
         """Worker side: eomilc.optical.apply_correction on each chain's loop
-        with that chain's file (EO1 to X1, EO2 to X2), on top of the
-        session's base target and layers. Both or neither: a refusal on X2
-        puts X1's target back, says why in the log and a dialog, and nothing
-        is saved."""
+        with the file held for its crystal (files {X1/X2: path}: EO1's to
+        X1, EO2's to X2; froms: the scan each came from; sts: the gate
+        settings per chain), on top of the session's base target and layers.
+        All or nothing: a refusal on X2 puts X1's target back, says why in
+        the log and a dialog, and nothing is saved."""
+        keys = [k for k in PAIR_KEYS if k in files]
         saved = {}
-        for k in PAIR_KEYS:
+        for k in keys:
             lp = ss[k].loop
             h = lp.history[-1] if lp.history and isinstance(lp.history[-1], dict) else None
             saved[k] = (np.array(lp.target, float), dict(h) if h is not None else None)
@@ -7062,41 +7197,46 @@ class App:
                 lp.target = saved[kk][0]
                 if saved[kk][1] is not None:
                     lp.history[-1] = saved[kk][1]
+        print("applying " + ", ".join(f"{PAIR_CHANNEL[k]}'s file from {froms[k]} to {k}"
+                                      for k in keys)
+              + "".join(f"; {k} has no file held, left as it is" for k in PAIR_KEYS
+                        if k not in files))
         try:
-            for k in PAIR_KEYS:
+            for k in keys:
                 s = ss[k]
                 done[k] = optical.apply_correction(
-                    s.loop, s.t, s.u, s.full_scale, files[PAIR_CHANNEL[k]], gain=gain,
-                    settings=st, base_target=s.base_target, layers=s.corr_layers)
+                    s.loop, s.t, s.u, s.full_scale, files[k], gain=gain,
+                    settings=sts[k], base_target=s.base_target, layers=s.corr_layers)
         except optical.CorrectionRefused as exc:
             put_back()
             print(f"{k}: correction REFUSED -- nothing changed on either chain")
             for lev, txt in exc.notes:
                 print(f"  {lev.upper()}: {txt}")
             fails = [t for lev, t in exc.notes if lev == "fail"] or [str(exc)]
-            msg = (f"{k} ({PAIR_CHANNEL[k]}): not applied, and nothing changed on "
-                   f"either chain.\n\n" + "\n\n".join(fails))
+            msg = (f"{k} ({PAIR_CHANNEL[k]}, from {froms[k]}): not applied, and nothing "
+                   f"changed on either chain.\n\n" + "\n\n".join(fails))
             self.msgs.put(("call", lambda: messagebox.showerror("Optical 4 -- refused", msg)))
             return
         except BaseException:
             put_back()
             raise
-        for k in PAIR_KEYS:
+        for k in keys:
             s, a = ss[k], done[k]
             s.base_target, s.corr_total, s.corr_layers = a.base_target, a.corr_total, a.layers
             save_session(s)
             with self._prefixed(k):
                 L = next((x for x in a.layers if x.get("slot") == "optical"), {})
-                print(f"target corrected ({os.path.basename(files[PAIR_CHANNEL[k]])}, "
-                      f"x{gain:g}, band {st.band_hz:g} Hz): {a.info['peak_out']:.1f} V "
+                print(f"target corrected ({os.path.basename(files[k])} from {froms[k]}, "
+                      f"x{gain:g}, band {sts[k].band_hz:g} Hz): {a.info['peak_out']:.1f} V "
                       f"peak, {a.info['rms_out']:.1f} V rms at the EOM; resolved over "
                       f"{100*L.get('resolved', 0):.0f}% of the active record; drive "
                       f"peak est. {a.info['drive_peak_est']:.3f} V")
                 for lev, txt in a.notes:
                     print(f"  {lev.upper()}: {txt}")
-        print("both targets moved, base targets kept in the states; the next "
-              "measurement is against the new targets")
-        peaks = {k: done[k].info["peak_out"] for k in PAIR_KEYS}
+        print(("both targets" if len(keys) == 2 else f"{keys[0]}'s target")
+              + " moved, base targets kept in the states; the next measurement is "
+                "against the new targets")
+        peaks = {k: done[k].info["peak_out"] for k in keys}
         self.msgs.put(("call", lambda: self._opt_apply_done(gain, peaks)))
 
     def _opt_apply_done(self, gain, peaks):
@@ -7145,6 +7285,8 @@ class App:
     def _opt_learn_done(self, ss, it0):
         o = self._opt
         it1 = {k: ss[k].iteration for k in PAIR_KEYS}
+        # the pair loop uploaded both keepers: a solo play is over
+        o["playing"] = self._opt_playing()
         if all(it1[k] > it0[k] for k in PAIR_KEYS):
             o["learned"] = dict(it0=it0, it1=it1)
             o["done"][5] = (f"{datetime.datetime.now():%H:%M}: " + ", ".join(
@@ -7166,10 +7308,11 @@ class App:
         except RuntimeError as e:
             return messagebox.showerror("Optical 6", str(e))
         o = self._opt
-        if not o["before"]:
+        if not o["scan_name"]:
             return messagebox.showerror("Optical 6", "no comparison to verify against: "
                                                      "Scan and Compare (2, 3) first")
-        name = self._opt_free_name(f"{o['scan_name']}_verify")
+        # always a JOINT scan, named after the pass (a solo scan's _X1 / _X2 off)
+        name = self._opt_free_name(re.sub(r"_X[12]$", "", o["scan_name"]) + "_verify")
         ss, before = dict(self.pair), o["before"]
 
         def work():
@@ -7177,14 +7320,21 @@ class App:
             if not folder:
                 return
             summary, v = self._opt_compare_work(ss, folder, ck)
-            rows, halved = self._opt_table(before[1], v)
-            print(f"before / after: before = {before[0]}, after = {name} (mdeg; "
-                  f"correction peaks in V)")
-            print(f"{'':40s}{'before':>9s}{'after':>9s}")
-            for lab, b, a in rows:
-                print(f"{lab:40s}{b:9.1f}{a:9.1f}")
+            if before is None:
+                # a solo-only pass: no joint comparison to put beside it
+                print(f"no joint before to compare {name} with (the pass was measured "
+                      f"one crystal at a time): table skipped, the verdict above stands "
+                      f"alone and is the next pass's before")
+                rows, halved = None, False
+            else:
+                rows, halved = self._opt_table(before[1], v)
+                print(f"before / after: before = {before[0]}, after = {name} (mdeg; "
+                      f"correction peaks in V)")
+                print(f"{'':40s}{'before':>9s}{'after':>9s}")
+                for lab, b, a in rows:
+                    print(f"{lab:40s}{b:9.1f}{a:9.1f}")
             self.msgs.put(("call", lambda: self._opt_verify_done(
-                folder, name, summary, v, rows, halved, before[0])))
+                folder, name, summary, v, rows, halved, before[0] if before else None)))
         self.run_worker(work, f"optical 6: verification scan {name}...")
 
     @classmethod
@@ -7208,27 +7358,43 @@ class App:
         return rows, bool(halved) and all(halved)
 
     def _opt_verify_done(self, folder, name, summary, v, rows, halved, before_name):
+        """rows None: no joint before (a solo-only pass) -- no table, no
+        before / after view; the verdict is reported and becomes the before."""
         o = self._opt
-        tops = [(b, a) for lab, b, a in rows if "ramp top, light - target" in lab]
-        word = "halved" if halved else "NOT halved"
-        o["verdict_line"] = ("verify   ramp top light-target "
-                             + ", ".join(f"{abs(b):.0f}->{abs(a):.0f}" for b, a in tops)
-                             + f" mdeg: {word}")
-        o["announce"] = (f"optical verify {name}: ramp-top light - target "
-                         + ", ".join(f"{abs(b):.0f} -> {abs(a):.0f}" for b, a in tops)
-                         + f" mdeg -- {word}")
+        stamp = f"{datetime.datetime.now():%H:%M}"
+        if rows is None:
+            tops = [L["top_lt_mdeg"] for L in v["legs"]]
+            o["verdict_line"] = ("verify   ramp top light-target "
+                                 + ", ".join(f"{abs(a):.0f}" for a in tops)
+                                 + " mdeg (no joint before)")
+            o["announce"] = (f"optical verify {name}: ramp-top light - target "
+                             + ", ".join(f"{abs(a):.0f}" for a in tops)
+                             + " mdeg -- no joint before, no table")
+            o["done"][6] = f"{stamp}: {name}: no joint before, the verdict is in the log"
+        else:
+            tops = [(b, a) for lab, b, a in rows if "ramp top, light - target" in lab]
+            word = "halved" if halved else "NOT halved"
+            o["verdict_line"] = ("verify   ramp top light-target "
+                                 + ", ".join(f"{abs(b):.0f}->{abs(a):.0f}" for b, a in tops)
+                                 + f" mdeg: {word}")
+            o["announce"] = (f"optical verify {name}: ramp-top light - target "
+                             + ", ".join(f"{abs(b):.0f} -> {abs(a):.0f}" for b, a in tops)
+                             + f" mdeg -- {word}")
+            o["done"][6] = f"{stamp}: {name}: ramp-top extreme {word} (table in the log)"
         o.update(verify=folder, table=rows)
-        o["done"][6] = (f"{datetime.datetime.now():%H:%M}: {name}: ramp-top extreme {word}"
-                        f" (table in the log)")
         self._plot_optical(summary)
-        self._plot_optical_verdict(rows, (before_name, name))
-        self._show_fig(self.fig_optva)
+        if rows is None:
+            self._show_fig(self.fig_opt)
+        else:
+            self._plot_optical_verdict(rows, (before_name, name))
+            self._show_fig(self.fig_optva)
         # the verification is the next pass's comparison: Apply takes its
         # correction (it REPLACES the optical layer -- a fresh estimate of the
         # whole correction, not a remainder) and the next Verify compares
-        # against it
-        o.update(scan=folder, compare=dict(summary, folder=folder), verdict=v,
+        # against it. A joint comparison: both files held come from it.
+        o.update(scan=folder, scan_solo=None, compare=dict(summary, folder=folder), verdict=v,
                  before=(name, v), applied=None, learned=None)
+        self._opt_hold_files(summary, v, name)
         self._refresh_optical()
 
     # -- 7 Outputs OFF -----------------------------------------------------

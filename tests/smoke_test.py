@@ -2643,6 +2643,263 @@ print("[59] spin-echo record: Echo... dialog refuses a too-short spacing, builds
       "ECHOE without a warning, an unchanged file is left alone; the batch's echo key builds the "
       "same files and the dry run prints the record")
 
+# [60] Optical tab, solo play (13 Oct 2026, the design addendum's part 6):
+# each crystal measured alone with the other parked flat at its idle (PARK1 /
+# PARK2 on its channel, output ON), each solo scan compared with solo= so the
+# whole correction is the driving crystal's, the two files held side by side
+# and applied together, Learn (both play again), and a JOINT verification
+# that has no joint before to put in a table. The same stubs and simulated
+# devices as block 58's, its own pair (stem SOL); stands alone
+# (smoke_block.py 60).
+import json as _json60
+import time as _time60
+import run_ilc as _ri60
+import ilc_bench as _ib60
+from eomilc import simbench as _sb60
+from eomilc import optical as _op60
+from eomilc import corrections as _cm60
+_mb60 = ilc_gui.messagebox
+_saved60 = (_mb60.askyesno, _mb60.showerror, _mb60.showinfo, ilc_gui.AWG_WAVEFORMS)
+_asked60 = []
+_mb60.askyesno = lambda title, msg, **k: (_asked60.append(title), True)[1]
+_mb60.showerror = lambda title, msg, **k: _asked60.append(("error", title, msg))
+_mb60.showinfo = lambda title, msg, **k: _asked60.append(("info", title, msg))
+ilc_gui.AWG_WAVEFORMS = os.path.join(SCRATCH, "Waveforms60")
+
+
+def _pump60(limit_s=600):
+    _t0 = _time60.time()
+    root.update()
+    while app.busy and _time60.time() - _t0 < limit_s:
+        root.update()
+        _time60.sleep(0.02)
+    for _ in range(10):
+        root.update()
+        _time60.sleep(0.01)
+    assert not app.busy, "the worker did not finish"
+
+
+def _log60():
+    return app.log_text.get("1.0", "end")
+
+
+try:
+    # the pair, as block 58's: 0 -> 5 kV at the EOM -> 0 over 11 ms on the 2 us grid
+    _tus = np.arange(5501) * 2.0
+    _ramp = np.clip(np.minimum((_tus - 500) / 3000, (10500 - _tus) / 3000), 0, 1)
+    _v60 = 5000 * 0.5 * (1 - np.cos(np.pi * _ramp))
+    for _k in ("X1", "X2"):
+        np.savetxt(os.path.join(SCRATCH, f"target_SOL{_k}.csv"), np.c_[_tus, _v60],
+                   delimiter=",", header="time_us,voltage_V", comments="", fmt="%.6g")
+    app._set_channels(ilc_gui.chanmap.DEFAULT_CHANNELS)
+    app.cmpsel_var.set("")
+    app.line_on_var.set(False)
+    app.pair_var.set(True)
+    app._on_pair_toggle()
+    root.update()
+    app.target_var.set(os.path.join(SCRATCH, "target_SOLX1.csv"))
+    app.stem_var.set("SOL")
+    app.seed_var.set("")
+    app.shotgain_var.set("")
+    app.toff_var.set("0")
+    app.fs_var.set("10.0")
+    app.model_var.set(ilc_gui.KEY2LABEL["resonant"])
+    app._on_model_change()
+    for _var, _val in ((app.pgain_var, "0.557"), (app.pfn_var, "7823"), (app.pzeta_var, "1.474"),
+                       (app.gamma_var, "0.6"), (app.fcut_var, "20000"), (app.notch_var, "")):
+        _var.set(_val)
+    app.model_var_2.set(ilc_gui.KEY2LABEL["resonant"])
+    app._on_model_change_2()
+    for _var, _val in ((app.pgain_var_2, "0.6116"), (app.pfn_var_2, "8509"), (app.pzeta_var_2, "1.83"),
+                       (app.gamma_var_2, "0.6"), (app.fcut_var_2, "20000"), (app.notch_var_2, "")):
+        _var.set(_val)
+    _n60 = len(_asked60)
+    app.do_init()
+    root.update()
+    _p60 = app.pair
+    assert _p60 is not None and (_p60["X1"].stem, _p60["X2"].stem) == ("SOLX1", "SOLX2"), _asked60[_n60:]
+
+    _awg60, _scope60, _mod60 = _sb60.make_bench({1: os.path.join(REPO, "run", "frf_WIDE_X1.csv"),
+                                                 2: os.path.join(REPO, "run", "frf_WIDE_X2.csv")},
+                                                channels=app.cfg)
+
+    def _fake_pair60():
+        _ib60._AWGMOD = _mod60
+        return _awg60, _scope60
+    app._connect_pair = _fake_pair60
+    app._bench_modules = lambda: (None, _mod60)
+    app.do_autoset()
+    _pump60()
+    assert not _awg60.is_on(1) and not _awg60.is_on(2)
+
+    _dc60 = {_c: float(np.mean(_ch.respond(np.ones(5501), 2e-6)[-500:]))
+             for _c, _ch in _scope60.chains.items()}
+    _devs60 = []
+
+    def _optdev60(scope, cfg):
+        _d = _op60.open_devices(None, cfg, log=print, simulate=True, pcfg={})
+        _d.sim.rot_err = 0.5
+        _d.sim.awg_gain = dict(_dc60)
+        _devs60.append(_d)
+        return _d
+    app._optical_devices = _optdev60
+    app.optangles_var.set("0:359:45")
+    app.optshots_var.set("2")
+    app.optdelay_var.set("0")
+    app.optiters_var.set("1")
+    app.optgain_var.set("0.7")
+    app.optfigs_var.set(False)
+    app.repeats_var.set("16")
+    app.wait_var.set("5")
+    app.skip_var.set(False)
+    root.update()
+
+    # 1, X1 alone: X1's keeper on CH1, PARK2 (flat at X2's idle) on CH2, both ON
+    _ev60 = len(_awg60.log)
+    _n60 = len(_asked60)
+    app.optplay_var.set("X1")
+    app.do_opt_play()
+    _pump60()
+    assert _asked60[_n60:] == ["Outputs are OFF"], _asked60[_n60:]
+    assert _awg60.is_on(1) and _awg60.is_on(2)
+    _ups = [e[1:] for e in _awg60.log[_ev60:] if e[0] == "upload"]
+    assert _ups == [(1, "SOLX1_i00"), (2, "PARK2")], _ups
+    _pk60 = app._pair_playing["X2"]
+    assert _pk60.get("parked") and _pk60["wname"] == "PARK2"
+    assert len(_pk60["u"]) == len(_p60["X2"].u) and np.all(_pk60["u"] == _p60["X2"].u[0])
+    assert not app._pair_playing["X1"].get("parked")
+    assert app._opt["playing"] == "X1"
+    assert "X1 alone, X2 parked" in app.opt_state.cget("text"), app.opt_state.cget("text")
+    assert "X1 keeper SOLX1_i00, X2 parked (PARK2)" in app._opt["done"][1], app._opt["done"][1]
+    assert "X1 keeper SOLX1_i00, X2 parked (PARK2)" in _log60()
+
+    # 2: the default name ends _X1; the light is X1's keeper with X2 parked
+    assert app.optname_var.get() == "SOL_opt1_X1", app.optname_var.get()
+    app.do_opt_scan()
+    _pump60()
+    _scanx1 = app._opt["scan"]
+    assert _scanx1 and os.path.basename(_scanx1) == "SOL_opt1_X1" and app._opt_scan_complete(_scanx1)
+    assert app._opt["scan_solo"] == "X1"
+    assert np.array_equal(_devs60[-1].drives["EO1"], _p60["X1"].u) and \
+        np.all(_devs60[-1].drives["EO2"] == _p60["X2"].u[0])
+    _man = _json60.load(open(os.path.join(_scanx1, "SOL_opt1_X1_scan.json"), encoding="utf-8"))
+    assert _man["solo"] == "X1" and _man["drive"]["idle_V"]["EO2"] == float(_p60["X2"].u[0])
+
+    # 3, solo X1: EO1's file only, the state line says so, no joint before yet
+    app.do_opt_compare()
+    _pump60()
+    _o = app._opt
+    assert _o["compare"]["solo"] == "X1" and set(_o["compare"]["files"]) == {"EO1"}
+    assert set(_o["files"]) == {"EO1"} and _o["files_from"] == {"EO1": "SOL_opt1_X1"}, _o["files_from"]
+    _eo1 = _o["files"]["EO1"]
+    assert _cm60.read_correction(_eo1).meta.get("channel") == "EO1"
+    assert _o["before"] is None
+    assert "corrections: EO1 from SOL_opt1_X1" in app.opt_state.cget("text"), app.opt_state.cget("text")
+    assert "X1 drove alone" in _log60()
+
+    # 6 is refused while one crystal plays alone, by that reason
+    assert str(app._opt_btns[6].cget("state")) == "disabled"
+    app.do_opt_verify()
+    assert _asked60[-1][0] == "error" and "Verify needs both playing" in _asked60[-1][2], _asked60[-1]
+
+    # 1, X2 alone: PARK1 on CH1, X2's keeper on CH2; the outputs are already ON
+    _ev60 = len(_awg60.log)
+    _n60 = len(_asked60)
+    app.optplay_var.set("X2")
+    app.do_opt_play()
+    _pump60()
+    assert _asked60[_n60:] == [], _asked60[_n60:]
+    _ups = [e[1:] for e in _awg60.log[_ev60:] if e[0] == "upload"]
+    assert _ups == [(1, "PARK1"), (2, "SOLX2_i00")], _ups
+    assert [e for e in _awg60.log[_ev60:] if e[0] == "output"] == []
+    assert app._pair_playing["X1"].get("parked") and not app._pair_playing["X2"].get("parked")
+    assert "X2 alone, X1 parked" in app.opt_state.cget("text")
+
+    # 2 and 3, solo X2: both files held now, EO1's kept as it was
+    assert app.optname_var.get() == "SOL_opt1_X2", app.optname_var.get()
+    app.do_opt_scan()
+    _pump60()
+    assert os.path.basename(app._opt["scan"]) == "SOL_opt1_X2" and app._opt["scan_solo"] == "X2"
+    assert np.all(_devs60[-1].drives["EO1"] == _p60["X1"].u[0]) and \
+        np.array_equal(_devs60[-1].drives["EO2"], _p60["X2"].u)
+    app.do_opt_compare()
+    _pump60()
+    _o = app._opt
+    assert _o["compare"]["solo"] == "X2" and set(_o["compare"]["files"]) == {"EO2"}
+    assert set(_o["files"]) == {"EO1", "EO2"} and _o["files"]["EO1"] == _eo1
+    assert _o["files_from"] == {"EO1": "SOL_opt1_X1", "EO2": "SOL_opt1_X2"}, _o["files_from"]
+    assert _o["before"] is None
+    assert "EO1 from SOL_opt1_X1 held" in _o["done"][3] and "(from SOL_opt1_X2)" in _o["done"][3], \
+        _o["done"][3]
+    assert "corrections: EO1 from SOL_opt1_X1, EO2 from SOL_opt1_X2" in app.opt_state.cget("text")
+
+    # 4: both targets moved, one optical layer each, from its own scan
+    _t60 = {_k: np.array(_s.loop.target) for _k, _s in _p60.items()}
+    _n0 = len(_log60())
+    app.do_opt_apply()
+    _pump60()
+    for _k, _s in _p60.items():
+        _ch = ilc_gui.PAIR_CHANNEL[_k]
+        assert np.array_equal(_s.base_target, _t60[_k]), _k
+        assert np.max(np.abs(_s.loop.target - _t60[_k])) * _s.loop.channel.mon_scale > 1.0, _k
+        assert len(_s.corr_layers) == 1 and _s.corr_layers[0]["slot"] == "optical" and \
+            _s.corr_layers[0]["status"] == "applied", _s.corr_layers
+        assert _s.corr_layers[0]["path"] == os.path.abspath(app._opt["files"][_ch])
+        assert np.array_equal(_ri60.load_state(_s.state_path)["base_target"], _t60[_k])
+    _lg = _log60()[_n0:]
+    assert "EO1's file from SOL_opt1_X1 to X1" in _lg and "EO2's file from SOL_opt1_X2 to X2" in _lg, _lg
+    assert "both targets moved" in _lg
+
+    # 5: one iteration of the pair loop -- both keepers upload, so both play again
+    _ev60 = len(_awg60.log)
+    _n60 = len(_asked60)
+    app.do_opt_learn()
+    _pump60()
+    assert _asked60[_n60:] == [], _asked60[_n60:]
+    assert [e for e in _awg60.log[_ev60:] if e[0] == "output"] == []
+    _ups = [e[1:] for e in _awg60.log[_ev60:] if e[0] == "upload"]
+    assert (1, "SOLX1_i00") in _ups and (2, "SOLX2_i00") in _ups, _ups
+    assert app._opt["playing"] == "both" and app._opt["learned"]
+    assert "playing both" in app.opt_state.cget("text")
+
+    # 6: a JOINT scan named after the pass; no joint before -> no table, the verdict logged
+    assert str(app._opt_btns[6].cget("state")) == "normal"
+    _n0 = len(_log60())
+    app.do_opt_verify()
+    _pump60()
+    _ver60 = app._opt["verify"]
+    assert _ver60 and os.path.basename(_ver60) == "SOL_opt1_verify", _ver60
+    _man = _json60.load(open(os.path.join(_ver60, "SOL_opt1_verify_scan.json"), encoding="utf-8"))
+    assert _man["solo"] is None
+    assert app._opt["table"] is None and app._opt["compare"]["solo"] is None
+    _lg = _log60()[_n0:]
+    assert "no joint before" in _lg and "table skipped" in _lg and "before / after" not in _lg, _lg
+    assert "ramp top light-monitors" in _lg                       # the verdict lines
+    assert app._opt["before"][0] == "SOL_opt1_verify"
+    assert "no joint before" in app.status.cget("text"), app.status.cget("text")
+    assert set(app._opt["files"]) == {"EO1", "EO2"} and \
+        set(app._opt["files_from"].values()) == {"SOL_opt1_verify"}
+    assert _awg60.is_on(1) and _awg60.is_on(2)
+
+    # 7: both OFF
+    _ev60 = len(_awg60.log)
+    app.do_opt_off()
+    _pump60()
+    assert not _awg60.is_on(1) and not _awg60.is_on(2)
+    assert [e for e in _awg60.log[_ev60:] if e[0] == "output"] == [("output", 1, False),
+                                                                    ("output", 2, False)]
+    assert app._opt["outputs"][0] == "OFF"
+finally:
+    app.optplay_var.set("both")
+    _mb60.askyesno, _mb60.showerror, _mb60.showinfo, ilc_gui.AWG_WAVEFORMS = _saved60
+    for _a in ("_connect_pair", "_bench_modules", "_optical_devices"):
+        app.__dict__.pop(_a, None)
+print("[60] optical solo play: X1 alone (SOLX1_i00 on CH1, PARK2 on CH2, X2 parked) -> scan "
+      "SOL_opt1_X1 -> compare holds EO1 only, no joint before, Verify refused while solo; X2 alone "
+      "(PARK1 on CH1, no question) -> SOL_opt1_X2 -> both files held, EO1's kept; apply moves both "
+      "targets, one optical layer each, log names both scans; learn 1 -> playing both; verify "
+      "SOL_opt1_verify joint, no table, verdict logged; both OFF")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the
