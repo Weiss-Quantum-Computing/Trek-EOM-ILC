@@ -968,7 +968,7 @@ def pd_rows(run_dir, stem):
 EARLY_FLOOR_FACTOR = 3.0
 
 
-def shots_for(runs, lp):
+def shots_for(runs, lp, caps=None):
     """(shots, early) for the next measurement: repeats_early on iteration 0
     and while the last measured rms of any active channel is above early_rms_v,
     else repeats. repeats_early None (the default) = repeats: off.
@@ -978,7 +978,13 @@ def shots_for(runs, lp):
     measurement's own noise floor. Few shots have a floor of their own (2
     shots of the simulated chain: 2.5 V rms), and an rms held up by it would
     otherwise keep the early count for good and stop the channel on that
-    floor -- the loss the early count must not cost."""
+    floor -- the loss the early count must not cost.
+
+    A channel at the last iteration its cap allows (`caps`: the learn stage's
+    per-channel loop settings, else lp) is measured at the full count whatever
+    its rms: that measurement is the one a stage keeps and plays into the
+    verification, and a 16-shot keeper after a 3-iteration learn (S25E2,
+    14 Oct 2026: 1.39 V rms) is not a keeper."""
     reps = int(lp["repeats"])
     n_early = lp.get("repeats_early")
     n_early = reps if n_early is None else max(2, int(n_early))
@@ -989,7 +995,9 @@ def shots_for(runs, lp):
     far = any(cr.active and cr.measured and cr.measured[-1][1] > lim
               and not cr.measured[-1][1] <= EARLY_FLOOR_FACTOR * cr.floor_hv
               for cr in runs)
-    return (n_early, True) if (first or far) else (reps, False)
+    last = any(cr.active and cr.iteration >= int(((caps or {}).get(cr.key) or lp)["max_iterations"])
+               for cr in runs)
+    return (n_early, True) if (first or far) and not last else (reps, False)
 
 
 def read_analyzer(plan, scope, args, log=print):
@@ -1086,7 +1094,7 @@ def iterate_once(awg, scope, runs, plan, args, log=print, stop=None,
     if stem is None:
         stem = runs[0].stem[:-len(runs[0].key)] if runs[0].stem.endswith(runs[0].key) else runs[0].stem
     states = {cr.key: cr.state_path for cr in runs}
-    shots, early = shots_for(runs, plan["loop"])
+    shots, early = shots_for(runs, plan["loop"], loop_for)
     camp_it = max(cr.iteration for cr in runs)
     caps = capture_monitors(scope, runs, plan, log, stop, repeats=shots)
     row = dict(it=camp_it, shots=shots, early=early)

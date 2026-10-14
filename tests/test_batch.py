@@ -730,6 +730,22 @@ def main():
         except SystemExit as e:
             check("would both train as S47EC" in str(e), f"S47ECHO2 and S47EC both cut to S47EC: refused ({str(e)[-60:]})")
 
+        print("[14a] the last allowed iteration is measured at the full count")
+        import types
+        lp14 = dict(repeats=64, repeats_early=16, early_rms_v=2.0, max_iterations=20)
+
+        def fake(key, it, rms):
+            return types.SimpleNamespace(key=key, active=True, iteration=it, measured=[(it - 1, rms, rms * 5)],
+                                         floor_hv=0.01)
+        check(ilc_batch.shots_for([fake("X1", 11, 9.0), fake("X2", 11, 9.0)], lp14) == (16, True),
+              "far above the noise, not at the cap: the early count")
+        check(ilc_batch.shots_for([fake("X1", 20, 9.0), fake("X2", 20, 9.0)], lp14) == (64, False),
+              "at the plan's cap: the full count even far above the noise")
+        caps14 = {"X1": dict(lp14, max_iterations=12), "X2": dict(lp14, max_iterations=12)}
+        check(ilc_batch.shots_for([fake("X1", 11, 9.0), fake("X2", 11, 9.0)], lp14, caps14) == (16, True)
+              and ilc_batch.shots_for([fake("X1", 12, 9.0), fake("X2", 12, 9.0)], lp14, caps14) == (64, False),
+              "a learn stage's cap: early until its last iteration, then the full count")
+
         print("[14] the PD every iteration, the analyzer angle, the early shot count")
         from eomilc import diagnostics as dg
         path = write_plan(tmp, ["S25"], name="t14", max_iterations=8, repeats=8, repeats_early=2, early_rms_v=2.0)
