@@ -95,6 +95,7 @@ from eomilc import optical     # the optical close (needs rampol only when used)
 from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
 from eomilc import channels as chanmap   # scope channel ROLES, shared with the polarimeter
 from eomilc import diagnostics as dg     # per-measurement stats, folds, floors
+from eomilc import progress as progmod   # the batch's progress bar and time left
 import matplotlib.dates as mdates
 import ilc_bench            # the debugged bench helpers; main() is guarded
 import ilc_hardware         # the Hardware tab's device checks
@@ -8131,16 +8132,27 @@ class App:
 
     def _batch_event(self, kind, info):
         """Main thread: a batch event, for the window (if open), the progress
-        bar and the plots."""
-        if kind == "campaign":
-            self.progress.configure(maximum=max(info["n"], 1),
-                                    value=info["index"])
-            self.status.configure(text=f"batch: {info['stem']} "
-                                       f"({info['index'] + 1}/{info['n']})")
-        elif kind == "saved" and self.batchfollow_var.get():
+        bar and the plots. The bar and both status lines come from
+        eomilc.progress.BatchProgress: the finished campaigns plus the
+        current one's share, elapsed, and the time left for this campaign
+        (at the iteration cap) and for the batch, from the plan's estimates
+        corrected by this run's measured iteration and scan times."""
+        if not hasattr(self, "_bprog"):
+            self._bprog = progmod.BatchProgress()
+        now = time.time()
+        self._bprog.event(kind, info, now)
+        if kind in ("batch", "campaign", "iteration", "optical", "campaign_end", "batch_end"):
+            self.progress.configure(maximum=max(self._bprog.n, 1), value=self._bprog.fraction())
+            short = self._bprog.text(now, short=True)
+            if short:
+                self.status.configure(text=short)
+        if kind == "saved" and self.batchfollow_var.get():
             self._batch_follow(info["states"])
         if self._batch_win is not None:
             self._batch_win.event(kind, info)
+            long = self._bprog.text(now)
+            if long and kind != "batch_end":
+                self._batch_win.status.configure(text=long)
 
     def _batch_follow(self, states):
         if self.pair_var.get() and all(os.path.exists(states.get(k, ""))

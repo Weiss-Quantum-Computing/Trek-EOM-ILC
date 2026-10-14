@@ -154,8 +154,10 @@ DEFAULT_LOOP = dict(max_iterations=20, min_iterations=8, stop_rms_v=0.8,
 # resolves it as well. None = repeats, i.e. off.
 # Rough bench timing for the plan's estimate only; nothing is derived from it.
 # ilc_bench.capture_all: 64 HRES singles on two channels ~17 s at the 3.7 Hz trigger.
-DEFAULT_TIMING = dict(trigger_hz=3.7, read_s_per_channel=0.02, upload_s=2.5,
-                      campaign_overhead_s=25.0)
+# read_s_per_channel 0.12: measured 13 Oct 2026, 36 s per 64-shot iteration at 3.7 Hz
+# with two channel reads (0.02 stood here and made every estimate low)
+DEFAULT_TIMING = dict(trigger_hz=3.7, read_s_per_channel=0.12, upload_s=2.5,
+                      campaign_overhead_s=25.0, scan_step_overhead_s=2.0, compare_s=10.0)
 DEFAULT_SETTINGS = {
     # The production inverse of the 25-26 Aug campaign (README: measured FRF,
     # taper 50-75 kHz). The September keepers (P92/S92) used other rungs --
@@ -1851,6 +1853,33 @@ def estimate(plan, n_points, ncamp_channels=2):
     return tm["campaign_overhead_s"] + per_it * (lp["max_iterations"] + 1), per_it
 
 
+def optical_estimate(plan, s, per_it, ncamp_channels=2):
+    """Seconds an optical stage with settings `s` takes, from the plan's timing:
+    the scans (each step: the shots at the trigger rate, every channel read per
+    shot, a mount move and the settle), the comparisons and the learning
+    iterations. Returns (seconds, scans, learn iterations)."""
+    if not s:
+        return 0.0, 0, 0
+    tm, sc = plan["timing"], s["scan"]
+    try:
+        a, b, step = (float(x) for x in str(sc["angles"]).split(":"))
+        n_ang = int((b - a) // step) + 1
+    except (ValueError, KeyError):
+        n_ang = 16
+    steps = n_ang + (2 if sc.get("hold_null", True) else 0) + n_ang // max(1, int(sc.get("ref_every", 9)))
+    shots = int(sc["shots"])
+    step_s = (shots * (1.0 / tm["trigger_hz"] + tm["read_s_per_channel"] * (ncamp_channels + 2))
+              + float(sc.get("settle_s", 1.0)) + tm.get("scan_step_overhead_s", 2.0))
+    passes = len(s["gains"])
+    if s.get("attribution", "joint") == "separate":
+        scans = (1 if s.get("joint_before", True) else 0) + 2 + (passes if s["verify"] else 0)
+    else:
+        scans = 1 + (passes if s["verify"] else 0)
+    learn = passes * int(s["iterations"])
+    total = scans * (steps * step_s + tm.get("compare_s", 10.0)) + learn * per_it
+    return total, scans, learn
+
+
 def plan_rows(plan):
     """One row per campaign: everything checkable without instruments (targets,
     grids, settings, first drives against the limits, names) plus the time
@@ -2037,7 +2066,18 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
             if opts.redo or manifest["campaigns"].get(c["stem"], {}).get("status") != "done"]
     say(f"\n=== batch {plan.get('name', '')} started {datetime.datetime.now():%Y-%m-%d %H:%M:%S}"
         + (f" (SIMULATED, files in {plan['_run_dir']})" if opts.simulate else ""))
-    emit("batch", todo=todo, n=len(plan["campaigns"]), run_dir=plan["_run_dir"], simulated=bool(opts.simulate))
+    # what each campaign should take, for the window's progress and time left
+    est = {}
+    for camp in plan["campaigns"]:
+        e_s, per_it = estimate(plan, 0, len(camp.get("channels", ["X1", "X2"])))
+        try:
+            o_s, scans, learn = optical_estimate(plan, optical_settings(plan, camp), per_it)
+        except BatchError:
+            o_s, scans, learn = 0.0, 0, 0
+        est[camp["stem"]] = dict(electrical_s=e_s, per_it_s=per_it, optical_s=o_s, scans=scans,
+                                learn_it=learn, max_it=int(plan["loop"]["max_iterations"]))
+    emit("batch", todo=todo, n=len(plan["campaigns"]), run_dir=plan["_run_dir"], simulated=bool(opts.simulate),
+         plan_est=est, started=time.time())
     awg, scope = bench if bench is not None else open_bench(plan, opts.simulate, say)
     try:
         for i, camp in enumerate(plan["campaigns"]):

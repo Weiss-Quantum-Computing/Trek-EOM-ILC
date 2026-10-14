@@ -624,11 +624,16 @@ def main():
             return single0(wait_s=wait_s, **k)
         ilc_batch.read_waveform = flaky
         scope16.single = flaky_single
-        msgs = []
+        msgs, events16 = [], []
         try:
-            man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=(awg16, scope16))
+            man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=(awg16, scope16),
+                                      on_event=lambda k, i: events16.append((k, i)))
         finally:
             ilc_batch.read_waveform = read0
+        b16 = next(i for k, i in events16 if k == "batch")
+        check("S25" in b16.get("plan_est", {}) and b16["plan_est"]["S25"]["max_it"] == 2
+              and b16["plan_est"]["S25"]["per_it_s"] > 0 and b16["plan_est"]["S25"]["optical_s"] == 0
+              and b16.get("started"), "the batch event carries each campaign's time estimate and the start time")
         c = man["campaigns"]["S25"]
         check(c["status"] == "done" and any("shot DROPPED" in m for m in msgs)
               and any("5 of 6 shots kept (1 dropped)" in m for m in msgs),
@@ -645,6 +650,52 @@ def main():
         c = man["campaigns"]["S25"]
         check(c["status"] == "refused" and "only 0 of 6 shots were read" in c.get("error", ""),
               f"reads that keep failing refuse the campaign ({c.get('error', '')[:60]})")
+
+        print("[17] the progress tracker: fraction, elapsed and time left from synthetic events")
+        from eomilc import progress as progmod
+        bp = progmod.BatchProgress()
+        est = {"A": dict(electrical_s=600.0, per_it_s=30.0, optical_s=900.0, scans=3, learn_it=10, max_it=19),
+               "B": dict(electrical_s=600.0, per_it_s=30.0, optical_s=0.0, scans=0, learn_it=0, max_it=19)}
+        t = 1000.0
+        bp.event("batch", dict(todo=["A", "B"], n=2, plan_est=est, started=t), t)
+        check(bp.text(t) == "" and bp.fraction() == 0.0, "nothing to say before the first campaign")
+        bp.event("campaign", dict(stem="A", index=0, n=2), t)
+        s0 = bp.text(t)
+        check(s0.startswith("A 1/2 | starting") and "batch ~" in s0 and "this campaign ~25 min left" in s0, s0)
+        for it in range(6):
+            t += 36.0
+            bp.event("iteration", dict(stem="A", key="X1", it=it, rms_v=10.0 / (it + 1), stop=""), t)
+            bp.event("iteration", dict(stem="A", key="X2", it=it, rms_v=11.0 / (it + 1), stop=""), t)
+        s1, f1 = bp.text(t), bp.fraction()
+        check(s1.startswith("A 1/2 | i05 of <=19 (X1 1.67 V, X2 1.83 V)") and "elapsed 3 min" in s1
+              and abs(bp._per_it() - 36.0) < 1e-9 and 0.1 < f1 < 0.3, f"{s1} [{f1:.2f}]")
+        check(abs(bp.campaign_left_s() - (14 * 36.0 + 900.0)) < 1e-6,
+              f"left in A: 14 iterations at the measured 36 s plus the optical estimate ({bp.campaign_left_s():.0f} s)")
+        bp.event("iteration", dict(stem="A", key="X1", it=6, rms_v=0.5, stop="converged"), t + 36)
+        bp.event("iteration", dict(stem="A", key="X2", it=6, rms_v=0.5, stop="converged"), t + 36)
+        check(abs(bp.fraction() - 0.4) < 1e-9 and abs(bp.campaign_left_s() - 900.0) < 1e-6,
+              "both stopped: the electrical share is complete, the optical estimate remains")
+        t += 40
+        bp.event("optical", dict(stem="A", step="scan", scan="A_opt1_before", **{"pass": 1}), t)
+        s2 = bp.text(t)
+        check("optical pass 1: scan A_opt1_before (1/3)" in s2, s2)
+        t += 200
+        bp.event("optical", dict(stem="A", step="compare", scan="A_opt1_before", **{"pass": 1}), t)
+        check(bp.optical["scans_done"] == 1 and abs(bp._t_scan() - 200.0) < 1e-9 and 0.4 < bp.fraction() < 1.0,
+              f"a scan's duration is measured (200 s) and counted ({bp.fraction():.2f})")
+        check(abs(bp.campaign_left_s() - (2 * 200.0 + 10 * 36.0)) < 1e-6,
+              f"left: two scans at the measured 200 s plus 10 learning iterations ({bp.campaign_left_s():.0f} s)")
+        t += 10
+        bp.event("optical", dict(stem="A", step="end", status="done"), t)
+        bp.event("campaign_end", dict(stem="A", entry=dict(status="done", minutes=20.0)), t)
+        bp.event("campaign", dict(stem="B", index=1, n=2), t)
+        scale = 1200.0 / 1500.0
+        check(abs(bp.batch_left_s() - bp.campaign_left_s()) < 1e-6 and abs(bp.campaign_left_s() - 20 * 30.0) < 1e-6
+              and bp.fraction() == 1.0, "B: the plan's per-iteration estimate until measured; A counted complete")
+        bp.event("batch_end", {}, t + 5)
+        check(bp.fraction() == 2.0 and bp.text(t + 5).startswith("batch ended after"), bp.text(t + 5))
+        check(progmod.BatchProgress.hms(3700) == "1:01 h" and progmod.BatchProgress.hms(90) == "1 min"
+              and progmod.BatchProgress.hms(42) == "42 s", "hms")
 
         print("[15] the loader cuts long stems to an AWG name and refuses two campaigns under one")
         path = os.path.join(tmp, "plan15.json")
