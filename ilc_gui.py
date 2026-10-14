@@ -6669,7 +6669,12 @@ class App:
         self.optsplit_var = sv("split", "0.5")
         self.optgain_var = sv("gain", "0.7")
         self.optiters_var = sv("iterations", "5")
-        self.optpoints_var = sv("points", "20000")
+        self.optpoints_var = sv("points", "")
+        if self.optpoints_var.get().strip() == "20000":
+            # the default before 14 Oct 2026, remembered in older configs: blank
+            # means the readout follows the sample spacing (2 us), which is
+            # what the scans want whatever the record length
+            self.optpoints_var.set("")
         self.optsample_var = sv("sample_us", "2.0")     # used when points is blank
         self.optref_var = sv("ref_every", "9")
         self.optsettle_var = sv("settle_s", "1.0")
