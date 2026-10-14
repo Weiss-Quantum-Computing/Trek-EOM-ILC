@@ -820,6 +820,8 @@ class BatchWindow:
         self.tree.pack(side="left", fill="both", expand=True)
         ysb.pack(side="left", fill="y")
         self.tree.bind("<Double-1>", lambda ev: self.open_selected())
+        # Esc clears the selection, so Preview draws the whole plan again
+        self.tree.bind("<Escape>", lambda ev: self.tree.selection_set(()))
 
         r = ttk.Frame(top)
         r.pack(fill="x")
@@ -840,6 +842,11 @@ class BatchWindow:
             b = ttk.Button(r, text=text, command=lambda m=mode: app.do_batch_run(m))
             b.pack(side="left", padx=(0, 4))
             self.btns.append(b)
+        # Preview: every campaign's targets on the Batch plot tab, or the
+        # selected campaign alone with its first drive (App.do_batch_preview)
+        b = ttk.Button(r, text="Preview", command=app.do_batch_preview)
+        b.pack(side="left", padx=(0, 4))
+        self.btns.append(b)
         self.stop_btn = ttk.Button(r, text="Stop", command=app.stop_evt.set)
         self.stop_btn.pack(side="left")
         self.status = ttk.Label(r, text="", font=MONO)
@@ -850,7 +857,10 @@ class BatchWindow:
             "Set AMP/OFST/load/burst once (Auto-set); the batch only checks them. "
             "Outputs go ON after one confirmation, OFF between campaigns.\n"
             "Double-click a campaign to load its state (the followed channel) "
-            "in the panel. Simulate writes to run/sim, never to run.")
+            "in the panel. Simulate writes to run/sim, never to run.\n"
+            "Preview draws every campaign's targets on the Batch plot tab; with "
+            "a campaign selected, that one alone with the first drive it plays "
+            "(Esc in the table clears the selection).")
                   ).pack(fill="x")
         self.set_busy(app.busy)
         self.load()
@@ -1795,6 +1805,13 @@ class App:
                                                          tab="Optical", view="correction")
         self.fig_optva, (self.ax_optva,) = self._tab("Optical before / after", 1,
                                                      tab="Optical", view="before / after")
+        # Batch: the Batch window's Preview -- a plan's targets before it runs
+        # (one panel per campaign), or one campaign with its first drive; the
+        # axes are rebuilt on every preview (_batch_preview_show)
+        self.fig_batch, (_ax,) = self._tab("Batch", 1)
+        _ax.set_axis_off()
+        _ax.text(0.5, 0.5, "Batch window -> Preview draws a plan's targets here",
+                 transform=_ax.transAxes, ha="center", va="center", color="#999999")
 
         # Home on any TIME-domain figure homes them all: the nav stacks of
         # panes that were only ever synced programmatically are empty, so
@@ -6653,6 +6670,7 @@ class App:
         self.optgain_var = sv("gain", "0.7")
         self.optiters_var = sv("iterations", "5")
         self.optpoints_var = sv("points", "20000")
+        self.optsample_var = sv("sample_us", "2.0")     # used when points is blank
         self.optref_var = sv("ref_every", "9")
         self.optsettle_var = sv("settle_s", "1.0")
         self.optpreset_var = sv("preset", "")
@@ -6720,7 +6738,7 @@ class App:
         r = ttk.Frame(parent)
         r.pack(fill="x", pady=(4, 0))
         ttk.Button(r, text="Settings...", command=self.do_opt_settings).pack(side="left")
-        ttk.Label(r, text="points, reference returns, hold-null angles, settle, "
+        ttk.Label(r, text="points / sample us, reference returns, hold-null angles, settle, "
                           "preset, figures", foreground="#666666").pack(
             side="left", padx=(6, 0))
 
@@ -6729,9 +6747,19 @@ class App:
         fr = self._dialog("_opt_win", "Optical settings")
         if fr is None:
             return
+        # points per shot and the sample spacing share a row: a blank points
+        # field reads the screen out at `sample us` (optical.scan computes it)
+        r = ttk.Frame(fr)
+        r.pack(fill="x", pady=1)
+        ttk.Label(r, text="points per shot", width=15).pack(side="left")
+        ttk.Entry(r, textvariable=self.optpoints_var, width=7).pack(side="left", padx=(2, 6))
+        ttk.Label(r, text="sample us").pack(side="left")
+        ttk.Entry(r, textvariable=self.optsample_var, width=5).pack(side="left", padx=(2, 6))
+        ttk.Label(fr, text="scope readout per shot (20000, the polarimeter's); points "
+                           "blank = the screen span / sample spacing (2 us matches the "
+                           "ILC grid)", foreground="#666666", wraplength=430,
+                  justify="left").pack(fill="x", padx=(4, 0))
         for lab, var, w, note in (
-                ("points per shot", self.optpoints_var, 7,
-                 "scope readout per shot (20000, the polarimeter's)"),
                 ("reference every", self.optref_var, 4,
                  "a return to the reference angle every N steps"),
                 ("settle s", self.optsettle_var, 5,
@@ -6958,12 +6986,19 @@ class App:
         except ValueError:
             raise RuntimeError(f"angles {angles!r}: start:stop:step in degrees "
                                f"(0:359:22.5), or a list (0, 45, 90)")
-        f = self._floats(shots=self.optshots_var, points=self.optpoints_var,
+        f = self._floats(shots=self.optshots_var, sample_us=self.optsample_var,
                          ref_every=self.optref_var, settle_s=self.optsettle_var)
-        if f["shots"] < 1 or f["points"] < 1000 or f["ref_every"] < 1 or f["settle_s"] < 0:
-            raise RuntimeError("shots >= 1, points >= 1000, reference every >= 1, "
-                               "settle >= 0")
-        return dict(angles=angles, shots=int(f["shots"]), points=int(f["points"]),
+        # points blank: optical.scan computes them from the screen span and
+        # the sample spacing
+        pts = self.optpoints_var.get().strip()
+        if pts:
+            f.update(self._floats(points=self.optpoints_var))
+        if (f["shots"] < 1 or (pts and f["points"] < 1000) or f["ref_every"] < 1
+                or f["settle_s"] < 0 or f["sample_us"] <= 0):
+            raise RuntimeError("shots >= 1, points >= 1000 (or blank), sample us > 0, "
+                               "reference every >= 1, settle >= 0")
+        return dict(angles=angles, shots=int(f["shots"]),
+                    points=int(f["points"]) if pts else None, sample_us=f["sample_us"],
                     ref_every=int(f["ref_every"]), settle_s=f["settle_s"],
                     hold_null=bool(self.optnull_var.get()),
                     preset=self.optpreset_var.get().strip())
@@ -7178,7 +7213,7 @@ class App:
                 return optical.scan(
                     dev, outdir, name, ss["X1"].t, log=print, progress=progress,
                     cancelled=self.stop_evt.is_set, angles=kw["angles"], shots=kw["shots"],
-                    points=kw["points"], ref_every=kw["ref_every"],
+                    points=kw["points"], sample_us=kw["sample_us"], ref_every=kw["ref_every"],
                     hold_null=kw["hold_null"], ends_deg=ends, settle_s=kw["settle_s"],
                     preset=kw["preset"] or None, extra={"solo": solo},
                     states={"x1": ss["X1"].state_path, "x2": ss["X2"].state_path})
@@ -7772,6 +7807,253 @@ class App:
             plan, opts, log=print, stop=self.stop_evt, bench=bench,
             on_event=lambda k, i: self.msgs.put(
                 ("call", lambda: self._batch_event(k, i))))
+
+    # -- batch: Preview (what the plan will fit to, before it runs) ---------
+    def do_batch_preview(self):
+        """The Batch window's Preview: the plan loaded as Check plan loads it
+        (echo records built), then every campaign's targets on the Batch
+        tab -- or, with a campaign selected in the table, that campaign
+        alone with the first drive it will play and its limit check."""
+        if self.busy:
+            return
+        w = self._batch_win
+        path = self.batchplan_var.get().strip()
+        if not path or not os.path.exists(path):
+            return messagebox.showerror("Batch", "pick a plan file first "
+                                        "(or make one with New plan...)",
+                                        parent=w.win)
+        try:
+            over = w.loop_overrides()
+        except ValueError as e:
+            return messagebox.showerror("Batch", str(e), parent=w.win)
+        sel = w.tree.selection()
+        stem = sel[0] if sel else None
+
+        def work():
+            plan = ilc_batch.load_plan(path, cfg=self.cfg)
+            plan["loop"].update(over)
+            camps = {c["stem"]: c for c in plan["campaigns"]}
+            if stem is not None and stem not in camps:
+                print(f"preview: {stem} is not in the plan any more (reloaded "
+                      f"from disk); previewing the whole plan")
+            if stem in camps:
+                d = self._batch_preview_one(plan, camps[stem])
+            else:
+                d = self._batch_preview_all(plan)
+            self.msgs.put(("call", lambda: self._batch_preview_show(d)))
+        self.run_worker(work, "previewing the plan..." if stem is None
+                        else f"previewing {stem}...")
+
+    @staticmethod
+    def _batch_flags(plan, camp):
+        """' optical' / ' echo of <source>' for a preview panel's title."""
+        s = ""
+        try:
+            if ilc_batch.optical_settings(plan, camp) is not None:
+                s += " optical"
+        except ilc_batch.BatchError:
+            s += " optical (refused)"
+        e = camp.get("_echo") or {}
+        if e.get("source") and not e.get("error"):
+            s += f" echo of {e['source']}"
+        return s
+
+    @staticmethod
+    def _batch_record(stem, n, period_ms):
+        if not n:
+            return stem
+        return (f"{stem}  {n} pts  {period_ms:.3f} ms  "
+                f"FRQ {1e3 / period_ms:.3f} Hz")
+
+    def _batch_preview_all(self, plan):
+        """Worker side: one panel's worth per campaign (targets in kV at the
+        EOM against ms, or the row's error), the models and the total."""
+        rows = ilc_batch.plan_rows(plan)
+        lp = plan["loop"]
+        panels, bad = [], 0
+        for camp, r in zip(plan["campaigns"], rows):
+            flags = self._batch_flags(plan, camp)
+            bad += (not r["ok"]) or "refused" in flags
+            p = dict(stem=r["stem"], error=r["error"], traces={},
+                     title=self._batch_record(r["stem"], r["n"], r["period_ms"]) + flags)
+            if r["n"]:
+                for key in camp.get("channels", list(PAIR_KEYS)):
+                    tp = os.path.join(plan["_targets_dir"], f"target_{camp['stem']}{key}.csv")
+                    t, v = run_ilc.load_target(tp, 1.0)       # voltage_V: V at the EOM
+                    p["traces"][key] = (t * 1e3, v / 1e3)
+            if r["error"]:
+                print(f"  {r['stem']}: {r['error']}")
+            panels.append(p)
+        models = []
+        for k in PAIR_KEYS:
+            try:
+                models.append(ilc_batch.model_line(plan, k))
+            except ilc_batch.BatchError as e:
+                models.append(f"model {k}: REFUSED: {e}")
+        total = (f"total ~{sum(r['est_s'] for r in rows) / 3600:.1f} h at "
+                 f"{lp['max_iterations']} iterations each (early stops shorten it; "
+                 f"an optical stage adds its scans); {bad} campaign(s) with problems")
+        print(f"preview {plan.get('name', '')}: {len(panels)} campaigns")
+        for line in models + [total]:
+            print("  " + line)
+        return dict(kind="all", name=plan.get("name", ""), panels=panels,
+                    models=models, total=total)
+
+    def _batch_preview_one(self, plan, camp):
+        """Worker side: one campaign -- both targets, the ramp marks (the
+        card split's transports and common flat top), the first drive each
+        channel plays and its limit check."""
+        from eomilc import echo
+        keys = camp.get("channels", list(PAIR_KEYS))
+        d = dict(kind="one", stem=camp["stem"], runs={}, marks=[], error="",
+                 flags=self._batch_flags(plan, camp), title=camp["stem"])
+        try:
+            runs = [ilc_batch.build_run(plan, camp, k, log=lambda s: None) for k in keys]
+        except (ilc_batch.BatchError, ValueError, OSError) as e:
+            d["error"] = str(e)
+            d["title"] += d["flags"]
+            print(f"preview {camp['stem']}: {e}")
+            return d
+        n = len(runs[0].t)
+        d["title"] = self._batch_record(camp["stem"], n, n * runs[0].loop.dt * 1e3) + d["flags"]
+        for cr in runs:
+            rep = cr.loop.check(cr.u)
+            lim, sc = cr.loop.limits, cr.channel.mon_scale
+            slew = float(np.abs(np.gradient(cr.loop.target * sc, cr.loop.dt)).max())
+            d["runs"][cr.key] = dict(
+                tms=cr.t * 1e3, target_kv=cr.loop.target * sc / 1e3, u=np.asarray(cr.u, float),
+                it=cr.iteration, ok=bool(rep), slew_v_us=slew / 1e6,
+                i_ma=lim.load_capacitance * slew * 1e3,
+                v90_kv=getattr(cr.channel, "v90_hv", 0.0) / 1e3,
+                corrected=cr.corr_total is not None)
+            print(f"preview {cr.stem} drive i{cr.iteration:02d}: {rep}")
+        try:
+            sfc = echo._card()
+            t_us = runs[0].t * 1e6
+            vs = [cr.loop.target * cr.channel.mon_scale for cr in runs]
+            if all(len(v) == len(t_us) for v in vs):
+                for i0, i1 in sfc.find_transports(vs, float(np.median(np.diff(t_us)))):
+                    tops = [sfc.flat_top(t_us[i0:i1 + 1], v[i0:i1 + 1]) for v in vs]
+                    a, b = max(x[0] for x in tops), min(x[1] for x in tops)
+                    d["marks"].append(dict(t0=t_us[i0] / 1e3, t1=t_us[i1] / 1e3,
+                                           a=a / 1e3, b=b / 1e3, common=a <= b))
+        except Exception as e:              # the marks are a guide, not a check
+            print(f"preview {camp['stem']}: no ramp marks ({e})")
+        return d
+
+    def _batch_preview_show(self, d):
+        """Main thread: draw a preview on the Batch tab and bring it up."""
+        fig = self.fig_batch
+        fig.clear()
+        if d["kind"] == "all":
+            self._batch_preview_grid(fig, d)
+            n = len(d["panels"])
+            txt = f"previewed {n} campaign{'' if n == 1 else 's'}"
+        else:
+            self._batch_preview_single(fig, d)
+            txt = f"previewed {d['stem']}"
+        fig._batch_preview = d
+        self._show_fig(fig)
+        self._draw(fig)
+        w = self._batch_win
+        if w is not None and w.win.winfo_exists():
+            w.status.configure(text=txt)
+
+    BATCH_ERR = "#c62828"
+
+    def _batch_preview_grid(self, fig, d):
+        import textwrap
+        panels = d["panels"]
+        n = max(len(panels), 1)
+        ncol = min(3, n)
+        nrow = -(-n // ncol)
+        axs = fig.subplots(nrow, ncol, squeeze=False).ravel()
+        for ax in axs[len(panels):]:
+            fig.delaxes(ax)
+        small = nrow > 3
+        fs_t, fs_k = (6.0, 5.5) if small else (8.0, 7.0)
+        legend_done = False
+        for ax, p in zip(axs, panels):
+            ax.set_title(p["title"], fontsize=fs_t, loc="left")
+            ax.tick_params(labelsize=fs_k, pad=1)
+            for key, (tms, kv) in p["traces"].items():
+                ax.plot(tms, kv, color=CH_DEFAULTS[PAIR_CHANNEL[key]]["colour"],
+                        lw=1.3 if key == "X1" else 0.8, label=key)
+            if p["traces"]:
+                tms = next(iter(p["traces"].values()))[0]
+                ax.set_xlim(tms[0], tms[-1])
+                ax.axhline(0, color=TARGET_COLOUR, lw=0.4)
+                ax.grid(True, alpha=0.3)
+                if not legend_done:
+                    ax.legend(fontsize=fs_k, loc="upper right", handlelength=1.2)
+                    legend_done = True
+            else:
+                ax.set_xticks([])
+                ax.set_yticks([])
+            if p["error"]:
+                ax.text(0.5, 0.06 if p["traces"] else 0.5,
+                        textwrap.fill(p["error"], 55 if ncol == 3 else 90),
+                        transform=ax.transAxes, ha="center",
+                        va="bottom" if p["traces"] else "center",
+                        color=self.BATCH_ERR, fontsize=fs_k)
+        fig.supylabel("target (kV at the EOM)", fontsize=8)
+        fig.supxlabel("time (ms)\n" + "\n".join(d["models"] + [d["total"]]),
+                      x=0.01, ha="left", fontsize=6.5, color="#444444")
+
+    def _batch_preview_single(self, fig, d):
+        import textwrap
+        ax_t, ax_u = fig.subplots(2, 1, sharex=True)
+        ax_t.set_title(d["title"], fontsize=9, loc="left")
+        if d["error"]:
+            fig.delaxes(ax_u)
+            ax_t.set_xticks([])
+            ax_t.set_yticks([])
+            ax_t.text(0.5, 0.5, textwrap.fill(d["error"], 100), transform=ax_t.transAxes,
+                      ha="center", va="center", color=self.BATCH_ERR, fontsize=8)
+            return
+        for key, r in d["runs"].items():
+            col = CH_DEFAULTS[PAIR_CHANNEL[key]]["colour"]
+            ax_t.plot(r["tms"], r["target_kv"], color=col, lw=1.6 if key == "X1" else 1.0,
+                      label=f"{key} target" + (" (with learned corrections)"
+                                               if r["corrected"] else ""))
+            if r["v90_kv"]:
+                ax_t.axhline(r["v90_kv"], color=col, lw=0.6, ls=":",
+                             label=f"{key} V90 {r['v90_kv'] * 1e3:.1f} V")
+            ax_u.plot(r["tms"], r["u"], color=col, lw=1.4 if key == "X1" else 1.0,
+                      label=f"{key} drive i{r['it']:02d}: {'PASS' if r['ok'] else 'FAIL'}, "
+                            f"peak slew {r['slew_v_us']:.2f} V/us, "
+                            f"peak current {r['i_ma']:.2f} mA")
+        tr = ax_t.get_xaxis_transform()
+        for m in d["marks"]:
+            xs = (m["t0"], m["a"], m["b"], m["t1"]) if m["common"] else (m["t0"], m["t1"])
+            for ax in (ax_t, ax_u):
+                for x in xs:
+                    ax.axvline(x, color="#777777", lw=0.5, zorder=1)
+            if m["common"]:
+                for lab, x0, x1 in (("rise", m["t0"], m["a"]), ("hold", m["a"], m["b"]),
+                                    ("fall", m["b"], m["t1"])):
+                    ax_t.annotate(f"{lab} {x1 - x0:.3f} ms", ((x0 + x1) / 2, 0.07),
+                                  xycoords=tr, ha="center", va="bottom", fontsize=6.5,
+                                  color="#555555")
+            else:
+                ax_t.annotate("no common flat top", ((m["t0"] + m["t1"]) / 2, 0.07),
+                              xycoords=tr, ha="center", va="bottom", fontsize=6.5,
+                              color="#555555")
+        for ax in (ax_t, ax_u):
+            ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc="best")
+            ax.set_xlabel("time (ms)")
+            ax.tick_params(labelbottom=True)
+        tms = next(iter(d["runs"].values()))["tms"]
+        ax_t.set_xlim(tms[0], tms[-1])
+        ax_t.set_ylim(top=ax_t.get_ylim()[1] * 1.12)          # room for the note
+        ax_t.set_ylabel("target (kV at the EOM)")
+        ax_u.set_ylabel("first drive (AWG V)")
+        v90 = " / ".join(f"{r['v90_kv'] * 1e3:.0f}" for r in d["runs"].values() if r["v90_kv"])
+        self._plot_note(ax_t, "look for: both channels on one grid, the idle at 0 at both "
+                              "ends, the peaks at V90" + (f" ({v90} V)" if v90 else "")
+                        + ", no edge faster than 0.3 ms")
 
     def _batch_event(self, kind, info):
         """Main thread: a batch event, for the window (if open), the progress

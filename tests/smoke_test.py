@@ -2014,7 +2014,8 @@ assert app._measurement_stats(_late[-1]["y"] + _rng.normal(0, 1e-3, (6, len(_s.t
 # every view draws
 app.itersel_var.set("all"); app._redraw_iterations(); root.update()
 assert [app.nb.tab(t, "text") for t in app.nb.tabs()] == \
-    ["Waveforms", "Error", "Convergence", "Drive", "Diagnostics", "Table", "Inputs", "Optical"]
+    ["Waveforms", "Error", "Convergence", "Drive", "Diagnostics", "Table", "Inputs", "Optical",
+     "Batch"]
 assert len(app.ax_fold.lines) > 10 and len(app.ax_foldamp.lines) >= 1
 assert len(app.ax_bands.lines) >= 8                       # 4 bands x (rms + floor)
 assert len(app.ax_lam.lines) >= 2 and any(l.get_ydata().size == 1 for l in app.ax_lam.lines)
@@ -3120,6 +3121,141 @@ print("[61] PD record: Move refused for a word and while COM3 is held (red, mess
       "+ sidecars (16 shots, CH1, analyzer +45.0) with no extra shot; Load state recalls both "
       "into X1 and X2; the Diagnostics PD view draws two iterations with the monitor rms in the "
       "legend; a session without PD files shows the note")
+
+# [62] Batch Preview (14 Oct 2026): the Batch window's Preview loads the plan
+# as Check plan does and draws every campaign's targets (kV at the EOM against
+# ms, X1 and X2 in the channel colours) on the Batch plot tab, one panel per
+# campaign, a campaign whose row has an error as an empty panel with the error
+# in red, the models and the total under the grid. With a campaign selected,
+# that campaign alone: the targets with the ramp marks above, the first drive
+# with each channel's limit verdict below. The Optical settings dialog gains
+# sample us; a blank points field means "from the sample spacing". A fresh
+# pair target as block 61's; dialogs stubbed and put back; stands alone.
+import json as _json62
+import time as _time62
+_mb62 = ilc_gui.messagebox
+_saved62 = (_mb62.showerror, _mb62.showinfo)
+_asked62 = []
+_mb62.showerror = lambda title, msg, **k: _asked62.append(("error", title, msg))
+_mb62.showinfo = lambda title, msg, **k: _asked62.append(("info", title, msg))
+
+
+def _pump62(limit_s=300):
+    _t0 = _time62.time()
+    root.update()
+    while app.busy and _time62.time() - _t0 < limit_s:
+        root.update()
+        _time62.sleep(0.02)
+    for _ in range(10):
+        root.update()
+        _time62.sleep(0.01)
+    assert not app.busy, "the worker did not finish"
+
+
+_bw62 = None
+try:
+    _tus = np.arange(5501) * 2.0
+    _ramp = np.clip(np.minimum((_tus - 500) / 3000, (10500 - _tus) / 3000), 0, 1)
+    _v62 = 5000 * 0.5 * (1 - np.cos(np.pi * _ramp))
+    for _k in ("X1", "X2"):
+        np.savetxt(os.path.join(SCRATCH, f"target_PAIR{_k}.csv"), np.c_[_tus, _v62],
+                   delimiter=",", header="time_us,voltage_V", comments="", fmt="%.6g")
+    # two campaigns: the pair, and a stem with no target (its row carries the error);
+    # a run folder of its own, so no state of an earlier block is resumed
+    _plan62 = os.path.join(SCRATCH, "batch_preview62.json")
+    with open(_plan62, "w") as _f:
+        _json62.dump({"name": "prev62", "targets_dir": ".",
+                      "run_dir": os.path.join(SCRATCH, "run62"),
+                      "campaigns": [{"stem": "PAIR"}, {"stem": "NOPE"}]}, _f)
+    app.batchplan_var.set(_plan62)
+    app.do_batch()
+    _bw62 = app._batch_win
+    _bw62.win.withdraw()
+    _bw62.load()
+    assert _bw62.tree.get_children() == ("PAIR", "NOPE"), _bw62.tree.get_children()
+    _pv62 = [b for b in _bw62.btns if b.cget("text") == "Preview"]
+    assert len(_pv62) == 1                       # in the window's busy set
+    assert "Batch" in [app.nb.tab(t, "text") for t in app.nb.tabs()]
+
+    # nothing selected: the whole plan, one panel per campaign
+    _bw62.tree.selection_set(())
+    _pv62[0].invoke()
+    _pump62()
+    _fig62 = app.fig_batch
+    assert _fig62._tab == "Batch" and _fig62._view is None and not _fig62._stale
+    assert app.nb.tab(app.nb.select(), "text") == "Batch"
+    assert len(_fig62.axes) == 2, len(_fig62.axes)
+    _a62, _b62 = _fig62.axes
+    _ln62 = {l.get_label(): l for l in _a62.lines if l.get_label() in ("X1", "X2")}
+    assert sorted(_ln62) == ["X1", "X2"]
+    assert _ln62["X1"].get_color() == ilc_gui.CH_DEFAULTS["EO1"]["colour"] and \
+        _ln62["X2"].get_color() == ilc_gui.CH_DEFAULTS["EO2"]["colour"]
+    assert abs(_ln62["X1"].get_ydata().max() - 5.0) < 1e-3          # kV at the EOM
+    assert abs(_ln62["X1"].get_xdata()[-1] - 11.0) < 1e-6           # ms
+    assert _a62.get_title(loc="left") == "PAIR  5501 pts  11.002 ms  FRQ 90.893 Hz", \
+        _a62.get_title(loc="left")
+    assert not _b62.lines and _b62.get_title(loc="left") == "NOPE"
+    _red62 = [t for t in _b62.texts if t.get_color() == app.BATCH_ERR]
+    assert len(_red62) == 1 and "target_NOPEX1.csv" in _red62[0].get_text().replace("\n", " ")
+    _sx62 = _fig62._supxlabel.get_text()
+    assert "model X1:" in _sx62 and "model X2:" in _sx62 and "total ~" in _sx62 and \
+        "1 campaign(s) with problems" in _sx62, _sx62
+    assert _bw62.status.cget("text") == "previewed 2 campaigns", _bw62.status.cget("text")
+
+    # the pair selected: that campaign alone, targets with the marks, the first drive
+    _bw62.tree.selection_set("PAIR")
+    _pv62[0].invoke()
+    _pump62()
+    assert len(_fig62.axes) == 2 and not _fig62._stale
+    _t62, _u62 = _fig62.axes
+    assert _t62.get_title(loc="left").startswith("PAIR  5501 pts  11.002 ms")
+    _leg62 = [t.get_text() for t in _u62.get_legend().get_texts()]
+    assert len(_leg62) == 2 and all("PASS" in t and "V/us" in t and "mA" in t for t in _leg62), _leg62
+    assert _leg62[0].startswith("X1 drive i00") and _leg62[1].startswith("X2 drive i00")
+    _m62 = _fig62._batch_preview["marks"]
+    assert len(_m62) == 1 and _m62[0]["common"], _m62
+    _rise62, _hold62 = _m62[0]["a"] - _m62[0]["t0"], _m62[0]["b"] - _m62[0]["a"]
+    assert 2.5 < _rise62 < 3.05 and 4.0 < _hold62 < 5.0, (_rise62, _hold62)
+    assert sum(1 for t in _t62.texts if t.get_text().startswith(("rise ", "hold ", "fall "))) == 3
+    assert any("look for: both channels on one grid" in t.get_text() and "(5128 / 5137 V)" in t.get_text()
+               for t in _t62.texts)
+    assert np.allclose([l.get_ydata()[0] for l in _u62.lines if l.get_label().startswith("X")], 0.0,
+                       atol=0.02)                                      # the idle
+    assert _bw62.status.cget("text") == "previewed PAIR"
+    assert not [a for a in _asked62 if a[0] == "error"], _asked62
+
+    # Optical settings: sample us beside points; blank points -> None, from the spacing
+    assert app.optsample_var.get() == "2.0"
+    app.do_opt_settings()
+    root.update()
+
+    def _walk62(w):
+        yield w
+        for c in w.winfo_children():
+            yield from _walk62(c)
+    _ws62 = list(_walk62(app._opt_win))
+    _ents62 = [w for w in _ws62 if w.winfo_class() == "TEntry"
+               and w.cget("textvariable") == str(app.optsample_var)]
+    assert len(_ents62) == 1 and _ents62[0].get() == "2.0"
+    assert any(w.winfo_class() == "TLabel" and "points blank = the screen span / sample spacing"
+               in str(w.cget("text")) for w in _ws62)
+    _pts62 = app.optpoints_var.get()
+    app.optpoints_var.set("")
+    _kw62 = app._opt_scan_kw()
+    assert _kw62["points"] is None and _kw62["sample_us"] == 2.0, _kw62
+    app.optpoints_var.set("20000")
+    assert app._opt_scan_kw()["points"] == 20000
+    app.optpoints_var.set(_pts62)
+    app._opt_win.destroy()
+    root.update()
+finally:
+    (_mb62.showerror, _mb62.showinfo) = _saved62
+    if _bw62 is not None and app._batch_win is not None:
+        _bw62.close()
+print("[62] Batch Preview: 2 panels (PAIR X1 + X2 to 5.0 kV over 11.002 ms, NOPE empty "
+      "with its error in red), models and total under the grid, 'previewed 2 campaigns'; "
+      "PAIR selected: targets with rise/hold/fall marks over the first drives, both PASS "
+      "in the legend, 'previewed PAIR'; Optical settings: sample us 2.0, blank points -> None")
 
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
