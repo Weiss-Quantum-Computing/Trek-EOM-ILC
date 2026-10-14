@@ -597,6 +597,55 @@ def main():
         plan = ilc_batch.load_plan(path, cfg=bench_cfg)
         check("already there" in plan["_echo_notes"][0], "a second load finds the files unchanged")
 
+        print("[16] a bad scope read drops the shot, a missed trigger is re-armed; reads that keep failing refuse")
+        path = write_plan(tmp, ["S25"], name="t16")
+        raw = json.load(open(path))
+        raw["run_dir"] = os.path.join(tmp, "run16")
+        raw["loop"]["max_iterations"] = 2
+        raw["loop"]["min_iterations"] = 1
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        awg16, scope16 = bench(bench_cfg)
+        read0 = ilc_batch.read_waveform
+        calls = {"n": 0}
+
+        def flaky(scope, ch, points, tries=3):
+            calls["n"] += 1
+            if calls["n"] == 4:                       # the 2nd shot's first channel of the first capture
+                raise ValueError("invalid literal for int() with base 10: b''")
+            return read0(scope, ch, points, tries)
+        single0 = scope16.single
+        arms = {"n": 0}
+
+        def flaky_single(wait_s=10.0, **k):
+            arms["n"] += 1
+            if arms["n"] == 3:
+                return False                         # one missed trigger (arm 1 is the alignment check)
+            return single0(wait_s=wait_s, **k)
+        ilc_batch.read_waveform = flaky
+        scope16.single = flaky_single
+        msgs = []
+        try:
+            man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=(awg16, scope16))
+        finally:
+            ilc_batch.read_waveform = read0
+        c = man["campaigns"]["S25"]
+        check(c["status"] == "done" and any("shot DROPPED" in m for m in msgs)
+              and any("5 of 6 shots kept (1 dropped)" in m for m in msgs),
+              f"one bad read: the shot is dropped, the campaign goes on ({c['status']})")
+        check(any("re-armed (2/3)" in m for m in msgs), "one missed trigger: re-armed, not refused")
+        ilc_batch.read_waveform = lambda scope, ch, points, tries=3: (_ for _ in ()).throw(ValueError("b''"))
+        try:
+            raw["run_dir"] = os.path.join(tmp, "run16b")
+            json.dump(raw, open(path, "w"))
+            plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+            man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=bench(bench_cfg))
+        finally:
+            ilc_batch.read_waveform = read0
+        c = man["campaigns"]["S25"]
+        check(c["status"] == "refused" and "only 0 of 6 shots were read" in c.get("error", ""),
+              f"reads that keep failing refuse the campaign ({c.get('error', '')[:60]})")
+
         print("[15] the loader cuts long stems to an AWG name and refuses two campaigns under one")
         path = os.path.join(tmp, "plan15.json")
         json.dump({"name": "t15", "targets_dir": TARGETS, "run_dir": os.path.join(tmp, "run15"),

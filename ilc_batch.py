@@ -803,19 +803,36 @@ def capture_monitors(scope, runs, plan, log=print, stop=None, repeats=None):
     stacks = {cr.key: [] for cr in runs}
     if pd is not None:
         stacks["PD"] = []
+    dropped = 0
     try:
         for i in range(repeats):
             _stopped(stop)
             for c, off0, span in plan_d:
                 scope.put(f":CHANnel{c}:OFFSet", f"{off0 + span * ((i + 0.5) / repeats - 0.5):.6g}")
-            if scope.single(wait_s=lp["wait_s"]) is not True:
-                raise BatchError(f"no trigger within {lp['wait_s']:g} s on repeat {i+1}")
+            # a missed trigger (a burst hiccup) is re-armed twice before it ends
+            # the campaign; a read that fails three times drops THIS shot, not
+            # the campaign (14 Oct 2026: the 7-8 Oct overnight scans lost whole
+            # runs to a read the scope answered badly about once in a thousand)
+            for arm in range(3):
+                got = scope.single(wait_s=lp["wait_s"])
+                if got is True:
+                    break
+                if arm < 2:
+                    log(f"  no trigger within {lp['wait_s']:g} s on repeat {i+1}: re-armed ({arm + 2}/3)")
+            else:
+                raise BatchError(f"no trigger within {lp['wait_s']:g} s on repeat {i+1} (three arms)")
             shot = {}
-            for cr in runs:
-                pts = scopeio.scope_points_for(2.2 * len(cr.t))
-                shot[cr.key] = read_waveform(scope, cr.wiring["mon_ch"], pts)
-            if pd is not None:
-                shot["PD"] = read_waveform(scope, pd, scopeio.scope_points_for(2.2 * len(ref.t)))
+            try:
+                for cr in runs:
+                    pts = scopeio.scope_points_for(2.2 * len(cr.t))
+                    shot[cr.key] = read_waveform(scope, cr.wiring["mon_ch"], pts)
+                if pd is not None:
+                    shot["PD"] = read_waveform(scope, pd, scopeio.scope_points_for(2.2 * len(ref.t)))
+            except Exception as e:
+                dropped += 1
+                log(f"  repeat {i+1}: readout failed after 3 tries ({type(e).__name__}: {e}); shot DROPPED")
+                scope.run()
+                continue
             scope.run()
             for cr in runs:
                 ts, vs = shot[cr.key]
@@ -829,6 +846,12 @@ def capture_monitors(scope, runs, plan, log=print, stop=None, repeats=None):
                 scope.put(f":CHANnel{c}:OFFSet", f"{off0:.6g}")
             except Exception as e:
                 log(f"  could not restore CH{c} offset: {e}")
+    if dropped:
+        kept = repeats - dropped
+        log(f"  {kept} of {repeats} shots kept ({dropped} dropped)")
+        if kept < max(4, int(0.9 * repeats)):
+            raise BatchError(f"only {kept} of {repeats} shots were read: the scope is not answering reads "
+                             f"({dropped} dropped in one measurement)")
     from eomilc import ilc
     return {k: (ilc.averaged(v), np.asarray(v)) for k, v in stacks.items()}
 
