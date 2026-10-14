@@ -147,12 +147,12 @@ def main():
 
         print("[2c] end_ms: the record padded with idle to the whole echo, the card's files unchanged")
         tmp3 = os.path.join(tmp, "pad")
-        rp = echo.make([tgt("S47", "X1")], spacing_ms=16.667, out_dir=tmp3, log=quiet.append, end_ms=32.768)
-        check(rp["rec"]["n"] == 16384 and abs(rp["rec"]["end_ms"] - 32.768) < 1e-9 and rp["rec"]["tail_us"] == 200.0
-              and abs(rp["rec"]["pad_us"] - (32768 - 27482)) < 1e-6 and rp["ok"],
-              f"S47E2 padded to 32.768 ms: 16384 pts, tail 200 us kept, pad {rp['rec']['pad_us']:.0f} us, checks pass")
+        rp = echo.make([tgt("S47", "X1")], spacing_ms=16.667, out_dir=tmp3, log=quiet.append, end_ms=33.334)
+        check(rp["rec"]["n"] == 16667 and abs(rp["rec"]["end_ms"] - 33.334) < 1e-9 and rp["rec"]["tail_us"] == 200.0
+              and abs(rp["rec"]["pad_us"] - (33334 - 27482)) < 1e-6 and rp["ok"],
+              f"S47E2 padded to 33.334 ms (the whole echo): 16667 pts, tail 200 us kept, pad {rp['rec']['pad_us']:.0f} us, checks pass")
         mp = SFC.read_meta(rp["files"]["X1"])
-        check(mp.get("pad_us") == [5286.0] and mp.get("end_ms") == [32.768] and mp.get("tail_us") == [200.0],
+        check(mp.get("pad_us") == [5852.0] and mp.get("end_ms") == [33.334] and mp.get("tail_us") == [200.0],
               f"comments carry pad_us / end_ms / tail_us ({mp.get('pad_us')}, {mp.get('end_ms')})")
         check(abs(echo.pause_ms(rp["rec"]) - 5.856) < 1e-9, "the card pause is the design one, 5.856 ms, not the pad's")
         try:

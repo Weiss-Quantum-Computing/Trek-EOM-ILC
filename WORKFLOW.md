@@ -610,20 +610,26 @@ after a correction (the simulation shows it: −479 → −479 mdeg at the ramp
 top). A second solo pass at the same gain would therefore only repeat the
 first, and a file in the same slot replaces the last. So pass 1 measures each
 crystal alone and its files take the `optical` slot at gain 1 (each crystal's
-own error in full); pass 2 on applies the previous joint verification's files
-(split by `split`) in their own slot, `joint2`, `joint3`, …, ADDED beside the
-solo layer: the residual the joint run still shows, which includes anything
-that follows the total rotation rather than one crystal's voltage (an analyzer
-or extinction term, which the solo scans could only see on their own 90°).
+own error in full). The joint verification's files then say what the WHOLE
+correction should be (−E split by `split`), not what is left: pass 2 on applies,
+in its own slot `joint2`, `joint3`, …, the joint file minus each crystal's split
+share of what is already applied on both (`optical.joint_residual_files`:
+joint_i − split_i × k_i × Σ_j total_j / k_j, k_j = V90_j × 1000 / 90 V per degree).
+Where the joint error is just the sum of the crystals' own errors that layer is
+zero; where something follows the total rotation (an analyzer or extinction
+term, the simulated bench's rotator error) it carries the share the solo scans
+could not see, and the total comes to −E. Simply adding the joint file would
+add −E again every pass (the simulation showed it: light − target worse after
+each pass).
 Gains 1.0 / 1.0 are the staged plans' setting; the dry-run line ends `pass 1
 solo, later passes add the joint verification's residual`. Nothing of it has
 run on hardware.
 
 **The time after the ramp (14 Oct 2026).** The crystal's memory keeps the light
 rotated for tens of ms after a fall, and a spin echo's second leg starts in it,
-so the record is built long enough to hold that time (`"end_ms": 32.768` pads
-it with idle to 16384 points at 2 us, the generator's cap; the whole echo would
-be 33.333 ms), the comparison runs over the whole played record (rampol
+so the record is built long enough to hold that time (`"end_ms": 33.334` pads
+it with idle to the whole 2 x 16.667 ms echo, 16667 points at 2 us; the 4063B
+holds 8 Mpts per arb), the comparison runs over the whole played record (rampol
 `whole_record=True`: the correction is minus the low-passed light minus monitors
 everywhere the light was measured, not only where the target is above 0.5 deg,
 and nothing is faded where the target rests), and the gate keeps it over the
@@ -726,8 +732,8 @@ the init limit check (PASS/FAIL per channel).
 Two caps. **Stem:** the panel's pair mode appends `X1`/`X2`, so a stem is at
 most 5 characters -- `S47E2` is exactly 5; `ilc_batch` cuts longer ones to 5
 and refuses a collision (`SF130E2` would train as `SF130`), so shorten the
-`--suffix` instead. **Points:** the panel uploads at most `AWG_MAX_PTS` (16384,
-environment `BK4063B_MAX_PTS`); a 133 ms echo needs it raised, and the 4063B's
+`--suffix` instead. **Points:** the panel uploads at most `AWG_MAX_PTS` (8 Mpts,
+environment `BK4063B_MAX_PTS`): the 4063B's arb memory, measured 8 Oct 2026 by the polarimeter (the 16384 that stood here was the DS345's); a 133 ms echo is 66500 points and fits. The old line read: a 133 ms echo needs it raised, and the 4063B's
 true ceiling is unprobed -- a refused upload means lower it and re-measure.
 
 **The card.** Split the trained pair with the targets:

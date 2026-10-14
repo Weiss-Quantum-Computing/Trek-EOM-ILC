@@ -66,7 +66,7 @@ def _card():
 
 def awg_max_pts():
     """The panel's arb-memory cap (ilc_gui.AWG_MAX_PTS), read the same way."""
-    return int(os.environ.get("BK4063B_MAX_PTS", 16384))
+    return int(os.environ.get("BK4063B_MAX_PTS", 8_000_000))
 
 
 def read_target(path):
@@ -112,8 +112,8 @@ def build(paths, spacing_ms, legs=2, tail_us=200.0, end_ms=None):
     """The echo record for each source (same indices on every channel).
     Returns a dict with the per-channel arrays and the numbers for the header.
     end_ms (14 Oct 2026): the record is padded with idle to this period
-    (16.667 x 2 = 33.333 ms for the whole spin echo; 32.768 ms is the 16384
-    points the generator's cap allows at 2 us), so the time after the last
+    (16.667 x 2 = 33.333 ms for the whole spin echo: 33.334 on the 2 us grid,
+    16667 points; the 4063B holds 8 Mpts per arb), so the time after the last
     transport, where the crystal's memory still moves the light, is inside
     the record for the loop and the optical close to correct. Must reach past
     the last transport plus tail_us."""
@@ -307,9 +307,9 @@ def make(targets, spacing_ms=16.667, legs=2, tail_us=200.0, suffix=None, out_dir
     if len(name) > STEM_CAP:
         notes.append(f"stem '{name}' is {len(name)} characters; the pair mode allows {STEM_CAP}")
     log(f"note  : {rec['n']} points against the panel's 4063B cap AWG_MAX_PTS = {cap}"
-        + (" -- OVER: raise BK4063B_MAX_PTS before the panel will upload it (the 4063B's "
-           "true ceiling is unprobed; a refused upload means re-measure)"
-           if rec["n"] > cap else " (BK4063B_MAX_PTS raises it for longer echoes)"))
+        + (" -- OVER: the panel will not upload it (BK4063B_MAX_PTS sets the cap; the 4063B holds "
+           "8 Mpts per arb, measured 8 Oct 2026)"
+           if rec["n"] > cap else " (the 4063B holds 8 Mpts per arb; the DS345 is the one with 16 kpts)"))
     if rec["n"] > cap:
         notes.append(f"{rec['n']} points is over the upload cap of {cap}")
     checks, ok = {}, True

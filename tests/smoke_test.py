@@ -1216,11 +1216,11 @@ for bad in ((260e3, "past Nyquist"), (0.98 * 0.5 / dtG * 1.01, "at ceiling")):
 mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 100e3)
 assert mode == "session" and (np_, dtp) == (nG, dtG), (mode, np_, dtp)
 mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 300e3)
-assert mode == "dense" and np_ <= ilc_gui.AWG_MAX_PTS, (mode, np_)
+assert mode == "dense" and np_ <= ilc_gui.FRF_MAX_PTS, (mode, np_)
 assert abs(np_ * dtp - nG * dtG) < 1e-12, "dense mode changed the duration"
 assert 300e3 <= ilc_gui.PROBE_NYQ_MARGIN * 0.5 / dtp + 1,     f"dense dt {dtp} leaves less than the margin at 300 kHz"
 mode, np_, dtp = ilc_gui.plan_frf_grid(nG, dtG, 2e6)
-assert mode == "short" and np_ == ilc_gui.AWG_MAX_PTS, (mode, np_)
+assert mode == "short" and np_ == ilc_gui.FRF_MAX_PTS, (mode, np_)
 assert np_ * dtp < nG * dtG, "short mode did not shorten the record"
 try:
     ilc_gui.plan_frf_grid(nG, dtG, 6e6)
@@ -1230,7 +1230,7 @@ except RuntimeError:
 # past the arb memory the record shortens, and the margin holds:
 # tones to 500 kHz keep >= 4 samples per period on the probe grid
 mode, npD, dtD = ilc_gui.plan_frf_grid(nG, dtG, 500e3)
-assert mode == "short" and npD == ilc_gui.AWG_MAX_PTS, (mode, npD)
+assert mode == "short" and npD == ilc_gui.FRF_MAX_PTS, (mode, npD)
 u_d, bins_d = ilc_gui.build_frf_probe(npD, dtD, 2.0, 400.0, 500e3, 96)
 recD = npD * dtD
 assert recD < nG * dtG, "short mode kept the full record"
@@ -2589,7 +2589,7 @@ try:
     assert app._echo_vars["spacing"].get() == "16.667" and app._echo_vars["legs"].get() == "2"
     assert app.do_echo_dialog() is None and app._echo_win.winfo_exists()      # one at a time: lifted
     # a spacing shorter than the transport is refused, nothing written
-    assert app._echo_vars["end"].get() == "32.768"          # the whole-echo pad by default
+    assert app._echo_vars["end"].get() == "33.334"          # the whole-echo pad by default
     app._echo_vars["end"].set("")                          # no pad for these short records
     app._echo_vars["spacing"].set("5")
     _n0 = len(app.log_text.get("1.0", "end"))

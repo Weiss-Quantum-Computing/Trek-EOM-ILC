@@ -496,11 +496,29 @@ def main():
         if len(P) == 2:
             check(P[0].get("slot") == "optical" and P[0].get("source") == "solo scans"
                   and P[1].get("slot") == "joint2" and P[1].get("source") == "joint verification"
-                  and P[1]["corr_files"] == P[0]["verify_corr_files"] and "solo_scans" not in P[1],
-                  "pass 1 from the solo scans in slot optical; pass 2 from pass 1's verification in slot joint2, no solo scans")
+                  and all(f.endswith("_joint2.csv") for f in P[1]["corr_files"].values()) and "solo_scans" not in P[1],
+                  "pass 1 from the solo scans in slot optical; pass 2 derived from pass 1's verification in slot joint2, no solo scans")
+            # the joint2 file = the joint file minus this crystal's split share of what was applied on both
+            from eomilc import corrections as cm2
+            from eomilc.config import CHANNELS as CH2
+            kv = {c: CH2[c].v90_hv * 1000 / 90 for c in ("EO1", "EO2")}
+            solo = {c: cm2.read_correction(P[0]["corr_files"][c]) for c in ("EO1", "EO2")}
+            with np.load(c["channels"]["X1"]["state"], allow_pickle=True) as st1, \
+                    np.load(c["channels"]["X2"]["state"], allow_pickle=True) as st2:
+                lay1 = json.loads(str(st1["corrections"])); lay2 = json.loads(str(st2["corrections"]))
+            jo = cm2.read_correction(P[0]["verify_corr_files"]["EO1"])
+            j2 = cm2.read_correction(P[1]["corr_files"]["EO1"])
+            # the applied solo totals in V at the EOM are the gated solo files x gain: use the
+            # gate's kept peaks to bound the check (the exact kept arrays are in the states' corr_total)
+            check(j2.meta.get("slot") == "joint2" and j2.meta.get("derived_from") == os.path.abspath(P[0]["verify_corr_files"]["EO1"])
+                  and len(j2.delta) == len(jo.delta) and not np.allclose(j2.delta, jo.delta),
+                  "joint2's file names its source and differs from the plain joint file")
+            lay_ok = [L.get("slot") for L in lay1] == ["optical", "joint2"] and [L.get("slot") for L in lay2] == ["optical", "joint2"]
+            check(lay_ok, f"both states: layers optical + joint2 ({[L.get('slot') for L in lay1]})")
             check(not os.path.isdir(os.path.join(odir, "S25_opt2_X1")) and os.path.isdir(os.path.join(odir, "S25_opt2")),
                   "pass 2 scanned only its verification")
-            check(any("applied on top of the solo correction in slot joint2" in m for m in msgs), "the log says so")
+            check(any("go in slot joint2 beside the solo correction" in m for m in msgs)
+                  and any("joint2 = joint" in m and "minus 50% of the applied total" in m for m in msgs), "the log says so")
             for k in ("X1", "X2"):
                 with np.load(c["channels"][k]["state"], allow_pickle=True) as st:
                     lay = json.loads(str(st["corrections"])) if st["corrections"].dtype.kind in "US" else list(st["corrections"])
@@ -578,6 +596,22 @@ def main():
               f"the S25 row reports the echo that was not built: {rows['S25']['error'][:50]}")
         plan = ilc_batch.load_plan(path, cfg=bench_cfg)
         check("already there" in plan["_echo_notes"][0], "a second load finds the files unchanged")
+
+        print("[15] the loader cuts long stems to an AWG name and refuses two campaigns under one")
+        path = os.path.join(tmp, "plan15.json")
+        json.dump({"name": "t15", "targets_dir": TARGETS, "run_dir": os.path.join(tmp, "run15"),
+                   "campaigns": [{"stem": "D2N1400"}, {"stem": "S25"}]}, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        check(plan["campaigns"][0].get("awg") == "D2N14" and "awg" not in plan["campaigns"][1],
+              "D2N1400 trains as D2N14 without a plan-side awg; S25 as itself")
+        json.dump({"name": "t15b", "targets_dir": tdir, "run_dir": os.path.join(tmp, "run15"),
+                   "campaigns": [{"stem": "S47", "echo": {"spacing_ms": 16.667, "suffix": "ECHO2"}},
+                                 {"stem": "S47", "echo": {"spacing_ms": 16.667, "suffix": "EC"}}]}, open(path, "w"))
+        try:
+            ilc_batch.load_plan(path, cfg=bench_cfg)
+            check(False, "S47ECHO2 and S47EC both cut to S47EC: refused")
+        except SystemExit as e:
+            check("would both train as S47EC" in str(e), f"S47ECHO2 and S47EC both cut to S47EC: refused ({str(e)[-60:]})")
 
         print("[14] the PD every iteration, the analyzer angle, the early shot count")
         from eomilc import diagnostics as dg

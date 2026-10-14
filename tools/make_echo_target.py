@@ -32,8 +32,7 @@ def main(argv=None):
     ap.add_argument("--legs", type=int, default=2, help="transports in the record (default 2)")
     ap.add_argument("--tail-us", type=float, default=200.0, help="idle after the last transport")
     ap.add_argument("--end-ms", type=float, default=None,
-                    help="pad with idle to this record period (33.333 for the whole spin echo; 32.768 is the "
-                         "16384-point cap at 2 us)")
+                    help="pad with idle to this record period (33.334 for the whole spin echo on the 2 us grid)")
     ap.add_argument("--suffix", default=None, help="added to the stem (default E<legs>)")
     ap.add_argument("--out", default=None, help="output folder (default: the source's)")
     a = ap.parse_args(argv)

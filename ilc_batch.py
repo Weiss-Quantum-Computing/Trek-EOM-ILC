@@ -231,6 +231,18 @@ def load_plan(path, cfg=None):
     if not plan.get("campaigns"):
         raise SystemExit(f"{path}: no campaigns")
     plan["_echo_notes"] = echo_records(plan)
+    # <name>X1 must leave room for _iNN under the generator's 11-character cap:
+    # a stem over 5 characters trains under a cut AWG name (as build_plan does),
+    # and no two campaigns may share one (their states would collide)
+    used = {}
+    for camp in plan["campaigns"]:
+        if len(camp["stem"]) + 2 > 7 and not camp.get("awg"):
+            camp["awg"] = camp["stem"][:5]
+        short = camp.get("awg", camp["stem"])
+        if short in used:
+            raise SystemExit(f"{path}: {camp['stem']} and {used[short]} would both train as {short}X1/X2 "
+                             f"(stems are cut to 5 characters); rename one target pair or set \"awg\"")
+        used[short] = camp["stem"]
     return plan
 
 
@@ -366,6 +378,7 @@ class ChannelRun:
     corr_total: object = None
     corr_layers: list = field(default_factory=list)
     since: int = 0               # decide()'s divergence best counts from measured[since:]
+    corr_from: object = None     # the iteration the first optical correction was applied at
     extra: dict = field(default_factory=dict)      # other state keys carried through (line_fit)
     # the campaign's per-iteration record (shots, PD), one list shared by the
     # campaign's channels (run_campaign); never written into the state
@@ -474,6 +487,8 @@ def build_run(plan, camp, key, log=print):
     cr.scope_channels = plan.get("_scope_channels", "")
     restore_corrections(cr, carried)
     if resumed:
+        if "corr_from" in st:
+            cr.corr_from = int(st["corr_from"])
         restore_measured(cr, plan["_run_dir"])
     return cr
 
@@ -509,7 +524,15 @@ def restore_measured(cr, run_dir):
         u = pd.read_csv(dp, comment="#").iloc[:, 1].to_numpy(float)
         if len(y) != len(cr.t) or len(u) != len(cr.t):
             continue
-        m = cr.loop.metrics(y)
+        # against the target that iteration was measured on: the base before
+        # the first optical correction, the corrected one after
+        tgt = cr.loop.target
+        if cr.base_target is not None and cr.corr_from is not None and it < cr.corr_from:
+            cr.loop.target = np.asarray(cr.base_target, float)
+        try:
+            m = cr.loop.metrics(y)
+        finally:
+            cr.loop.target = tgt
         cr.measured.append((it, m["rms_err_hv"], m["peak_err_hv"]))
         cr.drives[it] = u
 
@@ -540,6 +563,8 @@ def _savez_state(f, cr, lp):
     extra = {}
     if getattr(cr, "base_target", None) is not None:
         extra["base_target"] = np.asarray(cr.base_target, float)
+        if getattr(cr, "corr_from", None) is not None:
+            extra["corr_from"] = int(cr.corr_from)
         if getattr(cr, "corr_total", None) is not None:
             extra["corr_total"] = np.asarray(cr.corr_total, float)
     if getattr(cr, "corr_layers", None):
@@ -590,14 +615,14 @@ def outputs_off(awg, runs, log=print):
 _SLOT = {}     # per AWG channel, across the whole batch: the next slot to fill
 
 
-AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 16384))   # the panel's cap (ilc_gui.AWG_MAX_PTS)
+AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 8_000_000))   # the panel's cap (ilc_gui.AWG_MAX_PTS)
 
 
 def upload(awg, cr, gui_names, log=print):
     import ilc_bench
     if len(cr.u) > AWG_MAX_PTS:
         raise BatchError(f"{cr.stem}: {len(cr.u)} points is over the generator's arb cap of {AWG_MAX_PTS} "
-                         f"(BK4063B_MAX_PTS raises it; the 4063B's true ceiling is unprobed)")
+                         f"(BK4063B_MAX_PTS sets it; the 4063B holds 8 Mpts per arb, measured 8 Oct 2026)")
     if gui_names:
         name = f"{cr.stem}_i{cr.iteration:02d}"
     else:
@@ -995,7 +1020,12 @@ def decide(cr, m, stack, lp, log):
 
 
 def keeper(cr, lp):
-    late = [r for r in cr.measured if r[0] >= lp["min_iterations"]] or cr.measured
+    """The lowest-rms measured iteration at or past min_iterations, among the
+    iterations since `cr.since` (an optical pass keeps a drive of its own: a
+    pass that diverged early must not fall back to the electrical keeper,
+    learned for the uncorrected target -- 14 Oct 2026)."""
+    pool = cr.measured[getattr(cr, "since", 0):] or cr.measured
+    late = [r for r in pool if r[0] >= lp["min_iterations"]] or pool
     return min(late, key=lambda r: r[1]) if late else None
 
 
@@ -1629,11 +1659,16 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                 prec.update(attribution="separate", before_scan=bsrc, verdict_before=vb)
                 save()
                 if i > 0 and joint is not None and joint.get("files"):
-                    files, played = dict(joint["files"]), dict(joint.get("played") or {})
                     slot = f"joint{p}"
-                    log(f"  pass {p}: the joint verification's residual ({os.path.basename(bsrc or '')}) is "
-                        f"applied on top of the solo correction in slot {slot} (added, not replaced: light - "
-                        f"monitors is the whole error each time)")
+                    log(f"  pass {p}: the joint verification ({os.path.basename(bsrc or '')}) says what the whole "
+                        f"correction should be; its files minus each crystal's share of what is already applied "
+                        f"go in slot {slot} beside the solo correction")
+                    totals = {c: (np.asarray(byc[c].corr_total, float) * byc[c].channel.mon_scale
+                                  if byc[c].corr_total is not None else np.zeros(len(t)))
+                              for c in ("EO1", "EO2")}
+                    jdir = os.path.join(os.path.dirname(next(iter(joint["files"].values()))))
+                    files = optical.joint_residual_files(joint["files"], totals, float(s["split"]), jdir, slot, log=log)
+                    played = dict(joint.get("played") or {})
                     prec.update(corr_files=dict(files), played_targets=dict(played), slot=slot,
                                 source="joint verification")
                 else:
@@ -1699,6 +1734,8 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             for c, a in applied.items():
                 cr = byc[c]
                 cr.base_target, cr.corr_total, cr.corr_layers = a.base_target, a.corr_total, a.layers
+                if cr.corr_from is None:
+                    cr.corr_from = cr.iteration     # earlier iterations were measured against the base
                 path = os.path.abspath(files[c])
                 L = next((L for L in a.layers if L.get("path") == path), a.layers[-1])
                 moved = float(np.max(np.abs(a.corr_total))) * cr.channel.mon_scale

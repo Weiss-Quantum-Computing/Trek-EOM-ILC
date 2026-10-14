@@ -886,6 +886,60 @@ def apply_correction(loop, t, u, full_scale, corr_path, gain=1.0, settings=None,
                    layers=lay, notes=notes, info=info)
 
 
+def joint_residual_files(joint_files, totals, split, out_dir, slot, log=print):
+    """The files a joint verification contributes on top of corrections
+    already applied per crystal (14 Oct 2026).
+
+    Light minus monitors is a fresh estimate of the WHOLE light error every
+    time (moving the target moves the monitors with the light), so a joint
+    file, -E split by `split`, says what the TOTAL optical correction should
+    be, not what is left. With solo corrections c_i already in place (each
+    crystal's own error, from its scan alone), the layer that makes the
+    total right is the joint file minus each crystal's split share of what
+    is already applied on BOTH crystals, in degrees of rotation:
+
+        joint_k,i = joint_i - split_i x k_i x sum_j(total_j / k_j)
+
+    k_j = V90_j x 1000 / 90 V per degree. Where the joint error is just the
+    sum of the crystals' own errors this layer is zero; where something
+    follows the total rotation (an analyzer or extinction term, or the
+    simulated bench's rotator error) it carries exactly the share the solo
+    scans could not see. joint_files {EOn: path} (the verification's),
+    totals {EOn: V at the EOM on the record grid, the correction now
+    applied}, split the X1 fraction. Writes corr_<name>_<slot>.csv in
+    out_dir; returns {EOn: path}."""
+    from .config import CHANNELS
+    frac = {"EO1": float(split), "EO2": 1.0 - float(split)}
+    k = {c: float(CHANNELS[c].v90_hv) * 1000.0 / 90.0 for c in ("EO1", "EO2")}
+    deg_sum = None
+    for c in ("EO1", "EO2"):
+        tot = np.asarray(totals.get(c, 0.0), float)
+        deg_sum = tot / k[c] if deg_sum is None else deg_sum + tot / k[c]
+    os.makedirs(out_dir, exist_ok=True)
+    out = {}
+    for c, path in joint_files.items():
+        corr = corrmod.read_correction(path)
+        if deg_sum.shape != corr.delta.shape:
+            raise ValueError(f"{os.path.basename(path)}: {len(corr.delta)} points against the record's "
+                             f"{deg_sum.size}: the joint file is not on the record grid")
+        share = frac[c] * k[c] * deg_sum
+        delta = corr.delta - share
+        meta = dict(corr.meta, slot=slot,
+                    quantity=(f"joint verification residual: -(light - monitors) x {frac[c]:.0%} minus this "
+                              f"crystal's share of the corrections already applied on both"),
+                    derived_from=os.path.abspath(path))
+        stem = os.path.basename(path)
+        if stem.startswith("corr_") and stem.endswith("_optical.csv"):
+            stem = stem[len("corr_"):-len("_optical.csv")]
+        p = os.path.join(out_dir, f"corr_{stem}_{slot}.csv")
+        corrmod.write_correction(p, corr.t, delta, corr.sigma, meta)
+        out[c] = p
+        log(f"  {c}: {slot} = joint {float(np.max(np.abs(corr.delta))):.1f} V peak minus {frac[c]:.0%} of the "
+            f"applied total ({float(np.max(np.abs(share))):.1f} V peak): {float(np.max(np.abs(delta))):.1f} V peak "
+            f"-> {os.path.basename(p)}")
+    return out
+
+
 # ------------------------------------------------------------------ verdict
 def _fallback_extremes(summary):
     """From target_compare.npz when the summary has no "extremes" (a summary

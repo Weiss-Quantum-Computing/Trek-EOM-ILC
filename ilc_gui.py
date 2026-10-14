@@ -400,11 +400,18 @@ def pd_channel(cfg=None):
     return ch
 
 
-AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 16384))
-# 16384 is the 4063B's datasheet arb memory; this bench has only stored
-# 5301-point records so far, so the true ceiling is unprobed -- if a dense
-# upload is refused on hardware, lower BK4063B_MAX_PTS and re-measure.
+AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 8_000_000))
+# The 4060B series (this bench's 4063B) takes arbs of 8 pts to 8 Mpts (the
+# polarimeter, rampol/awg.py, 8 Oct 2026). 16384 stood here until 14 Oct: the
+# DS345's arb memory, carried over by mistake, and the suite's 33 ms spin-echo
+# records (16667 pts at 2 us) were being cut short to fit it. Largest played so
+# far: 7001 pts by the polarimeter; the first 16667-point upload is the probe.
 
+# The FRF probe record's own cap, apart from the generator's arb memory: the
+# scope reads 2.2 x the points back per shot, so a dense probe is shortened
+# past this count (the planner's 'short' plan) as it was when 16384 was
+# believed to be the arb cap (14 Oct 2026).
+FRF_MAX_PTS = 16384
 PROBE_NYQ_MARGIN = 0.5
 # Top probe tone <= this fraction of the probe grid's Nyquist: >= 4 samples
 # per period at the top tone. The first cut allowed 0.98 -- tones riding
@@ -434,7 +441,7 @@ def plan_frf_grid(n_sess, dt_sess, f_hi, max_pts=None):
                    end); the frequency bins coarsen to 1/record.
 
     dt is chosen so f_hi <= PROBE_NYQ_MARGIN of the grid's Nyquist."""
-    max_pts = max_pts or AWG_MAX_PTS
+    max_pts = max_pts or FRF_MAX_PTS
     t_sess = n_sess * dt_sess
     if f_hi > 5e6:
         raise RuntimeError(
@@ -3970,7 +3977,7 @@ class App:
                  spacing=tk.StringVar(value=str(e.get("spacing_ms", "16.667"))),
                  legs=tk.StringVar(value=str(e.get("legs", "2"))),
                  tail=tk.StringVar(value=str(e.get("tail_us", "200"))),
-                 end=tk.StringVar(value=str(e.get("end_ms", "32.768"))),
+                 end=tk.StringVar(value=str(e.get("end_ms", "33.334"))),
                  suffix=tk.StringVar(value=str(e.get("suffix", ""))),
                  out=tk.StringVar(value=str(e.get("out", ""))))
         self._echo_vars = v
@@ -7365,8 +7372,26 @@ class App:
                 n = 2 + sum(str(L.get("slot", "")).startswith("joint") for L in lay)
                 slots[k] = f"joint{n}"
         if slots:
-            self.log("optical 4: " + ", ".join(f"{k}: the joint file goes in slot {s_} beside the solo "
-                                               f"correction (added, not replaced)" for k, s_ in slots.items()))
+            # the joint files say what the WHOLE correction should be: what goes
+            # beside the solo layer is each crystal's share of the difference
+            # (eomilc.optical.joint_residual_files)
+            totals = {PAIR_CHANNEL[kk]: (np.asarray(self.pair[kk].corr_total, float) * self.pair[kk].loop.channel.mon_scale
+                                         if self.pair[kk].corr_total is not None else np.zeros(len(self.pair[kk].t)))
+                      for kk in PAIR_KEYS}
+            jf = {PAIR_CHANNEL[kk]: files[kk] for kk in slots}
+            jdir = os.path.dirname(next(iter(jf.values())))
+            slot = next(iter(slots.values()))
+            try:
+                derived = optical.joint_residual_files(jf, totals, float(self.optsplit_var.get() or 0.5), jdir, slot,
+                                                       log=self.log)
+            except (ValueError, OSError) as e:
+                return messagebox.showerror("Optical 4", f"the joint files could not be combined with the solo "
+                                                         f"correction: {e}")
+            for kk in slots:
+                files[kk] = derived[PAIR_CHANNEL[kk]]
+                froms[kk] = f"{froms[kk]} ({slot})"
+            self.log("optical 4: " + ", ".join(f"{k}: {os.path.basename(files[k])} in slot {s_} beside the solo "
+                                               f"correction" for k, s_ in slots.items()))
         ss = dict(self.pair)
         self.run_worker(lambda: self._opt_apply_work(ss, files, gain, sts, froms, slots),
                         "optical 4: applying the corrections...")
