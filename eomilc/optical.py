@@ -108,7 +108,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The screen around the record (ms) and the scan defaults the design fixes.
 BEFORE_MS = 0.5
-AFTER_MS = 30.0
+AFTER_MS = 8.0            # was 30 until 14 Oct 2026: the verdict reads the first ms after
+                          # the fall and X2's fast term is gone in 5; 30 ms left most of
+                          # the screen after the record and the edges sampling-limited
 # The windows verdict reads, relative to the leg's landmarks (s): the ramp
 # top is the hold +- TOP_PAD, the after-fall window the first AFTER_FALL.
 TOP_PAD = 0.3e-3
@@ -135,6 +137,28 @@ class ScanRefused(RuntimeError):
     def __init__(self, why, findings=()):
         super().__init__(why)
         self.findings = list(findings)
+
+
+def _dark_steps(run, dev):
+    """The done steps of a scan on disk whose PD never rose above LIGHT_MIN_V:
+    a scan taken with the light off (13 Oct 2026: 11 such steps resumed
+    into a lit scan). One capture per step is read."""
+    pd = [ch for ch, role in dev.roles.items() if role == "PD"]
+    if not pd:
+        return []
+    col = f"CH{pd[0]}_"
+    dark = []
+    for s in run.manifest.get("steps", []):
+        if s.get("status") != "done" or not s.get("files"):
+            continue
+        try:
+            cols, data = dev.sg.load_capture(os.path.join(run.folder, s["files"][0]))
+            i = next(k for k, c in enumerate(cols) if c.startswith(col))
+            if float(np.max(data[:, i])) < LIGHT_MIN_V:
+                dark.append(s)
+        except (OSError, ValueError, StopIteration, IndexError):
+            continue
+    return dark
 
 
 def _check_shot(dev, points, cancelled, log, plan):
@@ -471,13 +495,17 @@ def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
             + (" - WARN: edges sampling-limited" if per > planmod.SAMPLING_WARN_DEG else ""))
         if dev.sim is not None and dev.drives is None:
             log("  ! simulated bench: sim_play was not called - the simulated light is flat")
-        if check:
-            _check_shot(dev, points, cancelled, log,
-                        dict(mode="single", points=int(points), dither_codes=0, start=min(grid),
-                             stop=max(grid), step=(grid[1] - grid[0]) if len(grid) > 1 else 0.0))
-        if r.exists():
+        created = not r.exists()
+        if not created:
             r.load()
             done = sum(1 for s in r.manifest["steps"] if s["status"] == "done")
+            if check:
+                dark = _dark_steps(r, dev)
+                if dark:
+                    raise ScanRefused(
+                        f"scan refused: {r.name} on disk holds {len(dark)} of its {done} done steps "
+                        f"scanned with no light on the PD (peak under {LIGHT_MIN_V * 1e3:.0f} mV); "
+                        f"delete {r.folder} and scan again", [])
             log(f"  {r.name}: on disk, {done} steps done - resumed")
         else:
             steps = scanmod.build_steps(order, int(ref_every), float(sc.get("ref_angle", 45.0)),
@@ -506,6 +534,20 @@ def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
             r.new(plan, steps, extra=ext)
             log(f"  {r.name}: {len(steps)} steps ({len(order)} angles"
                 + (f" + {len(extras)} hold-null" if extras else "") + f", {int(shots)} shots each)")
+        if check:
+            # after the scan exists on disk (a Stop during this shot then
+            # leaves a scan that resumes, as a Stop during the run does); a
+            # REFUSED scan that was only just created is removed again, so a
+            # dark PD leaves nothing behind to resume
+            try:
+                _check_shot(dev, points, cancelled, log,
+                            dict(mode="single", points=int(points), dither_codes=0, start=min(grid),
+                                 stop=max(grid), step=(grid[1] - grid[0]) if len(grid) > 1 else 0.0))
+            except ScanRefused:
+                if created:
+                    import shutil
+                    shutil.rmtree(r.folder, ignore_errors=True)
+                raise
         if settle_s and settle_s > 0 and dev.sim is None:
             time.sleep(settle_s)
         r.run()
@@ -732,7 +774,7 @@ def _settings(c, settings):
 
 
 def apply_correction(loop, t, u, full_scale, corr_path, gain=1.0, settings=None,
-                     base_target=None, layers=None) -> Applied:
+                     base_target=None, layers=None, slot=None) -> Applied:
     """The panel's Corrections Apply, headless, for one file on one loop.
 
     The file becomes a layer (slot from its meta "slot", default "optical";
@@ -758,7 +800,12 @@ def apply_correction(loop, t, u, full_scale, corr_path, gain=1.0, settings=None,
     base_out = base * sc
     new = corrmod.read_correction(corr_path)
     st = _settings(new, settings)
-    slot = str(new.meta.get("slot", "") or "optical")
+    # slot: the file's own (meta "slot", default "optical") unless the caller
+    # names one. Light - monitors is a fresh estimate of the WHOLE error each
+    # time, so a new file in the SAME slot replaces the last; a joint residual
+    # measured after a solo correction goes in its own slot ("joint2", ...)
+    # and adds to it (14 Oct 2026).
+    slot = str(slot or new.meta.get("slot", "") or "optical")
     layer = dict(path=os.path.abspath(corr_path), slot=slot, gain=float(gain), on=True,
                  status="added", quantity=str(new.meta.get("quantity", "")))
     lay = [dict(L) for L in (layers or [])]

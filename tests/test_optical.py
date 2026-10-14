@@ -128,8 +128,8 @@ def main():
                                                        ":TIMebase:POSition")),
               "the scope's timebase is put back after the scan")
         w = [m for m in msgs if "scope timebase" in m]
-        # 0.5 ms + 6.402 ms x 1.02 + 30 ms over 10 div = 3.70 ms/div, rounded UP: 3.8
-        check(bool(w) and "3.8 ms/div from -0.50 ms" in w[-1], (w or ["no timebase line"])[-1].strip())
+        # 0.5 ms + 6.402 ms x 1.02 + 8 ms over 10 div = 1.50 ms/div, rounded UP: 1.6
+        check(bool(w) and "1.6 ms/div from -0.50 ms" in w[-1], (w or ["no timebase line"])[-1].strip())
         again = optical.scan(dev, scans, f"{STEM}_opt0", t, log=log, angles="0:359:45", shots=2)
         check(again == folder and any("resumed" in m for m in msgs), "a scan on disk is resumed")
         check(any(m.startswith("  check done: light on the PD") for m in msgs)
@@ -152,6 +152,16 @@ def main():
         n0 = len(msgs)
         optical.scan(dev, scans, f"{STEM}_opt0", t, log=log, angles="0:359:45", shots=2, check=False)
         check(not any("check " in m for m in msgs[n0:]), "check=False skips the shot")
+        # a scan taken dark (the check off) must not be resumed into a lit one
+        dev.sim.imax = 0.0
+        optical.scan(dev, scans, f"{STEM}_darkres", t, log=log, angles="0:359:90", shots=1, check=False)
+        dev.sim.imax = imax
+        try:
+            optical.scan(dev, scans, f"{STEM}_darkres", t, log=log, angles="0:359:90", shots=1)
+            check(False, "a dark scan on disk refuses to resume")
+        except optical.ScanRefused as e:
+            check("scanned with no light" in str(e) and "delete" in str(e),
+                  f"a dark scan on disk refuses to resume: {str(e)[:60]}")
 
         print("[3] compare")
         # the simulated PD has no delay: 1.7 us (the bench's) would read as up
