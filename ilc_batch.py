@@ -586,6 +586,10 @@ def prepare_campaign(awg, scope, runs, plan, gui_names, allow_on, log=print):
             raise BatchError(f"CH{c}: FRQ did not take ({missed})")
     log(f"  AWG FRQ {1.0/period:.6g} Hz on both channels (record {period*1e3:.4f} ms), outputs off")
     rng = nice_setting(1.3 * period)
+    # position is trigger -> screen CENTRE: say so, because the polarimeter's
+    # scans leave the reference at LEFT and the trigger then sits half a
+    # record off screen (13 Oct 2026: "X1 drive starts +6498.5 us", refused)
+    scope.put(":TIMebase:REFerence", "CENTer")
     scope.put(":TIMebase:RANGe", f"{rng:.6g}")
     scope.put(":TIMebase:POSition", f"{period/2:.6g}")
     log("  scope channels: " + channels.describe(plan.get("_scope_channels") and

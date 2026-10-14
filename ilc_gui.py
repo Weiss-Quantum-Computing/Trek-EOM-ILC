@@ -2486,8 +2486,9 @@ class App:
                     return
                 awg.set_output(awg_ch, False)
                 print(f"CH{awg_ch} output OFF")
-            for k in (":TIMebase:RANGe", ":TIMebase:POSition"):
+            for k in (":TIMebase:REFerence", ":TIMebase:RANGe", ":TIMebase:POSition"):
                 tb[k] = scope.get(k)
+            scope.put(":TIMebase:REFerence", "CENTer")
             scope.put(":TIMebase:RANGe", f"{win_s:.6g}")
             scope.put(":TIMebase:POSition", f"{0.4 * win_s:.6g}")
             print(f"scope: {win_s*1e3:g} ms window from {-0.1*win_s*1e3:g} ms "
@@ -4896,6 +4897,10 @@ class App:
         # full window with settle room, waveform start at the left edge:
         # position (trigger -> screen centre) = half the period
         rng = nice_setting(1.3 * period)
+        # the polarimeter's scans leave the reference at LEFT, under which
+        # this position puts the trigger half a record off screen (13 Oct
+        # 2026: the batch refused B2S25 with "drive starts +6498.5 us")
+        scope.put(":TIMebase:REFerence", "CENTer")
         scope.put(":TIMebase:RANGe", f"{rng:.6g}")
         scope.put(":TIMebase:POSition", f"{period/2:.6g}")
         scope.put(":ACQuire:TYPE", "HRES")
@@ -7916,6 +7921,7 @@ class App:
                     raise RuntimeError(f"FRQ for the probe record did not "
                                        f"take: {missed}")
                 rng = nice_setting(1.3 * rec)
+                scope.put(":TIMebase:REFerence", "CENTer")
                 scope.put(":TIMebase:RANGe", f"{rng:.6g}")
                 scope.put(":TIMebase:POSition", f"{rec/2:.6g}")
                 retune = True
@@ -7991,6 +7997,7 @@ class App:
                         awg_ch, {"BSWV": {"FRQ": 1.0 / t_sess}},
                         log=lambda m: print("      ", m))
                     rng = nice_setting(1.3 * t_sess)
+                    scope.put(":TIMebase:REFerence", "CENTer")
                     scope.put(":TIMebase:RANGe", f"{rng:.6g}")
                     scope.put(":TIMebase:POSition", f"{t_sess/2:.6g}")
                     print(f"restored: AWG FRQ {1.0/t_sess:.6g} Hz, scope "
