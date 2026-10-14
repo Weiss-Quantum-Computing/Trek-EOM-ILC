@@ -123,6 +123,59 @@ SIM_NOISE_PER_DIV = 0.012
 SIM_AWG_FULL_SCALE = 10.0          # FakeAWG: AMP 20 Vpp -> +-10 V
 
 
+LIGHT_MIN_V = 0.05        # a PD that never rises above this has no light on it
+ZERO_TOL_DEG = 1.0        # the rest polarization this far from analyzer 0 is "the zero holds"
+
+
+class ScanRefused(RuntimeError):
+    """The pre-scan shot found the screen unusable (no light on the PD, a
+    channel clipped or switched off, the trigger wrong): nothing was scanned.
+    `findings` holds every (level, text) the checks produced."""
+
+    def __init__(self, why, findings=()):
+        super().__init__(why)
+        self.findings = list(findings)
+
+
+def _check_shot(dev, points, cancelled, log, plan):
+    """One single shot of every recorded channel, judged by rampol.checks
+    (the polarimeter's own pre-scan checks: trigger sweep and source,
+    channels on and DC, clipping and screen use, light on the PD, ramps on
+    the monitors and inside the record). Logs the findings; raises
+    ScanRefused on any FAIL or on a dark PD. 13 Oct 2026: the first bench
+    stage scanned 21 steps x 8 shots of a PD with the light off."""
+    from rampol import checks
+    link = dev.link
+    chans = sorted(dev.roles)
+    got = {}
+    link.acquire_blocks(chans, "single", 1, 1, dither_codes=0, points=int(points),
+                        wait_s=10.0, cancelled=cancelled,
+                        on_block=lambda k, recs, hits: got.update(recs))
+    rs = getattr(link.scope, "read_settings", None)
+    st = rs() if rs else {}
+    first = next(iter(got.values()))
+    t = first.t()
+    tr = {ch: r.v() for ch, r in got.items()}
+    found = (checks.settings_checks(st, link.prof, dev.roles, plan)
+             + checks.shot_checks(t, tr, st, link.prof, dev.roles, plan))
+    for lev, txt in found:
+        if lev != "INFO":
+            log(f"  check {lev}: {txt}")
+    fails = [txt for lev, txt in found if lev == "FAIL"]
+    for ch, role in sorted(dev.roles.items()):
+        v = tr.get(ch)
+        if role == "PD" and v is not None and len(v) and float(np.max(v)) < LIGHT_MIN_V:
+            fails.insert(0, f"the PD on CH{ch} never rises above {float(np.max(v)) * 1e3:.0f} mV: "
+                            f"the light is off or the beam is blocked")
+    if fails:
+        raise ScanRefused("scan refused: " + "; ".join(fails), found)
+    pd = [ch for ch, role in dev.roles.items() if role == "PD"]
+    peak = max(float(np.max(tr[ch])) for ch in pd if ch in tr) if pd else float("nan")
+    worst = checks.summary(found)
+    log(f"  check done: light on the PD ({peak:.2f} V peak), every channel on screen"
+        + ("" if worst == "OK" else f"; worst finding {worst} (above)"))
+
+
 class CorrectionRefused(RuntimeError):
     """A correction the gate or the feasibility check refused. `notes` is the
     whole [(level, text)] list; the "fail" ones are the reason."""
@@ -227,8 +280,12 @@ def open_devices(scope, cfg, log=print, simulate=False, pcfg=None):
         from rampol import sim
         sg = _scope_grab(None, pc)
         bench = sim.Bench(**SIM_BENCH)
+        # the simulated zero set from rest, as the bench's is: analyzer 0 is
+        # the bench's rest polarization (its mount_of_rest_pol), not the
+        # config's bench number, so the hold-null angles and the zero check
+        # mean the same thing in simulation
         sc, ell, bench = sim.make(sg, roles=roles, bench=bench,
-                                  zero_offset_deg=float(pc["ell_zero_deg"]))
+                                  zero_offset_deg=float(bench.mount_of_rest_pol))
         sc.noise_per_div = SIM_NOISE_PER_DIV
         # the AWG outputs on and at zero: nothing plays until sim_play
         n = 16
@@ -313,9 +370,19 @@ def _peak_rate(drives, dt):
 
 def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
          angles="0:359:22.5", shots=8, points=20000, ref_every=9, hold_null=True,
-         ends_deg=None, settle_s=1.0, extra=None, preset=None, drives=None, states=None):
+         ends_deg=None, settle_s=1.0, extra=None, preset=None, drives=None, states=None,
+         check=True, pd_vertical=True):
     """A ramp scan of the light while the drives PLAY (the caller's job:
     outputs on, or sim_play). Returns the scan folder <outdir>/<name>.
+
+    Before anything is scanned (13 Oct 2026): with pd_vertical the PD's
+    channel is set to the polarimeter preset's V/div and offset for the PD
+    role (the ILC sets the drives' and monitors' verticals, never the PD's;
+    skipped when a whole `preset` is written), the trigger sweep is set to
+    NORMAL, and with `check` one single shot of every recorded channel is
+    judged by rampol.checks: a dark PD, a clipped or switched-off channel,
+    or a wrong trigger raises ScanRefused and nothing is scanned. The PD's
+    screen and the sweep are put back with the timebase afterwards.
 
     The screen spans BEFORE_MS before the trigger to AFTER_MS after the
     record (t_grid, s), REFerence LEFT, ms/div rounded up to 2 significant
@@ -362,7 +429,18 @@ def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
             raise ValueError(f"no polarimeter preset {preset!r}")
         writes.update(link.preset_writes(pre, dev.roles))
     tb = {":TIMebase:REFerence": "LEFT", ":TIMebase:SCALe": f"{div:.6g}",
-          ":TIMebase:POSition": f"{pos:.6g}"}
+          ":TIMebase:POSition": f"{pos:.6g}", ":TRIGger:SWEep": "NORMal"}
+    pd_ch = next((ch for ch, role in dev.roles.items() if role == "PD"), None)
+    pd_set = None
+    if pd_vertical and not preset and pd_ch is not None:
+        pres = rcfg.all_presets(pc)
+        pre = pres.get(pc.get("preset")) or next(iter(pres.values()), {})
+        r_pd = (pre.get("roles") or {}).get("PD")
+        if r_pd:
+            pd_set = (float(r_pd["scale"]), float(r_pd["offset"]))
+            p_ = link.prof
+            for root in (p_.ch_scale.format(ch=pd_ch), p_.ch_offset.format(ch=pd_ch)):
+                tb.setdefault(root, None)          # saved and restored, written by set_channel
     saved = {}
     for root in list(writes) + list(tb):
         try:
@@ -380,7 +458,12 @@ def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
             for root, (want, got) in bad.items():
                 log(f"  ! {root}: wrote {want}, scope reads {got}")
         for root, val in tb.items():
-            scope.put(root, val)
+            if val is not None:
+                scope.put(root, val)
+        if pd_set is not None:
+            link.set_channel(pd_ch, pd_set[0], pd_set[1])
+            log(f"  PD CH{pd_ch} at {pd_set[0]:g} V/div, offset {pd_set[1]:+g} V (the polarimeter's "
+                f"preset); trigger sweep NORMAL")
         log(f"  scope timebase {div*1e3:g} ms/div from {(pos - div)*1e3:+.2f} ms to "
             f"{(pos + 9 * div)*1e3:+.2f} ms (record {record.period*1e3:.3f} ms)")
         log(f"  sampling: {dt_us:.2f} us" + (f", {per:.2f} deg per sample at {rate:.0f} deg/ms"
@@ -388,6 +471,10 @@ def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
             + (" - WARN: edges sampling-limited" if per > planmod.SAMPLING_WARN_DEG else ""))
         if dev.sim is not None and dev.drives is None:
             log("  ! simulated bench: sim_play was not called - the simulated light is flat")
+        if check:
+            _check_shot(dev, points, cancelled, log,
+                        dict(mode="single", points=int(points), dither_codes=0, start=min(grid),
+                             stop=max(grid), step=(grid[1] - grid[0]) if len(grid) > 1 else 0.0))
         if r.exists():
             r.load()
             done = sum(1 for s in r.manifest["steps"] if s["status"] == "done")
@@ -425,8 +512,8 @@ def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
     finally:
         # put the ILC's screen back: reference first (the position is relative
         # to it), then scale, then position; the preset's settings after
-        for root in [":TIMebase:REFerence", ":TIMebase:SCALe", ":TIMebase:POSition"] + \
-                [k for k in saved if k not in tb]:
+        first3 = (":TIMebase:REFerence", ":TIMebase:SCALe", ":TIMebase:POSition")
+        for root in list(first3) + [k for k in saved if k not in first3]:
             if root in saved:
                 try:
                     scope.put(root, saved[root])
@@ -515,6 +602,12 @@ def _extremes(summary, folder, sg, played, band_hz, pd_delay_us, lock_tol=0.006)
     from rampol import analysis as an, ilc_target as it
     d = an.load_scan(folder, sg.load_capture, lock_tol=lock_tol)
     pol = an.polarization(d)
+    # where the rest polarization sits in the analyzer frame: the Malus fit
+    # over the pre-trigger stretch of every capture, so each scan localises
+    # the analyzer's zero for free. 0 means the polarimeter's zero (its
+    # "Set zero from rest") still holds; the hold-null angles assume it does.
+    psi_rest = float(pol["psi_rest"])
+    zero = float((d.manifest.get("rotator") or {}).get("zero_deg", float("nan")))
     v90 = {1: summary["V90_mon"][0], 2: summary["V90_mon"][1]}
     sign = float(summary["rotation_sign_vs_target"])
     t, rot, pm, lm, _mon = it.light_minus_monitors(d, pol, sign, v90, pd_delay_us)
@@ -549,7 +642,8 @@ def _extremes(summary, folder, sg, played, band_hz, pd_delay_us, lock_tol=0.006)
         rec["lm_rms_mdeg"] = float(np.sqrt(np.mean(lm_f[act] ** 2)) * 1e3) if act.any() else float("nan")
         out.append(rec)
     return {"band_hz": float(band_hz), "pd_delay_us": float(pd_delay_us),
-            "source": "eomilc.optical: whole record, low-passed at the band", "legs": out}
+            "source": "eomilc.optical: whole record, low-passed at the band", "legs": out,
+            "psi_rest_deg": psi_rest, "analyzer_zero_deg": zero}
 
 
 def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0.5,
@@ -623,6 +717,8 @@ def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0
     summary["states_compared"] = [os.path.abspath(x1), os.path.abspath(x2)]
     if extremes:
         summary["extremes"] = _extremes(summary, folder, sg, by_c, band_hz, pd_delay_us)
+        summary["psi_rest_deg"] = summary["extremes"]["psi_rest_deg"]
+        summary["analyzer_zero_deg"] = summary["extremes"]["analyzer_zero_deg"]
     return summary
 
 
@@ -816,10 +912,13 @@ def verdict(summary) -> dict:
         pk = float(pc["peak_V"])
         crystals[ch] = {"peak_V": pk, "peak_mdeg": pk * 90.0 / (v90[min(i, 1)] * 1000.0) * 1e3,
                         "rms_V_active": float(pc.get("rms_V_active", float("nan")))}
+    psi = float(summary.get("psi_rest_deg", float("nan")))
     return {"scan": summary.get("scan"), "legs": legs,
             "correction": {"peak_mdeg": float(corr["peak_mdeg"]),
                            "rms_mdeg_active": float(corr.get("rms_mdeg_active", float("nan"))),
                            "crystals": crystals},
+            "psi_rest_deg": psi, "analyzer_zero_deg": float(summary.get("analyzer_zero_deg", float("nan"))),
+            "zero_ok": bool(np.isfinite(psi) and abs(psi) <= ZERO_TOL_DEG),
             "source": ext.get("source", "")}
 
 
@@ -844,4 +943,13 @@ def verdict_lines(v) -> list:
     c = v["correction"]
     out.append("correction peak " + f"{c['peak_mdeg']:.0f} mdeg: " + ", ".join(
         f"{ch} {x['peak_mdeg']:.0f} mdeg = {x['peak_V']:.1f} V" for ch, x in c["crystals"].items()))
+    psi = v.get("psi_rest_deg", float("nan"))
+    if np.isfinite(psi):
+        z = v.get("analyzer_zero_deg", float("nan"))
+        out.append(f"analyzer zero: the rest polarization sits at {psi:+.2f} deg in the analyzer frame"
+                   + (f" (zero = mount {z:.3f} deg)" if np.isfinite(z) else "")
+                   + (f" -- OK within {ZERO_TOL_DEG:g} deg" if v.get("zero_ok") else
+                      f" -- OFF by more than {ZERO_TOL_DEG:g} deg: the hold-null angles miss the null; "
+                      f"set the zero from this scan's rest in the polarimeter (Set zero from rest) and "
+                      f"Copy from polarimeter"))
     return out

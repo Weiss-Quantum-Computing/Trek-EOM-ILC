@@ -132,6 +132,26 @@ def main():
         check(bool(w) and "3.8 ms/div from -0.50 ms" in w[-1], (w or ["no timebase line"])[-1].strip())
         again = optical.scan(dev, scans, f"{STEM}_opt0", t, log=log, angles="0:359:45", shots=2)
         check(again == folder and any("resumed" in m for m in msgs), "a scan on disk is resumed")
+        check(any(m.startswith("  check done: light on the PD") for m in msgs)
+              and any("PD CH1 at 1 V/div, offset +2.7 V" in m for m in msgs),
+              "the pre-scan shot found light on the PD, the PD's screen from the preset")
+        st = dev.scope.inst.state
+        check(st.get(":TRIGger:SWEep") == before.get(":TRIGger:SWEep")
+              and st.get(":CHANnel1:SCALe") == before.get(":CHANnel1:SCALe"),
+              "sweep and the PD's V/div put back after the scan")
+        imax = dev.sim.imax
+        dev.sim.imax = 0.0                                      # the light off
+        try:
+            optical.scan(dev, scans, f"{STEM}_dark", t, log=log, angles="0:359:45", shots=2)
+            check(False, "a dark PD refuses the scan")
+        except optical.ScanRefused as e:
+            check("never rises above" in str(e) and "light is off" in str(e) and e.findings,
+                  f"a dark PD refuses the scan: {str(e)[:70]}")
+        check(not os.path.isdir(os.path.join(scans, f"{STEM}_dark")), "nothing scanned when refused")
+        dev.sim.imax = imax
+        n0 = len(msgs)
+        optical.scan(dev, scans, f"{STEM}_opt0", t, log=log, angles="0:359:45", shots=2, check=False)
+        check(not any("check " in m for m in msgs[n0:]), "check=False skips the shot")
 
         print("[3] compare")
         # the simulated PD has no delay: 1.7 us (the bench's) would read as up
@@ -159,6 +179,10 @@ def main():
               f"{v['correction']['crystals']['EO1']['peak_V']:.1f} V on EO1")
         for line in optical.verdict_lines(v):
             print("       " + line)
+        check(math.isfinite(v["psi_rest_deg"]) and math.isfinite(s["psi_rest_deg"]) and v["zero_ok"]
+              and any(l.startswith("analyzer zero: the rest polarization sits at") and "OK within" in l
+                      for l in optical.verdict_lines(v)),
+              f"the comparison localises the analyzer zero: rest at {v['psi_rest_deg']:+.2f} deg, OK")
 
         print("[4] apply")
         applied = {}
