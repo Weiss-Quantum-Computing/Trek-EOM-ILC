@@ -619,6 +619,18 @@ Gains 1.0 / 1.0 are the staged plans' setting; the dry-run line ends `pass 1
 solo, later passes add the joint verification's residual`. Nothing of it has
 run on hardware.
 
+**The time after the ramp (14 Oct 2026).** The crystal's memory keeps the light
+rotated for tens of ms after a fall, and a spin echo's second leg starts in it,
+so the record is built long enough to hold that time (`"end_ms": 32.768` pads
+it with idle to 16384 points at 2 us, the generator's cap; the whole echo would
+be 33.333 ms), the comparison runs over the whole played record (rampol
+`whole_record=True`: the correction is minus the low-passed light minus monitors
+everywhere the light was measured, not only where the target is above 0.5 deg,
+and nothing is faded where the target rests), and the gate keeps it over the
+whole record (`active_only` false in `optical.GATE_DEFAULTS`), faded 200 us at
+the record's two ends. The card's files keep the 200 us design tail; the pad is
+idle the card does not play (the target's `# tail_us` / `# pad_us` say which).
+
 Offline, `--simulate` (or **Simulate**) runs a plan against
 `eomilc/simbench.py` (the measured FRFs with a gain and delay error). It writes
 into `run\sim`, never `run\`, so a simulated state cannot be resumed as if it
@@ -690,10 +702,10 @@ line
 C:\ProgramData\anaconda3\python.exe tools\make_echo_target.py <suite>\targets\target_S47X1.csv --spacing-ms 16.667
 ```
 
-(`[target_S47X2.csv] [--legs 2] [--tail-us 200] [--suffix E2] [--out DIR]`; a
+(`[target_S47X2.csv] [--legs 2] [--tail-us 200] [--end-ms 32.768] [--suffix E2] [--out DIR]`; a
 lone X1 takes its X2 from beside it; the default folder is the source's), or
 a batch campaign's `"echo"` key, `{"stem": "S47", "echo": {"spacing_ms":
-16.667, "legs": 2, "tail_us": 200, "suffix": "E2"}}`: the record is built into
+16.667, "legs": 2, "tail_us": 200, "end_ms": 32.768, "suffix": "E2"}}`: the record is built into
 the plan's targets folder when the plan loads (an identical file already there
 is left alone), the campaign goes on as `S47E2` (its AWG name cut to 5
 characters as `make-plan` does), and the dry run prints the record's legs,
@@ -705,7 +717,7 @@ lead, transport 1, idle until leg 2 starts one spacing after leg 1, transport
 points, 27.482 ms period, legs at 0.200 and 16.868 ms. The comment lines carry
 the sources, the spacing, each leg's start and the transport's rise/hold/fall,
 plus machine-readable `# spacing_ms:`, `# legs_ms:`, `# lead_us:`,
-`# tail_us:` and `# transport_us:` lines for the comparison and the card
+`# tail_us:`, `# pad_us:`, `# end_ms:` and `# transport_us:` lines for the comparison and the card
 split. It refuses a spacing shorter than the transport, sources on different
 grids and a source that already holds two transports, and ends by reading each
 file back with `run_ilc.load_target` and putting its flat first shot through

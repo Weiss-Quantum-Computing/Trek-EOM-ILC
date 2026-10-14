@@ -192,6 +192,15 @@ def split_pair(drives, n=2500, settle_us=200.0, log=print, targets=None):
     else:
         lead = t[segs[0][0]] - t[0]
         tail = t[-1] - t[segs[-1][1]]
+        # a record padded with idle past its last transport (eomilc.echo end_ms,
+        # 14 Oct 2026: the time after the ramp is in the record for the loop to
+        # correct) says so in its target's "# tail_us" / "# pad_us": the card's
+        # files keep the DESIGN tail, and the pad is idle the card does not play
+        meta_t = read_meta(targets[0]) if targets else {}
+        if isinstance(meta_t.get("tail_us"), list) and meta_t["tail_us"] and \
+                float(meta_t.get("pad_us", [0])[0]) > 0:
+            tail = float(meta_t["tail_us"][0])
+        end = t[segs[-1][1]] + tail
         lo = [t[0]]
         hi = []
         for k in range(len(segs) - 1):
@@ -204,7 +213,7 @@ def split_pair(drives, n=2500, settle_us=200.0, log=print, targets=None):
                 cut = e + (gap * tail / (lead + tail) if lead + tail > 0 else gap / 2)
                 hi.append(cut)
                 lo.append(cut)
-        hi.append(t[-1])
+        hi.append(min(end, t[-1]))
         cuts = [((lo[k], flats[k][0] + settle_us), (flats[k][1] - settle_us, hi[k]))
                 for k in range(len(segs))]
 

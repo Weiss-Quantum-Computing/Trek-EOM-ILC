@@ -3970,6 +3970,7 @@ class App:
                  spacing=tk.StringVar(value=str(e.get("spacing_ms", "16.667"))),
                  legs=tk.StringVar(value=str(e.get("legs", "2"))),
                  tail=tk.StringVar(value=str(e.get("tail_us", "200"))),
+                 end=tk.StringVar(value=str(e.get("end_ms", "32.768"))),
                  suffix=tk.StringVar(value=str(e.get("suffix", ""))),
                  out=tk.StringVar(value=str(e.get("out", ""))))
         self._echo_vars = v
@@ -3985,7 +3986,7 @@ class App:
         g.columnconfigure(1, weight=1)
         r = ttk.Frame(fr); r.pack(fill="x", pady=(3, 0))
         for lab, key, w in (("leg spacing ms", "spacing", 8), ("legs", "legs", 3),
-                            ("tail us", "tail", 5), ("suffix", "suffix", 5)):
+                            ("tail us", "tail", 5), ("end ms", "end", 7), ("suffix", "suffix", 5)):
             ttk.Label(r, text=lab).pack(side="left", padx=(0, 2))
             ttk.Entry(r, textvariable=v[key], width=w).pack(side="left", padx=(0, 8))
         ttk.Label(fr, foreground="#666666", wraplength=470, justify="left", text=(
@@ -4014,19 +4015,20 @@ class App:
                                         parent=self._echo_win)
         try:
             spacing, legs, tail = float(v["spacing"].get()), int(float(v["legs"].get())), float(v["tail"].get())
+            end = float(v["end"].get()) if v["end"].get().strip() else None
         except ValueError:
-            return messagebox.showerror("Spin-echo record", "spacing, legs and tail must be numbers",
+            return messagebox.showerror("Spin-echo record", "spacing, legs, tail and end must be numbers",
                                         parent=self._echo_win)
         suffix = v["suffix"].get().strip() or None
         out = v["out"].get().strip() or None
         self.log(f"spin-echo record from {os.path.basename(src)}: {legs} legs, {spacing:g} ms spacing")
         try:
             r = echo.make([src], spacing_ms=spacing, legs=legs, tail_us=tail, suffix=suffix,
-                          out_dir=out, log=lambda s: self.log("  " + s))
+                          out_dir=out, log=lambda s: self.log("  " + s), end_ms=end)
         except (ValueError, OSError) as e:
             self.log(f"  REFUSED: {e}")
             return messagebox.showerror("Spin-echo record", str(e), parent=self._echo_win)
-        self.cfg["echo"] = dict(spacing_ms=spacing, legs=legs, tail_us=tail,
+        self.cfg["echo"] = dict(spacing_ms=spacing, legs=legs, tail_us=tail, end_ms=v["end"].get().strip(),
                                 suffix=v["suffix"].get().strip(), out=v["out"].get().strip())
         if "X2" not in r["files"]:
             self.log("  NOTE: no X2 source beside the X1 file; only X1's record was written "
@@ -7344,7 +7346,7 @@ class App:
             sts[k] = corrmod.GateSettings(
                 band_hz=float(o["files_meta"].get(ch, {}).get("band", 5000.0)),
                 k_sigma=lim.k_sigma, floor_out=lim.floor_out, cap_out=lim.cap_out,
-                fade_s=lim.fade_s, active_only=lim.active_only)
+                fade_s=lim.fade_s, active_only=False)   # the light after the ramp is corrected too (14 Oct 2026)
         # Light minus monitors is a fresh estimate of the WHOLE error every
         # time (moving the target moves the monitors with the light), so a
         # file in the same slot REPLACES the last. A joint verification's file

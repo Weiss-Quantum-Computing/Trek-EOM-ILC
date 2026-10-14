@@ -256,7 +256,8 @@ def echo_records(plan, log=None):
         try:
             r = echo.make([x1, x2], spacing_ms=float(e.get("spacing_ms", 16.667)), legs=int(e.get("legs", 2)),
                           tail_us=float(e.get("tail_us", 200.0)), suffix=e.get("suffix"),
-                          out_dir=plan["_targets_dir"], log=quiet.append, do_check=False)
+                          out_dir=plan["_targets_dir"], log=quiet.append, do_check=False,
+                          end_ms=e.get("end_ms"))
         except (ValueError, OSError) as exc:
             notes.append(f"{src}: echo record NOT built: {exc}")
             camp["_echo"] = dict(error=str(exc), source=src)

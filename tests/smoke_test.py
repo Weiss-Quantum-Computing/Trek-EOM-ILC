@@ -2589,6 +2589,8 @@ try:
     assert app._echo_vars["spacing"].get() == "16.667" and app._echo_vars["legs"].get() == "2"
     assert app.do_echo_dialog() is None and app._echo_win.winfo_exists()      # one at a time: lifted
     # a spacing shorter than the transport is refused, nothing written
+    assert app._echo_vars["end"].get() == "32.768"          # the whole-echo pad by default
+    app._echo_vars["end"].set("")                          # no pad for these short records
     app._echo_vars["spacing"].set("5")
     _n0 = len(app.log_text.get("1.0", "end"))
     assert app._echo_build() is None and _said59[-1][0] == "error" and "not longer than the transport" in _said59[-1][1]
@@ -2623,6 +2625,13 @@ try:
     _m59 = os.path.getmtime(os.path.join(_d59, "target_ECHOEX1.csv"))
     _r59b = app._echo_build()
     assert not any(_r59b["written"].values()) and os.path.getmtime(os.path.join(_d59, "target_ECHOEX1.csv")) == _m59
+    # padded to a longer period: the pad is idle after the design tail
+    app._echo_vars["end"].set("30")
+    _r59p = app._echo_build()
+    assert _r59p["rec"]["n"] == 15000 and _r59p["rec"]["tail_us"] == 200.0 and abs(_r59p["rec"]["pad_us"] - 7300.0) < 1e-6
+    assert app.cfg["echo"]["end_ms"] == "30"
+    app._echo_vars["end"].set("")
+    app._echo_build()                                      # the unpadded files back on disk for the plan below
     # the batch plan's "echo" key builds the same files from the campaign's stem
     import ilc_batch as _ib59
     import json as _json59

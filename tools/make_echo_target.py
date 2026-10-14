@@ -31,6 +31,9 @@ def main(argv=None):
                     help="leg start to leg start (default 16.667 ms)")
     ap.add_argument("--legs", type=int, default=2, help="transports in the record (default 2)")
     ap.add_argument("--tail-us", type=float, default=200.0, help="idle after the last transport")
+    ap.add_argument("--end-ms", type=float, default=None,
+                    help="pad with idle to this record period (33.333 for the whole spin echo; 32.768 is the "
+                         "16384-point cap at 2 us)")
     ap.add_argument("--suffix", default=None, help="added to the stem (default E<legs>)")
     ap.add_argument("--out", default=None, help="output folder (default: the source's)")
     a = ap.parse_args(argv)
@@ -38,7 +41,7 @@ def main(argv=None):
         raise SystemExit("give one or two targets (X1 [X2])")
     try:
         r = echo.make(a.targets, spacing_ms=a.spacing_ms, legs=a.legs, tail_us=a.tail_us,
-                      suffix=a.suffix, out_dir=a.out, log=print)
+                      suffix=a.suffix, out_dir=a.out, log=print, end_ms=a.end_ms)
     except ValueError as e:
         raise SystemExit(str(e))
     return 0 if r["ok"] else 1

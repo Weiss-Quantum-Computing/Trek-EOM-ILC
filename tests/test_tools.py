@@ -145,6 +145,32 @@ def main():
         check(r3["name"] == "S47ECHO2" and r3["notes"] and "8 characters" in r3["notes"][0],
               f"a long suffix is written with a note: {r3['notes'][0]}")
 
+        print("[2c] end_ms: the record padded with idle to the whole echo, the card's files unchanged")
+        tmp3 = os.path.join(tmp, "pad")
+        rp = echo.make([tgt("S47", "X1")], spacing_ms=16.667, out_dir=tmp3, log=quiet.append, end_ms=32.768)
+        check(rp["rec"]["n"] == 16384 and abs(rp["rec"]["end_ms"] - 32.768) < 1e-9 and rp["rec"]["tail_us"] == 200.0
+              and abs(rp["rec"]["pad_us"] - (32768 - 27482)) < 1e-6 and rp["ok"],
+              f"S47E2 padded to 32.768 ms: 16384 pts, tail 200 us kept, pad {rp['rec']['pad_us']:.0f} us, checks pass")
+        mp = SFC.read_meta(rp["files"]["X1"])
+        check(mp.get("pad_us") == [5286.0] and mp.get("end_ms") == [32.768] and mp.get("tail_us") == [200.0],
+              f"comments carry pad_us / end_ms / tail_us ({mp.get('pad_us')}, {mp.get('end_ms')})")
+        check(abs(echo.pause_ms(rp["rec"]) - 5.856) < 1e-9, "the card pause is the design one, 5.856 ms, not the pad's")
+        try:
+            echo.make([tgt("S47", "X1")], spacing_ms=16.667, out_dir=tmp3, log=quiet.append, end_ms=20.0, do_check=False)
+            check(False, "an end before the last transport is refused")
+        except ValueError as e:
+            check("before the last transport" in str(e), f"an end before the last transport is refused: {str(e)[:50]}")
+        pd1 = as_drive(rp["files"]["X1"], os.path.join(tmp3, "drive_S47E2X1.csv"))
+        pd2 = as_drive(rp["files"]["X2"], os.path.join(tmp3, "drive_S47E2X2.csv"))
+        logp = []
+        wp = SFC.split_pair([pd1, pd2], n=2500, settle_us=200.0, log=logp.append,
+                            targets=[rp["files"]["X1"], rp["files"]["X2"]])
+        L1p, L2p = wp["legs"]
+        check(abs(wp["pauses_ms"][0] - 5.856) < 1e-6 and abs(L1p["down"][1] - (10612 + 200)) < 1e-6
+              and abs(L2p["down"][1] - (16868 + 10412 + 200)) < 1e-6,
+              f"the padded record's card files: pause {wp['pauses_ms'][0]:.3f} ms, leg 1 down ends {L1p['down'][1]:.0f} us, "
+              f"leg 2 down ends {L2p['down'][1]:.0f} us (the design tail, not the pad)")
+
         print("[3] split_for_card: the E2 record, as a synthetic drive pair (target / 560)")
         d1 = as_drive(x1, os.path.join(tmp, "drive_S47E2X1.csv"))
         d2 = as_drive(x2, os.path.join(tmp, "drive_S47E2X2.csv"))

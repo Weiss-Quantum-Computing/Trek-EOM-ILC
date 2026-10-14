@@ -116,8 +116,11 @@ AFTER_MS = 8.0            # was 30 until 14 Oct 2026: the verdict reads the firs
 TOP_PAD = 0.3e-3
 AFTER_FALL = 1.0e-3
 # The panel's gate defaults (ilc_gui corr_* fields).
+# active_only False (14 Oct 2026): the light after a transport is part of what the
+# optical close corrects (the crystal's memory keeps it rotated for tens of ms),
+# so a correction is kept over the whole record, faded 200 us at each end
 GATE_DEFAULTS = dict(k_sigma=3.0, floor_out=0.1, cap_out=300.0, fade_s=200e-6,
-                     active_only=True)
+                     active_only=False)
 PANEL_BAND_HZ = 2000.0
 # rampol.sim.Bench as tools/campaign.py connect(simulate=True) builds it.
 SIM_BENCH = dict(pd_noise=0.2e-3, drift=0.0, er_rest=5000.0, er_mid=300.0, legs_ms=(0.0,))
@@ -745,7 +748,7 @@ def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0
             f"correction is {solo}'s")
     summary = it.compare(folder, x1, x2, f_cut=float(band_hz), pd_delay_us=float(pd_delay_us),
                          split=float(split), leg_gap_ms=1e6, scope_grab_path=sg_path,
-                         eomilc_path=ROOT, log=log, figs=figs)
+                         eomilc_path=ROOT, log=log, figs=figs, whole_record=True)
     summary["solo"] = solo
     keep = {None: ("EO1", "EO2"), "X1": ("EO1",), "X2": ("EO2",)}[solo]
     files, played, by_c = {}, {}, {}

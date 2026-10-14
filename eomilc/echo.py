@@ -108,9 +108,15 @@ def pieces(t, v, i0, i1):
     return a - t[i0], b - a, t[i1] - b, (a, b)
 
 
-def build(paths, spacing_ms, legs=2, tail_us=200.0):
+def build(paths, spacing_ms, legs=2, tail_us=200.0, end_ms=None):
     """The echo record for each source (same indices on every channel).
-    Returns a dict with the per-channel arrays and the numbers for the header."""
+    Returns a dict with the per-channel arrays and the numbers for the header.
+    end_ms (14 Oct 2026): the record is padded with idle to this period
+    (16.667 x 2 = 33.333 ms for the whole spin echo; 32.768 ms is the 16384
+    points the generator's cap allows at 2 us), so the time after the last
+    transport, where the crystal's memory still moves the light, is inside
+    the record for the loop and the optical close to correct. Must reach past
+    the last transport plus tail_us."""
     sfc = _card()
     if legs < 2:
         raise ValueError("legs must be 2 or more")
@@ -138,6 +144,15 @@ def build(paths, spacing_ms, legs=2, tail_us=200.0):
                          f"the legs would overlap")
     ntail = int(np.floor(tail_us / dt + 0.5))
     n = i0 + (legs - 1) * sp + span + 1 + ntail
+    if end_ms is not None:
+        n_end = int(np.floor(float(end_ms) * 1e3 / dt + 0.5))      # period n dt = end_ms
+        if n_end < n:
+            raise ValueError(f"end_ms {end_ms:g} is before the last transport's end plus the tail "
+                             f"({n * dt / 1e3:.3f} ms)")
+        npad = n_end - n
+        n = n_end
+    else:
+        npad = 0
     starts = [i0 + k * sp for k in range(legs)]
     out = []
     for v in vs:
@@ -152,7 +167,8 @@ def build(paths, spacing_ms, legs=2, tail_us=200.0):
     t_out = min(p[3][1] for p in per)
     return dict(t=t_new, v=out, dt=dt, i0=i0, i1=i1, span_us=span * dt, sp=sp,
                 spacing_ms=sp * dt / 1e3, req_ms=spacing_ms, legs_ms=[t_new[s] / 1e3 for s in starts],
-                lead_us=t[i0] - t[0], tail_us=ntail * dt, n=n, per=per, comments=[c for c, _t, _v in src],
+                lead_us=t[i0] - t[0], tail_us=ntail * dt, pad_us=npad * dt, end_ms=n * dt / 1e3,
+                n=n, per=per, comments=[c for c, _t, _v in src],
                 common=(t_in - t[i0], t_out - t_in, t[i1] - t_out), legs=legs)
 
 
@@ -165,7 +181,8 @@ def lines_for(rec, k, paths, stem, ch, suffix):
     src_rec = next((c for c in rec["comments"][k] if c.startswith("record:")), "")
     tr = f"{stem} transport {rec['span_us']:.0f} us"
     segs = [f"{rec['lead_us']:.0f} us 0", tr] + [f"{idle:.0f} us 0", tr] * (legs - 1) \
-        + [f"{rec['tail_us']:.0f} us 0"]
+        + [f"{rec['tail_us']:.0f} us 0"] + ([f"{rec['pad_us']:.0f} us 0 (pad to {rec['end_ms']:.3f} ms)"]
+                                            if rec.get("pad_us") else [])
     return [
         f"{stem}{suffix} {ch}: spin echo, {legs} transports of {stem} in one record at "
         f"{rec['spacing_ms']:.3f} ms leg spacing (leg start to leg start); eomilc.echo",
@@ -184,6 +201,8 @@ def lines_for(rec, k, paths, stem, ch, suffix):
         "legs_ms: " + ", ".join(f"{x:.3f}" for x in rec["legs_ms"]),
         f"lead_us: {rec['lead_us']:.0f}",
         f"tail_us: {rec['tail_us']:.0f}",
+        f"pad_us: {rec.get('pad_us', 0):.0f}",
+        f"end_ms: {rec['end_ms']:.3f}",
         f"transport_us: {rec['span_us']:.0f}, {cr:.0f}, {ch_:.0f}, {cf:.0f}   (span, rise, hold, fall; common)",
     ]
 
@@ -241,7 +260,7 @@ def pause_ms(rec, settle_us=200.0):
 
 
 def make(targets, spacing_ms=16.667, legs=2, tail_us=200.0, suffix=None, out_dir=None,
-         log=print, do_check=True):
+         log=print, do_check=True, end_ms=None):
     """Build and write the record for one or two sources (X1 [X2]; a lone X1
     takes its X2 partner from beside it when there is one). Logs what the
     command line prints. Returns dict(files {ch: path}, rec, stem, name,
@@ -259,7 +278,8 @@ def make(targets, spacing_ms=16.667, legs=2, tail_us=200.0, suffix=None, out_dir
         raise ValueError("give one stem's X1 and X2 (target_<stem>X1.csv target_<stem>X2.csv)")
     legs = int(legs)
     suffix = suffix if suffix is not None else f"E{legs}"
-    rec = build(paths, float(spacing_ms), legs, float(tail_us))
+    rec = build(paths, float(spacing_ms), legs, float(tail_us),
+                end_ms=(float(end_ms) if end_ms is not None else None))
     stem = parts[0][0]
     out_dir = out_dir or os.path.dirname(os.path.abspath(paths[0]))
     os.makedirs(out_dir, exist_ok=True)
