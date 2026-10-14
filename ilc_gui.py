@@ -41,6 +41,29 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+START_TIME = time.time()      # a running panel keeps its old imports: see code_newer_than_panel
+
+
+def code_newer_than_panel():
+    """The program files changed on disk since this panel started: the panel
+    still runs the old ones. 14 Oct 2026: a panel started before the echo
+    records' padding existed rebuilt the suite's records unpadded when its
+    Preview loaded the plan, and wrote them over the padded ones. Returns the
+    changed files' names (relative to the repo), newest first."""
+    out = []
+    roots = [os.path.join(HERE, f) for f in ("ilc_gui.py", "ilc_batch.py", "ilc_bench.py",
+                                              "ilc_hardware.py", "run_ilc.py")]
+    pkg = os.path.join(HERE, "eomilc")
+    if os.path.isdir(pkg):
+        roots += [os.path.join(pkg, f) for f in os.listdir(pkg) if f.endswith(".py")]
+    for p in roots:
+        try:
+            m = os.path.getmtime(p)
+        except OSError:
+            continue
+        if m > START_TIME:
+            out.append((m, os.path.relpath(p, HERE)))
+    return [n for _m, n in sorted(out, reverse=True)]
 sys.path.insert(0, HERE)
 
 try:
@@ -7755,10 +7778,27 @@ class App:
             self._batch_win.win.deiconify()
             self._batch_win.win.lift()
 
+    def _stale_code(self, what):
+        """True (and said in a dialog and the log) when the program files changed
+        on disk since this panel started: anything that loads a plan would run
+        the old code, and rebuild the plan's echo records with it."""
+        changed = code_newer_than_panel()
+        if not changed:
+            return False
+        msg = (f"{what} refused: the program changed on disk since this panel started "
+               f"({', '.join(changed[:4])}{', ...' if len(changed) > 4 else ''}). A running panel "
+               f"keeps its old code; restart it (close and start ilc_gui.bat).")
+        self.log(msg)
+        messagebox.showwarning("Restart the panel", msg, parent=getattr(self._batch_win, 'win', None)
+                               if self._batch_win is not None else None)
+        return True
+
     def do_batch_run(self, mode):
         """mode: 'check' (no instruments), 'sim' (eomilc.simbench, files in
         run/sim), 'bench' (both Treks, after one confirmation)."""
         if self.busy:
+            return
+        if self._stale_code({'check': 'Check plan', 'sim': 'Simulate', 'bench': 'Run on bench'}.get(mode, 'Batch')):
             return
         w = self._batch_win
         path = self.batchplan_var.get().strip()
@@ -7847,6 +7887,8 @@ class App:
         tab -- or, with a campaign selected in the table, that campaign
         alone with the first drive it will play and its limit check."""
         if self.busy:
+            return
+        if self._stale_code("Preview"):
             return
         w = self._batch_win
         path = self.batchplan_var.get().strip()

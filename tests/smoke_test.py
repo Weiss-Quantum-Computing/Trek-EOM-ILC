@@ -3266,6 +3266,32 @@ print("[62] Batch Preview: 2 panels (PAIR X1 + X2 to 5.0 kV over 11.002 ms, NOPE
       "PAIR selected: targets with rise/hold/fall marks over the first drives, both PASS "
       "in the legend, 'previewed PAIR'; Optical settings: sample us 2.0, blank points -> None")
 
+# [63] A stale panel refuses to load a plan (14 Oct 2026): the program files
+# changed on disk after the panel started, so Check plan / Preview / Run would
+# run the old code (and rebuild the echo records with it, which overwrote the
+# suite's padded records that afternoon). Stands alone (smoke_block.py 63).
+import time as _time63
+_mb63 = ilc_gui.messagebox
+_saved63 = (_mb63.showwarning, ilc_gui.START_TIME)
+_said63 = []
+_mb63.showwarning = lambda title, msg, **k: _said63.append((title, msg))
+try:
+    ilc_gui.START_TIME = _time63.time() + 3600          # started 'in the future': nothing is newer
+    assert ilc_gui.code_newer_than_panel() == [] and app._stale_code("Preview") is False and not _said63
+    ilc_gui.START_TIME = 0.0                             # started before every file: all are newer
+    _changed63 = ilc_gui.code_newer_than_panel()
+    assert "ilc_gui.py" in _changed63 and "ilc_batch.py" in _changed63 and any(c.startswith("eomilc") for c in _changed63)
+    assert app._stale_code("Preview") is True and _said63 and _said63[-1][0] == "Restart the panel"
+    assert "Preview refused" in _said63[-1][1] and "restart it" in _said63[-1][1]
+    _n63 = len(_said63)
+    app.do_batch_preview()                               # refused before touching the plan
+    app.do_batch_run("check")
+    assert len(_said63) == _n63 + 2 and "Check plan refused" in _said63[-1][1]
+finally:
+    _mb63.showwarning, ilc_gui.START_TIME = _saved63
+print("[63] stale panel: files newer than the panel's start refuse Preview and Check plan with a "
+      "'Restart the panel' dialog naming them; a panel newer than every file is not stale")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the
