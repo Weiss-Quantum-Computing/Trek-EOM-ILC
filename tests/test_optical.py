@@ -121,7 +121,8 @@ def main():
         npz = [f for f in os.listdir(folder) if f.endswith(".npz")]
         check(len(npz) == 2 * len(steps), f"{len(npz)} Scope Grab captures on disk")
         check(abs(man["drive"]["record_ms"] - len(t) * dt * 1e3) < 1e-9
-              and man["plan"]["mode"] == "single" and man["plan"]["points"] == 20000,
+              and man["plan"]["mode"] == "single" and abs(man["plan"]["points"] - 8000) <= 1
+              and abs(man["plan"]["sampling_us"] - 2.0) < 1e-3,
               "manifest records the record length and the sampling")
         st = dev.scope.inst.state
         check(all(st.get(k) == before.get(k) for k in (":TIMebase:REFerence", ":TIMebase:SCALe",

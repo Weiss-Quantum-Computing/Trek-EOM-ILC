@@ -520,7 +520,8 @@ def main():
         json.dump(raw, open(path, "w"))
         plan = ilc_batch.load_plan(path, cfg=bench_cfg)
         s12 = ilc_batch.optical_settings(plan, plan["campaigns"][0])
-        check(s12["cap_v"] == 1.0 and s12["scan"]["angles"] == "0:359:45" and s12["scan"]["points"] == 20000,
+        check(s12["cap_v"] == 1.0 and s12["scan"]["angles"] == "0:359:45" and s12["scan"]["points"] is None
+              and s12["scan"]["sample_us"] == 2.0,
               "settings: the campaign's over the root's over the defaults")
         awg12, scope12 = bench(bench_cfg)
         msgs = []

@@ -177,7 +177,7 @@ DEFAULT_SETTINGS = {
 # measured correction, and a joint scan verifies. joint_before: in "separate",
 # a joint scan before the first pass (the before of the table), not applied.
 DEFAULT_OPTICAL = dict(
-    scan=dict(angles="0:359:22.5", shots=8, points=20000, ref_every=9, hold_null=True,
+    scan=dict(angles="0:359:22.5", shots=8, points=None, sample_us=2.0, ref_every=9, hold_null=True,
               settle_s=1.0),
     band_hz=5000.0, pd_delay_us=1.7, split=0.5, gains=[0.7, 1.0], iterations=5,
     name="{stem}_opt{pass}", outdir="", verify=True, require_keeper=True, cap_v=None,
@@ -1512,7 +1512,9 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             # drives: a channel's override (a solo scan's park drive); solo: the crystal that drives
             optical.sim_play(dev, _sim_drives(byc, dev, scope, dt, bridge, drives), dt=dt)
             emit("optical", stem=stem, step="scan", scan=name, **{"pass": p})
-            log(f"  scan {name}: analyzer {sc['angles']} deg x {sc['shots']} shots, {sc['points']} points")
+            log(f"  scan {name}: analyzer {sc['angles']} deg x {sc['shots']} shots, "
+                + (f"{int(sc['points'])} points" if sc.get("points") else
+                   f"readout at {float(sc.get('sample_us') or 2.0):g} us"))
             xb = {"plan": plan.get("_path", ""), "campaign": stem, "pass": p, "gain": gains[p - 1]}
             if solo:
                 xb.update(attribution="separate", solo=solo,
@@ -1524,7 +1526,8 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                       if (solo and ends) else ends)
             folder = _optical(f"scan {name}", optical.scan, dev, outdir, name, t, log=olog,
                               cancelled=cancelled, angles=sc["angles"], shots=int(sc["shots"]),
-                              points=int(sc["points"]), ref_every=int(sc["ref_every"]),
+                              points=(int(sc["points"]) if sc.get("points") else None),
+                              sample_us=float(sc.get("sample_us") or 2.0), ref_every=int(sc["ref_every"]),
                               hold_null=bool(sc["hold_null"]), ends_deg=ends_k,
                               settle_s=float(sc["settle_s"]), states=states, stop=stop,
                               extra={"ilc_batch": xb})

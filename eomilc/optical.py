@@ -126,6 +126,8 @@ SIM_AWG_FULL_SCALE = 10.0          # FakeAWG: AMP 20 Vpp -> +-10 V
 
 
 LIGHT_MIN_V = 0.05        # a PD that never rises above this has no light on it
+SCAN_MIN_POINTS = 1000    # the readout per capture when points come from the sample spacing
+SCAN_MAX_POINTS = 100000  # (the MSO-X serves a RAW single shot at any count its memory holds)
 ZERO_TOL_DEG = 1.0        # the rest polarization this far from analyzer 0 is "the zero holds"
 
 
@@ -393,11 +395,17 @@ def _peak_rate(drives, dt):
 
 
 def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
-         angles="0:359:22.5", shots=8, points=20000, ref_every=9, hold_null=True,
+         angles="0:359:22.5", shots=8, points=None, ref_every=9, hold_null=True,
          ends_deg=None, settle_s=1.0, extra=None, preset=None, drives=None, states=None,
-         check=True, pd_vertical=True):
+         check=True, pd_vertical=True, sample_us=2.0):
     """A ramp scan of the light while the drives PLAY (the caller's job:
     outputs on, or sim_play). Returns the scan folder <outdir>/<name>.
+
+    points: the single-shot readout per capture; None (the default since
+    14 Oct 2026) takes the screen span over `sample_us` so the light is
+    read on the ILC's own 2 us spacing whatever the record length (a 27.5 ms
+    spin-echo record gives ~18500 points, S25 ~8000), between SCAN_MIN_POINTS
+    and SCAN_MAX_POINTS.
 
     Before anything is scanned (13 Oct 2026): with pd_vertical the PD's
     channel is set to the polarimeter preset's V/div and offset for the PD
@@ -443,6 +451,10 @@ def scan(dev, outdir, name, t_grid, log=print, progress=None, cancelled=None,
                                      sense=float(a.get("seq_sense", -1.0) or -1.0))
     div, pos = awgmod.timebase_for(record, BEFORE_MS, AFTER_MS)
     rate = _peak_rate(drives, dev.dt or dt)
+    if not points:
+        points = int(min(SCAN_MAX_POINTS, max(SCAN_MIN_POINTS,
+                                              np.ceil(10 * div / (float(sample_us) * 1e-6)))))
+        log(f"  readout {points} points: the {10 * div * 1e3:.1f} ms screen at {float(sample_us):g} us")
     dt_us, per = planmod.sampling(10 * div, int(points), rate)
 
     # what is changed on the ILC's scope, to put back afterwards
