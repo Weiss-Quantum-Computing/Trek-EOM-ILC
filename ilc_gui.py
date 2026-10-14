@@ -7305,21 +7305,31 @@ class App:
                 band_hz=float(o["files_meta"].get(ch, {}).get("band", 5000.0)),
                 k_sigma=lim.k_sigma, floor_out=lim.floor_out, cap_out=lim.cap_out,
                 fade_s=lim.fade_s, active_only=lim.active_only)
-        solo = [k for k, f in froms.items() if str(f).endswith(("_X1", "_X2"))]
-        if solo and gain > 0.5:
-            # a light error that follows the TOTAL rotation (an analyzer or
-            # extinction term, not a crystal's own) is read in full by both
-            # solo scans and applied twice: at gain g a pass leaves -(2g - 1)
-            # of it, so over 0.5 overshoots it and 1.0 flips its sign each
-            # pass; a crystal's own error converges at any gain up to 1
-            self.log(f"optical 4: NOTE gain {gain:g} on corrections measured alone "
-                     f"({', '.join(solo)}): a light error common to both crystals is "
-                     f"in both files and lands twice; 0.5 per pass is safe for it")
+        # Light minus monitors is a fresh estimate of the WHOLE error every
+        # time (moving the target moves the monitors with the light), so a
+        # file in the same slot REPLACES the last. A joint verification's file
+        # applied where a solo correction already sits goes beside it in its
+        # own slot (joint2, joint3, ...) and ADDS to it: the residual the
+        # joint run still shows after each crystal's own error was taken out
+        # one at a time (14 Oct 2026).
+        slots = {}
+        for k in files:
+            joint = not str(froms[k]).endswith(("_X1", "_X2"))
+            lay = self.pair[k].corr_layers or []
+            has_solo = any(L.get("slot") == "optical" and ("_X1" in str(L.get("path", ""))
+                                                             or "_X2" in str(L.get("path", "")))
+                           for L in lay)
+            if joint and has_solo:
+                n = 2 + sum(str(L.get("slot", "")).startswith("joint") for L in lay)
+                slots[k] = f"joint{n}"
+        if slots:
+            self.log("optical 4: " + ", ".join(f"{k}: the joint file goes in slot {s_} beside the solo "
+                                               f"correction (added, not replaced)" for k, s_ in slots.items()))
         ss = dict(self.pair)
-        self.run_worker(lambda: self._opt_apply_work(ss, files, gain, sts, froms),
+        self.run_worker(lambda: self._opt_apply_work(ss, files, gain, sts, froms, slots),
                         "optical 4: applying the corrections...")
 
-    def _opt_apply_work(self, ss, files, gain, sts, froms):
+    def _opt_apply_work(self, ss, files, gain, sts, froms, slots=None):
         """Worker side: eomilc.optical.apply_correction on each chain's loop
         with the file held for its crystal (files {X1/X2: path}: EO1's to
         X1, EO2's to X2; froms: the scan each came from; sts: the gate
@@ -7349,7 +7359,8 @@ class App:
                 s = ss[k]
                 done[k] = optical.apply_correction(
                     s.loop, s.t, s.u, s.full_scale, files[k], gain=gain,
-                    settings=sts[k], base_target=s.base_target, layers=s.corr_layers)
+                    settings=sts[k], base_target=s.base_target, layers=s.corr_layers,
+                    slot=(slots or {}).get(k))
         except optical.CorrectionRefused as exc:
             put_back()
             print(f"{k}: correction REFUSED -- nothing changed on either chain")

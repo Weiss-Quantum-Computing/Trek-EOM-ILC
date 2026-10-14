@@ -125,6 +125,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -422,6 +423,9 @@ def build_run(plan, camp, key, log=print):
     ch = CHANNELS[w["channel"]]
     stem = f"{camp.get('awg', camp['stem'])}{key}"
     tpath = os.path.join(plan["_targets_dir"], f"target_{camp['stem']}{key}.csv")
+    if (camp.get("_echo") or {}).get("error"):
+        raise BatchError(f"{camp['stem']}: the echo record was not built ({camp['_echo']['error']}); "
+                         f"the campaign would train the one-transport {camp['stem']} instead")
     if not os.path.exists(tpath):
         raise BatchError(f"{tpath} does not exist")
     t, v = run_ilc.load_target(tpath, ch.mon_scale)
@@ -585,8 +589,14 @@ def outputs_off(awg, runs, log=print):
 _SLOT = {}     # per AWG channel, across the whole batch: the next slot to fill
 
 
+AWG_MAX_PTS = int(os.environ.get("BK4063B_MAX_PTS", 16384))   # the panel's cap (ilc_gui.AWG_MAX_PTS)
+
+
 def upload(awg, cr, gui_names, log=print):
     import ilc_bench
+    if len(cr.u) > AWG_MAX_PTS:
+        raise BatchError(f"{cr.stem}: {len(cr.u)} points is over the generator's arb cap of {AWG_MAX_PTS} "
+                         f"(BK4063B_MAX_PTS raises it; the 4063B's true ceiling is unprobed)")
     if gui_names:
         name = f"{cr.stem}_i{cr.iteration:02d}"
     else:
@@ -632,6 +642,17 @@ def prepare_campaign(awg, scope, runs, plan, gui_names, allow_on, log=print):
             span = max(float(hi - lo), 1e-3)
             scope.put(f":CHANnel{ch}:SCALe", f"{nice_setting(1.25 * span / 8):.6g}")
             scope.put(f":CHANnel{ch}:OFFSet", f"{0.5 * float(hi + lo):.6g}")
+    pdc = pd_channel(plan)
+    if pdc is not None and pdc not in {cr.wiring["mon_ch"] for cr in runs}:
+        # the PD is read every iteration (capture_monitors): on, DC and at the
+        # polarimeter preset's screen for the PD role (1 V/div, offset 2.7 V),
+        # not whatever the last scan or hand left there (14 Oct 2026: 1 mV/div)
+        scope.put(f":CHANnel{pdc}:DISPlay", "1")
+        scope.put(f":CHANnel{pdc}:COUPling", "DC")
+        scope.put(f":CHANnel{pdc}:OFFSet", "0")
+        scope.put(f":CHANnel{pdc}:SCALe", f"{PD_VDIV:.6g}")
+        scope.put(f":CHANnel{pdc}:OFFSet", f"{PD_OFFSET:.6g}")
+        log(f"  PD CH{pdc} on, DC, {PD_VDIV:g} V/div, offset {PD_OFFSET:+g} V (the polarimeter's preset)")
     log(f"  scope window {rng*1e3:.4g} ms, verticals set for drives and monitors (DC)")
     acq = scope.get(":ACQuire:TYPE")
     if not str(acq).upper().startswith("HRES"):
@@ -707,6 +728,7 @@ def read_waveform(scope, ch, points, tries=3):
 
 
 ADC_CODE_PER_VDIV = float(os.environ.get("EOMILC_ADC_CODE_PER_VDIV", 0.04025))   # as ilc_gui
+PD_VDIV, PD_OFFSET = 1.0, 2.7      # the polarimeter preset's PD screen (rampol.config PRESETS roles PD)
 
 
 def pd_channel(plan):
@@ -749,6 +771,9 @@ def capture_monitors(scope, runs, plan, log=print, stop=None, repeats=None):
         sc, off = scope.try_get(f":CHANnel{c}:SCALe"), scope.try_get(f":CHANnel{c}:OFFSet")
         if codes and sc is not None and off is not None:
             plan_d.append((c, float(off), ADC_CODE_PER_VDIV * float(sc) * codes))
+        elif codes:
+            log(f"  CH{c}: offset dither SKIPPED -- the scope did not answer SCALe / OFFSet, so the "
+                f"ADC code pattern is not averaged out on this channel")
     stacks = {cr.key: [] for cr in runs}
     if pd is not None:
         stacks["PD"] = []
@@ -1204,9 +1229,8 @@ def optical_line(s):
         # solo scans and applied twice: at gain g the pass leaves -(2g - 1)
         # of it, so gains over 0.5 overshoot such a term and 1.0 flips its
         # sign every pass. Crystal-own errors converge at any gain <= 1.
-        if any(g > 0.5 for g in s["gains"]):
-            line += (" -- NOTE: gains over 0.5 double-count a light error common to both "
-                     "crystals (each solo scan reads all of it); 0.5 per pass is safe")
+        if len(s["gains"]) > 1:
+            line += " -- pass 1 solo, later passes add the joint verification's residual"
     if not s["verify"]:
         line += ", no verification scans"
     if s.get("cap_v") is not None:
@@ -1494,10 +1518,14 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                 xb.update(attribution="separate", solo=solo,
                           parked={c: optical.PARK_NAMES[k] for c, k in (("EO1", "X1"), ("EO2", "X2"))
                                   if k != solo})
+            # a solo scan's hold-null angles come from the driving crystal's
+            # rotation alone (the parked one adds none)
+            ends_k = ({solo: ends[solo], ("X2" if solo == "X1" else "X1"): 0.0}
+                      if (solo and ends) else ends)
             folder = _optical(f"scan {name}", optical.scan, dev, outdir, name, t, log=olog,
                               cancelled=cancelled, angles=sc["angles"], shots=int(sc["shots"]),
                               points=int(sc["points"]), ref_every=int(sc["ref_every"]),
-                              hold_null=bool(sc["hold_null"]), ends_deg=ends,
+                              hold_null=bool(sc["hold_null"]), ends_deg=ends_k,
                               settle_s=float(sc["settle_s"]), states=states, stop=stop,
                               extra={"ilc_batch": xb})
             log(f"  scan {name}: {folder}")
@@ -1567,15 +1595,26 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             save()
             log(f"  optical pass {p}/{len(gains)}: gain {_num(g)}")
             prev = passes[i - 1] if i > 0 else None
+            slot = None                   # the file's own slot ("optical") unless a joint residual is added
             if separate:
-                # the before (the table's), never applied: the previous pass's
-                # verification, else a joint scan of its own (joint_before)
-                bsrc, vb = None, None
+                # the before (the table's): the previous pass's verification,
+                # else a joint scan of its own (joint_before). Light minus
+                # monitors is a fresh estimate of the WHOLE error every time
+                # (moving the target moves the monitors with the light), so a
+                # second solo pass would only repeat the first. Pass 1 measures
+                # each crystal alone and its files REPLACE the optical slot;
+                # pass 2 on applies the joint verification's residual, split,
+                # ADDED beside it in its own slot (14 Oct 2026).
+                bsrc, vb, joint = None, None, None
                 if carry is not None:
-                    bsrc, _, vb = carry
+                    bsrc, jsumm, vb = carry
+                    joint = jsumm
                     log(f"  before: pass {p - 1}'s verification ({os.path.basename(bsrc)})")
                 elif prev and prev.get("verdict_after") is not None:
                     bsrc, vb = prev.get("verify_scan"), prev["verdict_after"]
+                    vf = prev.get("verify_corr_files") or {}
+                    if vf and all(os.path.exists(f) for f in vf.values()):
+                        joint = {"files": vf, "played": prev.get("verify_played", {})}
                     log(f"  before: pass {p - 1}'s verification ({os.path.basename(bsrc or '')}, on disk)")
                 elif s["joint_before"]:
                     bsrc = do_scan(name + "_before", p)
@@ -1585,10 +1624,21 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                     log("  no joint before scan (joint_before false): the table has no before")
                 prec.update(attribution="separate", before_scan=bsrc, verdict_before=vb)
                 save()
-                files, played = solo_scans(name, p, prec)
-                prec.update(corr_files=dict(files), played_targets=dict(played))
+                if i > 0 and joint is not None and joint.get("files"):
+                    files, played = dict(joint["files"]), dict(joint.get("played") or {})
+                    slot = f"joint{p}"
+                    log(f"  pass {p}: the joint verification's residual ({os.path.basename(bsrc or '')}) is "
+                        f"applied on top of the solo correction in slot {slot} (added, not replaced: light - "
+                        f"monitors is the whole error each time)")
+                    prec.update(corr_files=dict(files), played_targets=dict(played), slot=slot,
+                                source="joint verification")
+                else:
+                    files, played = solo_scans(name, p, prec)
+                    prec.update(corr_files=dict(files), played_targets=dict(played), slot="optical",
+                                source="solo scans")
+                    save()
+                    play_keepers(": both play")
                 save()
-                play_keepers(": both play")
             else:
                 if carry is not None:
                     src, summ, vb = carry
@@ -1624,7 +1674,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                     try:
                         applied[c] = optical.apply_correction(cr.loop, cr.t, cr.u, cr.full_scale, path, gain=g,
                                                               settings=gate, base_target=cr.base_target,
-                                                              layers=cr.corr_layers)
+                                                              layers=cr.corr_layers, slot=slot)
                     except optical.CorrectionRefused as e:
                         e.channel = cr.key
                         raise
@@ -1938,7 +1988,17 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
             entry = {"started": f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}"}
             try:
                 entry.update(run_campaign(awg, scope, plan, camp, opts, say, stop, emit))
-                entry["status"] = "done"
+                o_ = entry.get("optical") or {}
+                if o_ and o_.get("status") not in (None, "done", "skipped"):
+                    # the electrical part is done; the stage is not: a plain
+                    # rerun comes back to it (the states resume, done passes
+                    # are not repeated)
+                    entry["status"] = f"optical {o_.get('status')}"
+                    say(f"  campaign recorded as '{entry['status']}'"
+                        + (f": {o_.get('error')}" if o_.get("error") else "")
+                        + " -- a plain rerun repeats the stage")
+                else:
+                    entry["status"] = "done"
             except BatchError as e:
                 entry.update(status="refused", error=str(e))
                 say(f"  REFUSED: {e}")
@@ -1947,12 +2007,19 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
                 entry["status"] = "stopped"
                 raise
             except Exception as e:
+                # an instrument or file error (a VISA timeout, a read that
+                # failed three times) ends THIS campaign, outputs off, and the
+                # batch goes on to the next: an overnight run must not end on
+                # one bad read (14 Oct 2026)
                 entry.update(status="error", error=f"{type(e).__name__}: {e}")
-                raise
+                say(f"  ERROR, campaign abandoned: {type(e).__name__}: {e}")
+                for line in traceback.format_exception(type(e), e, e.__traceback__):
+                    say("    " + line.rstrip())
+                _all_off(awg, say, "campaign error")
             finally:
                 entry["minutes"] = round((time.time() - t0) / 60, 2)
                 manifest["campaigns"][stem] = entry
-                json.dump(manifest, open(mpath, "w"), indent=1, default=float)
+                _write_json(mpath, manifest)
                 emit("campaign_end", stem=stem, entry=entry)
     except (BatchStopped, KeyboardInterrupt):
         say("\nstopped -- states are saved after every iteration; run again to resume")
@@ -1960,7 +2027,7 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
         _all_off(awg, say, "end of batch")
         awg.close()
         scope.close()
-        json.dump(manifest, open(mpath, "w"), indent=1, default=float)
+        _write_json(mpath, manifest)
         say(f"manifest {mpath}")
         logf.close()
         emit("batch_end", manifest=manifest)

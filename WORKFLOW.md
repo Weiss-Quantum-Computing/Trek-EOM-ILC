@@ -597,16 +597,23 @@ simulated light-only term is an analyzer error that follows the TOTAL
 rotation, so each solo scan reads about all of it (S25: 29.5 V on the driving
 crystal's file, against 15.8 V per crystal from the joint split), the two
 files together correct about twice what is there, and the verification reads
-worse (light − target spread 290 → 416 mdeg after one pass at 1.0). The bench
-has the same exposure for any light error that follows the TOTAL rotation
-rather than one crystal's voltage (an analyzer or extinction term): both solo
-scans read all of it and the two files apply it twice, so at gain g a pass
-leaves −(2g − 1) of it; 0.5 corrects it exactly, 1.0 flips its sign every
-pass. A crystal's own error converges at any gain up to 1. So run separate
-passes at **gains 0.5** (the dry-run line says so when a gain is higher) and
-read the joint verification: a residual that comes back with the opposite
-sign and about the same size is a common term that was doubled. Nothing of
-it has run on hardware.
+worse (light − target spread 290 → 416 mdeg after one pass at 1.0).
+
+**What a second pass does (14 Oct 2026).** Light − monitors is a fresh
+estimate of the WHOLE error every time: moving the target moves the monitors
+and the light together, so the quantity the polarimeter reads does not shrink
+after a correction (the simulation shows it: −479 → −479 mdeg at the ramp
+top). A second solo pass at the same gain would therefore only repeat the
+first, and a file in the same slot replaces the last. So pass 1 measures each
+crystal alone and its files take the `optical` slot at gain 1 (each crystal's
+own error in full); pass 2 on applies the previous joint verification's files
+(split by `split`) in their own slot, `joint2`, `joint3`, …, ADDED beside the
+solo layer: the residual the joint run still shows, which includes anything
+that follows the total rotation rather than one crystal's voltage (an analyzer
+or extinction term, which the solo scans could only see on their own 90°).
+Gains 1.0 / 1.0 are the staged plans' setting; the dry-run line ends `pass 1
+solo, later passes add the joint verification's residual`. Nothing of it has
+run on hardware.
 
 Offline, `--simulate` (or **Simulate**) runs a plan against
 `eomilc/simbench.py` (the measured FRFs with a gain and delay error). It writes

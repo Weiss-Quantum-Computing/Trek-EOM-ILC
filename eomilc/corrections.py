@@ -169,10 +169,19 @@ def check_target(meta, target_out, dt):
         return out
     for k in ("target_peak_V", "target_rms_V"):
         a, b = float(meta.get(k, fp[k])), fp[k]
-        if abs(a - b) > 1e-3 * max(abs(b), 1.0):
+        rel = abs(a - b) / max(abs(b), 1.0)
+        # another target differs by percent or more; the polarimeter's played
+        # target is the base on the PLAYED timing, and a time map a hair off
+        # identity moves its rms by a tenth of a percent (14 Oct 2026: a
+        # verification's file refused at 0.11 %) -- that is the same target
+        if rel > 5e-3:
             out.append(("fail", f"recorded {k} {a:g} V but this session's base "
                                 f"target has {b:g} V -- the correction belongs "
                                 f"to another target ({meta.get('target_file', '?')})"))
+        elif rel > 1e-3:
+            out.append(("warn", f"recorded {k} {a:g} V against this session's base target's "
+                                f"{b:g} V ({100 * rel:.2f} %): the played timing differed from "
+                                f"the base by that much"))
     return out
 
 

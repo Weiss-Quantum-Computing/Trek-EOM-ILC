@@ -473,6 +473,42 @@ def main():
         check(o.get("status") == "done" and not os.path.exists(os.path.join(odir, "S25_opt1_before"))
               and p1.get("verdict_before", "absent") is None and finite(p1.get("verdict_after")),
               "joint_before false: no S25_opt1_before, verdict_before None, the verification still runs")
+        # two passes: pass 1 solo (slot optical), pass 2 the joint verification's residual ADDED
+        # in slot joint2 -- light - monitors is the whole error each time, a second solo pass
+        # would only repeat the first
+        raw["run_dir"] = os.path.join(tmp, "run11d")
+        raw["optical"]["gains"] = [1.0, 1.0]
+        raw["optical"]["joint_before"] = True
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        msgs = []
+        ilc_batch.dry_run(plan, log=msgs.append)
+        check(any("pass 1 solo, later passes add the joint verification's residual" in m for m in msgs),
+              "the dry run says what pass 2 does")
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=bench(bench_cfg))
+        c = man["campaigns"]["S25"]
+        o = c.get("optical") or {}
+        P = o.get("passes") or []
+        odir = os.path.join(plan["_run_dir"], "optical")
+        check(c["status"] == "done" and o.get("status") == "done" and len(P) == 2
+              and [p.get("status") for p in P] == ["done", "done"], f"two separate passes done ({[p.get('status') for p in P]})")
+        if len(P) == 2:
+            check(P[0].get("slot") == "optical" and P[0].get("source") == "solo scans"
+                  and P[1].get("slot") == "joint2" and P[1].get("source") == "joint verification"
+                  and P[1]["corr_files"] == P[0]["verify_corr_files"] and "solo_scans" not in P[1],
+                  "pass 1 from the solo scans in slot optical; pass 2 from pass 1's verification in slot joint2, no solo scans")
+            check(not os.path.isdir(os.path.join(odir, "S25_opt2_X1")) and os.path.isdir(os.path.join(odir, "S25_opt2")),
+                  "pass 2 scanned only its verification")
+            check(any("applied on top of the solo correction in slot joint2" in m for m in msgs), "the log says so")
+            for k in ("X1", "X2"):
+                with np.load(c["channels"][k]["state"], allow_pickle=True) as st:
+                    lay = json.loads(str(st["corrections"])) if st["corrections"].dtype.kind in "US" else list(st["corrections"])
+                    slots = sorted(L.get("slot") for L in lay)
+                    check(slots == ["joint2", "optical"] and np.allclose(st["target"], st["base_target"] + st["corr_total"]),
+                          f"{k} state: two layers {slots}, target = base + total")
+            v1, v2 = P[0]["verdict_after"], P[1]["verdict_after"]
+            check(finite(v1) and finite(v2), "both verifications finite")
 
         print("[12] a refused correction is recorded; the campaign keeps its electrical keeper")
         path = write_plan(tmp, ["S25"], name="t12")
@@ -492,7 +528,7 @@ def main():
         c = man["campaigns"]["S25"]
         o = c.get("optical") or {}
         P = o.get("passes") or [{}]
-        check(c["status"] == "done" and o.get("status") == "refused" and P[0].get("status") == "refused"
+        check(c["status"] == "optical refused" and o.get("status") == "refused" and P[0].get("status") == "refused"
               and any("cap" in f for f in P[0].get("refused", [])),
               f"refused for the cap, recorded ({(P[0].get('refused') or ['?'])[0][:70]})")
         check(any("correction REFUSED" in m for m in msgs), "the log says so")
@@ -537,7 +573,8 @@ def main():
         rows = {r["stem"]: r for r in ilc_batch.plan_rows(plan)}
         check(rows["S47E2"]["n"] == 13741 and abs(rows["S47E2"]["period_ms"] - 27.482) < 1e-6 and rows["S47E2"]["ok"],
               "S47E2 row: 13741 pts, 27.482 ms, drives within limits")
-        check(rows["S25"]["error"] and "does not exist" in rows["S25"]["error"], "the S25 row reports its missing target")
+        check(rows["S25"]["error"] and "echo record was not built" in rows["S25"]["error"],
+              f"the S25 row reports the echo that was not built: {rows['S25']['error'][:50]}")
         plan = ilc_batch.load_plan(path, cfg=bench_cfg)
         check("already there" in plan["_echo_notes"][0], "a second load finds the files unchanged")
 
