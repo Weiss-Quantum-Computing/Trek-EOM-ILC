@@ -7172,6 +7172,16 @@ class App:
                 band_hz=float(o["files_meta"].get(ch, {}).get("band", 5000.0)),
                 k_sigma=lim.k_sigma, floor_out=lim.floor_out, cap_out=lim.cap_out,
                 fade_s=lim.fade_s, active_only=lim.active_only)
+        solo = [k for k, f in froms.items() if str(f).endswith(("_X1", "_X2"))]
+        if solo and gain > 0.5:
+            # a light error that follows the TOTAL rotation (an analyzer or
+            # extinction term, not a crystal's own) is read in full by both
+            # solo scans and applied twice: at gain g a pass leaves -(2g - 1)
+            # of it, so over 0.5 overshoots it and 1.0 flips its sign each
+            # pass; a crystal's own error converges at any gain up to 1
+            self.log(f"optical 4: NOTE gain {gain:g} on corrections measured alone "
+                     f"({', '.join(solo)}): a light error common to both crystals is "
+                     f"in both files and lands twice; 0.5 per pass is safe for it")
         ss = dict(self.pair)
         self.run_worker(lambda: self._opt_apply_work(ss, files, gain, sts, froms),
                         "optical 4: applying the corrections...")
