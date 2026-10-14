@@ -1763,6 +1763,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                     cr.corr_from = cr.iteration     # earlier iterations were measured against the base
                 path = os.path.abspath(files[c])
                 L = next((L for L in a.layers if L.get("path") == path), a.layers[-1])
+                L["from_it"] = int(cr.iteration)     # the panel tags the iterations after it
                 moved = float(np.max(np.abs(a.corr_total))) * cr.channel.mon_scale
                 prec["applied"][cr.key] = dict(file=path, gain=g, kept_peak_V=float(L.get("kept_peak", 0.0)),
                                                resolved=float(L.get("resolved", 0.0)), status=L.get("status", ""),

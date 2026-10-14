@@ -252,6 +252,7 @@ class Session:
         self.base_target = None
         self.corr_total = None
         self.corr_layers = []        # [{path, slot, gain, on, ...}] as applied
+        self.corr_from = None        # the iteration the first optical correction took effect at
         self.line_fit = None         # {"fit": mains record, "meta": {...}}
         self.scope_channels = ""     # chanmap.record() of the scope map in
                                      # force when this state was measured
@@ -285,6 +286,7 @@ def load_session(path) -> Session:
             s.corr_layers = list(json.loads(str(st["corrections"])))
         except ValueError:
             s.corr_layers = []
+    s.corr_from = int(st["corr_from"]) if "corr_from" in st else None
     if "line_fit" in st:
         try:
             rec = json.loads(str(st["line_fit"]))
@@ -1899,6 +1901,8 @@ class App:
         self.fig_err, (self.ax_err,) = self._tab("Error", 1, tab="Error", view="error")
         self.fig_spec, (self.ax_spec,) = self._tab("Error spectrum", 1, tab="Error",
                                                    view="spectrum")
+        self.fig_legs, (self.ax_legs, self.ax_legs2) = self._tab(
+            "Echo legs", 2, sharex=True, tab="Error", view="legs")
         self.fig_conv, (self.ax_conv,) = self._tab("Convergence", 1, tab="Convergence",
                                                    view="by iteration")
         self.fig_convt, (self.ax_convt,) = self._tab("Convergence (wall clock)", 1,
@@ -1948,6 +1952,8 @@ class App:
             "Optical passes", 2, sharex=True, tab="Optical", view="passes")
         self.fig_optl, (self.ax_optl, self.ax_optl2) = self._tab(
             "Scan live", 2, sharex=True, tab="Optical", view="scan live")
+        self.fig_optlegs, (self.ax_optlegs, self.ax_optlegs2) = self._tab(
+            "Echo legs (light)", 2, sharex=True, tab="Optical", view="legs")
         # Batch: the Batch window's Preview -- a plan's targets before it runs
         # (one panel per campaign), or one campaign with its first drive; the
         # axes are rebuilt on every preview (_batch_preview_show)
@@ -7883,6 +7889,205 @@ class App:
         ax.grid(True, axis="x", alpha=0.3)
         self._draw(self.fig_optva)
 
+    # ------------------------------------- optical vs electrical iterations
+    # An iteration measured after an optical correction took effect is drawn
+    # in warm colours (autumn) and tagged [optN] in every legend, N the pass;
+    # the electrical ones keep viridis (14 Oct 2026).
+    def _opt_passes(self, s):
+        """The iterations at which the optical corrections took effect, in
+        order: from the layers' from_it (the batch writes it), else the
+        state's corr_from (the first one), else none."""
+        if s is None:
+            return []
+        its = sorted({int(L["from_it"]) for L in (s.corr_layers or [])
+                      if L.get("from_it") is not None and L.get("status") == "applied"})
+        if not its and getattr(s, "corr_from", None) is not None:
+            its = [int(s.corr_from)]
+        return its
+
+    def _opt_pass_of(self, s, it):
+        """0 for an iteration measured against the base target, else the
+        number of the optical pass whose correction it was measured with."""
+        return sum(1 for p in self._opt_passes(s) if int(it) >= p)
+
+    def _it_tag(self, s, it):
+        p = self._opt_pass_of(s, it)
+        return f" [opt{p}]" if p else ""
+
+    # ----------------------------------------------- the spin echo's two legs
+    def _echo_legs(self, s):
+        """(first sample of transport 1, its last, the shift to transport 2)
+        in the session's base target, from the card split's transport finder;
+        None for a one-transport record."""
+        tgt = s.base_target if s.base_target is not None else s.loop.target
+        try:
+            from eomilc import echo
+            tr = echo._card().find_transports([np.asarray(tgt, float)], s.loop.dt * 1e6)
+        except Exception:
+            return None
+        if len(tr) < 2:
+            return None
+        (a1, b1), (a2, _b2) = tr[0], tr[1]
+        return int(a1), int(b1), int(a2 - a1)
+
+    def _plot_legs(self, snaps):
+        """Error -> legs: the spin echo's second transport against its first,
+        per selected iteration. Top: target - measured over leg 1 (solid) and
+        leg 2 (dashed), the time axis from each leg's start. Bottom: measured
+        leg 2 - leg 1 at the monitor, and the drive's leg 2 - leg 1 on the
+        right axis -- what the loop had to do differently for the second leg
+        (the chain's memory of the first), and what is left of it."""
+        s = self.session
+        ax, ax2 = self.ax_legs, self.ax_legs2
+        ax.clear()
+        ax2.clear()
+        for a in list(self.fig_legs.axes):
+            if a not in (ax, ax2):
+                a.remove()
+        legs = self._echo_legs(s) if s is not None else None
+        if legs is None:
+            for a in (ax, ax2):
+                a.text(0.5, 0.5, "one transport in this record -- the legs view needs a spin echo "
+                                 "(two transports in one target)", ha="center", va="center",
+                       transform=a.transAxes, color="#888888")
+            ax.set_title("Spin echo: leg 2 against leg 1")
+            self._draw(self.fig_legs)
+            return
+        a1, b1, shift = legs
+        dt = s.loop.dt
+        pad = int(round(0.3e-3 / dt))
+        i0 = max(0, a1 - pad)
+        n = min(shift, len(s.t) - (i0 + shift)) - pad    # leg 2 must fit in the record, clear of its edge
+        if n <= 0:
+            self._plot_note(ax, "the record ends before leg 2 -- nothing to compare")
+            self._draw(self.fig_legs)
+            return
+        sl1, sl2 = slice(i0, i0 + n), slice(i0 + shift, i0 + shift + n)
+        tms = (np.arange(n) - (a1 - i0)) * dt * 1e3
+        sc = self._out_scale()
+        tgt = s.loop.target
+        nn = len(snaps)
+        axr = ax2.twinx()
+        named = {sn["it"] for sn in snaps[-5:]}          # the legend names the last five only
+        for idx, sn in enumerate(snaps):
+            y = s.loop._seen(sn["y"])
+            e = (tgt - y) * sc
+            col = self._iter_colour(idx, nn, self._opt_pass_of(s, sn["it"]))
+            lw = 1.1 if idx == nn - 1 else 0.8
+            lab = f"i{sn['it']:02d}{self._it_tag(s, sn['it'])}" if sn["it"] in named else None
+            ax.plot(tms, e[sl1], color=col, lw=lw, label=f"{lab} leg 1" if lab else None)
+            ax.plot(tms, e[sl2], color=col, lw=lw, ls="--", label=f"{lab} leg 2" if lab else None)
+            d = (y[sl2] - y[sl1]) * sc
+            ax2.plot(tms, d, color=col, lw=lw,
+                     label=(f"{lab}: measured, peak {np.max(np.abs(d)):.2f} V, rms "
+                            f"{np.sqrt(np.mean(d ** 2)):.2f} V") if lab else None)
+            u = np.asarray(sn.get("u", s.u), float)
+            if len(u) == len(s.t):
+                axr.plot(tms, (u[sl2] - u[sl1]) * 1e3, color=col, lw=0.6, ls=":",
+                         label="drive leg 2 - leg 1, dotted (mV at the AWG)" if idx == nn - 1 else None)
+        ax.axhline(0, color=TARGET_COLOUR, lw=0.5)
+        ax2.axhline(0, color=TARGET_COLOUR, lw=0.5)
+        axt = ax.twinx()
+        axt.plot(tms, tgt[sl1] * sc, color=TARGET_COLOUR, lw=0.6, ls=":", alpha=0.5)
+        axt.set_ylabel(f"target ({self._out_name()}, V)", color="#666666")
+        axt.tick_params(axis="y", colors="#666666")
+        ax.set_ylabel(f"target - measured ({self._out_name()}, V)")
+        ax.set_title(f"{s.channel} '{s.stem}' -- spin echo: leg 2 (dashed) against leg 1 (solid), "
+                     f"legs {shift * dt * 1e3:.3f} ms apart")
+        ax2.set_ylabel(f"leg 2 - leg 1 ({self._out_name()}, V)")
+        axr.set_ylabel("drive leg 2 - leg 1 (mV)", color="#666666")
+        axr.tick_params(axis="y", colors="#666666")
+        ax2.set_xlabel("time from the leg's transport start (ms)")
+        if nn:
+            ax.legend(loc="upper right", fontsize=6, ncols=2)
+            h1, l1 = ax2.get_legend_handles_labels()
+            h2, l2 = axr.get_legend_handles_labels()
+            ax2.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=6)
+            self._plot_note(ax2, "the same drive on both legs leaves the chain's memory of leg 1 in the measured "
+                                 "difference; the drive difference is what the loop learned to undo", loc="sw")
+        else:
+            ax.text(0.5, 0.5, "no measurements stored yet", ha="center", va="center",
+                    transform=ax.transAxes, color="#888888")
+        for a in (ax, ax2):
+            a.grid(True, alpha=0.3)
+        self._draw(self.fig_legs)
+
+    def _plot_opt_legs(self, scan):
+        """Optical -> legs: a scan's light and monitors on the spin echo's
+        second transport against its first (from the comparison's
+        target_compare.npz and the verdict's transport landmarks). Top: the
+        rotation on leg 1 (solid) and leg 2 (dashed), light and monitors.
+        Bottom: leg 2 - leg 1 of the light, of the monitors, and of light -
+        monitors, low-passed at the band: the crystal's memory of the first
+        leg is the last one."""
+        ax, ax2 = self.ax_optlegs, self.ax_optlegs2
+        ax.clear()
+        ax2.clear()
+        v = scan.get("verdict") or {}
+        tr = ((v.get("legs") or [{}])[0].get("transports")) or []
+        z = self._load_compare(scan)
+        title = f"{scan['label']} {scan['scan']}: spin echo, leg 2 (dashed) against leg 1 (solid)"
+        if z is None or len(tr) < 2:
+            for a in (ax, ax2):
+                a.text(0.5, 0.5, "no comparison on disk" if z is None else
+                       "one transport in this record -- the legs view needs a spin echo",
+                       ha="center", va="center", transform=a.transAxes, color="#888888")
+            ax.set_title(title)
+            self._draw(self.fig_optlegs)
+            return
+        tl = z["t_leg1"]
+        ms_all, dt = (tl - tl[0]) * 1e3, float(np.median(np.diff(tl)))
+        band = float(self._opt_band(scan))
+        a1, a2 = float(tr[0]["landmarks_ms"][0]), float(tr[1]["landmarks_ms"][0])
+        shift = a2 - a1
+        i0 = int(np.searchsorted(ms_all, a1 - 0.3))
+        k = int(round(shift / (dt * 1e3)))
+        n = min(k, len(ms_all) - (i0 + k)) - int(round(0.3 / (dt * 1e3)))   # clear of the record's edge
+        if n <= 0:
+            self._plot_note(ax, "the record ends before leg 2 -- nothing to compare")
+            self._draw(self.fig_optlegs)
+            return
+        sl1, sl2 = slice(i0, i0 + n), slice(i0 + k, i0 + k + n)
+        tms = ms_all[sl1] - a1
+        light, mon, tgt = z["leg1_phi_light"], z["leg1_phi_mon"], z["phi_target"]
+        ax.plot(tms, tgt[sl1], color=TARGET_COLOUR, lw=0.8, ls=":", label="target")
+        ax.plot(tms, light[sl1], color=self.OPT_LEG_COLOURS[0], lw=0.9, label="light, leg 1")
+        ax.plot(tms, light[sl2], color=self.OPT_LEG_COLOURS[0], lw=0.9, ls="--", label="light, leg 2")
+        ax.plot(tms, mon[sl1], color="#7f7f7f", lw=0.8, label="monitors, leg 1")
+        ax.plot(tms, mon[sl2], color="#7f7f7f", lw=0.8, ls="--", label="monitors, leg 2")
+        parts = (("light", light, self.OPT_LEG_COLOURS[0]), ("monitors", mon, "#7f7f7f"),
+                 ("light - monitors", light - mon, "k"))
+        for name, x, col in parts:
+            d = corrmod.lowpass(x[sl2] - x[sl1], dt, band) * 1e3
+            top = (tms > float(tr[0]["landmarks_ms"][1]) - a1) & (tms < float(tr[0]["landmarks_ms"][2]) - a1)
+            aft = (tms > float(tr[0]["landmarks_ms"][3]) - a1) & (tms < float(tr[0]["landmarks_ms"][3]) - a1 + 1.0)
+            ax2.plot(tms, d, color=col, lw=1.0 if name != "light - monitors" else 0.8,
+                     label=f"{name}: leg 2 - leg 1, top {np.mean(d[top]) if top.any() else float('nan'):+.0f}, "
+                           f"after the fall {np.mean(d[aft]) if aft.any() else float('nan'):+.0f}, "
+                           f"peak {np.max(np.abs(d)):.0f} mdeg")
+        ax2.axhline(0, color=TARGET_COLOUR, lw=0.5)
+        ax.set_ylabel("rotation (deg)")
+        ax.set_title(title + f", {shift:.3f} ms apart")
+        ax.legend(fontsize=7, loc="best")
+        ax2.set_ylabel("leg 2 - leg 1 (mdeg)")
+        ax2.set_xlabel("time from the leg's transport start (ms)")
+        ax2.legend(fontsize=7, loc="best")
+        self._plot_note(ax2, f"low-passed at {band:g} Hz; the same drive played twice, so the light's "
+                             f"difference is the crystal's memory of leg 1 plus what the monitors differ by",
+                        loc="sw")
+        for a in (ax, ax2):
+            a.grid(True, alpha=0.3)
+        self._draw(self.fig_optlegs)
+
+    def _opt_band(self, scan):
+        """The comparison band of a scan (its summary's f_cut_Hz), 5 kHz by default."""
+        try:
+            with open(os.path.join(scan["folder"], "analysis", "target_compare", "summary.json"),
+                      encoding="utf-8") as fh:
+                return float(json.load(fh).get("f_cut_Hz") or 5000.0)
+        except (OSError, ValueError):
+            return 5000.0
+
     # ------------------------------------------------ optical stage on review
     PASS_COLOURS = ("#7f7f7f", "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b")
 
@@ -8008,6 +8213,8 @@ class App:
         for a in (ax, ax2):
             a.grid(True, alpha=0.3)
         self._draw(self.fig_optp)
+        if joint:
+            self._plot_opt_legs(joint[-1])
 
     def _review_scan(self, s, before=None):
         """A scan from the Batch window's optical table on the Optical tab:
@@ -8019,6 +8226,7 @@ class App:
             self.status.configure(text=f"optical review: {s['scan']} has no comparison on disk")
             return
         self._plot_optical(summary)
+        self._plot_opt_legs(s)
         if (before is not None and s["kind"] == "verify" and s.get("verdict")
                 and before.get("verdict")):
             rows, _halved = self._opt_table(before["verdict"], s["verdict"])
@@ -9552,7 +9760,7 @@ class App:
 
     def _snap_label(self, sn):
         d = sn["m"].get("model") if isinstance(sn.get("m"), dict) else None
-        lab = f"iter {sn['it']}"
+        lab = f"iter {sn['it']}" + self._it_tag(self.session, sn["it"])
         if sn.get("run") is not None:
             lab += f" r{sn['run']}"
         elif d:
@@ -9589,7 +9797,11 @@ class App:
             return ""
         return "+" + fmt_span(t - ref)
 
-    def _iter_colour(self, idx, n):
+    def _iter_colour(self, idx, n, opt=0):
+        """viridis for the electrical iterations; autumn (warm) for the ones
+        measured after an optical correction (opt = the pass number)."""
+        if opt:
+            return matplotlib.colormaps["autumn"](0.05 + 0.6 * idx / max(n - 1, 1))
         return matplotlib.colormaps["viridis"](0.1 + 0.75 * idx / max(n - 1, 1))
 
     def _time_axes(self):
@@ -9700,6 +9912,7 @@ class App:
         snaps = self._selected_snaps()
         cmp = self._compare_groups()
         self._plot_error(snaps, cmp)
+        self._plot_legs(snaps)
         self._plot_spectrum(snaps, cmp)
         self._plot_dcorr(snaps, cmp)
         self._plot_dspec(snaps, cmp)
@@ -9756,7 +9969,7 @@ class App:
             ax.plot(tms, s.loop.plant.forward(s.u) * sc, color=PRED_COLOUR,
                     lw=0.9, ls="--", label="model-predicted output")
         for idx, sn in enumerate(snaps):
-            ax.plot(tms, sn["y"] * sc, color=self._iter_colour(idx, n),
+            ax.plot(tms, sn["y"] * sc, color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                     lw=1.1 if idx == n - 1 else 0.8,
                     ls="--" if sn.get("run") is not None else "-",
                     label="measured " + self._snap_label(sn),
@@ -9794,9 +10007,9 @@ class App:
                 continue
             same = len(sn["u"]) == len(u) and np.array_equal(sn["u"], u)
             shown_current = shown_current or same
-            ax.plot(tms, sn["u"], color=self._iter_colour(idx, n),
+            ax.plot(tms, sn["u"], color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                     lw=1.1 if same else 0.8,
-                    label=f"iter {sn['it']} drive"
+                    label=f"iter {sn['it']}{self._it_tag(self.session, sn['it'])} drive"
                           + (f" (= current, iteration {s.iteration})" if same else ""),
                     **self._dot_kw(len(tms)))
         if not shown_current:
@@ -9913,7 +10126,7 @@ class App:
         n = len(snaps)
         for idx, sn in enumerate(snaps):
             ax.plot(tms, (s.loop.target - s.loop._seen(sn["y"])) * sc,
-                    color=self._iter_colour(idx, n),
+                    color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                     lw=1.1 if idx == n - 1 else 0.8,
                     ls="--" if sn.get("run") is not None else "-",
                     label=self._snap_label(sn),
@@ -9940,7 +10153,8 @@ class App:
             if st is not None and len(st["sem_t"]) == len(tms):
                 e = (s.loop.target - s.loop._seen(snaps[-1]["y"])) * sc
                 band = st["sem_t"] * sc
-                ax.fill_between(tms, e - band, e + band, color=self._iter_colour(n - 1, n),
+                ax.fill_between(tms, e - band, e + band,
+                                color=self._iter_colour(n - 1, n, self._opt_pass_of(s, snaps[-1]["it"])),
                                 alpha=0.22, lw=0,
                                 label=f"+/-1 standard error of the {st['n_shots']}-shot mean")
         if total:
@@ -9984,7 +10198,7 @@ class App:
         n = len(snaps)
         for idx, sn in enumerate(snaps):
             fe, ae = asd(s.loop.target - s.loop._seen(sn["y"]), s.loop.dt, sc)
-            ax.loglog(fe, ae, color=self._iter_colour(idx, n),
+            ax.loglog(fe, ae, color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                       lw=1.0 if idx == n - 1 else 0.7,
                       ls="--" if sn.get("run") is not None else "-",
                       label=self._snap_label(sn),
@@ -10081,7 +10295,7 @@ class App:
             if u is None or len(u) != len(s.t):
                 skipped.append(f"{sn['it']}")
                 continue
-            ax.plot(tms, (u - u_ref) * 1e3, color=self._iter_colour(idx, n),
+            ax.plot(tms, (u - u_ref) * 1e3, color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                     lw=1.1 if idx == n - 1 else 0.8,
                     label=self._snap_label(sn),
                     **self._dot_kw(len(tms), ms=2.6))
@@ -10150,7 +10364,7 @@ class App:
             if u is None or len(u) != len(s.t):
                 continue
             fe, ae = asd((u - u_ref) * 1e3, s.loop.dt)
-            ax.loglog(fe, ae, color=self._iter_colour(idx, n),
+            ax.loglog(fe, ae, color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                       lw=1.0 if idx == n - 1 else 0.7,
                       label=self._snap_label(sn),
                       **self._dot_kw(len(fe), ms=2.2))
@@ -10288,7 +10502,7 @@ class App:
                     or len(u) != len(s.t) or len(up) != len(s.t)):
                 skipped.append(f"{sn['it']}")
                 continue
-            ax.plot(tms, (u - up) * 1e3, color=self._iter_colour(idx, n),
+            ax.plot(tms, (u - up) * 1e3, color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                     lw=1.1 if idx == n - 1 else 0.8,
                     label=f"{self._snap_label(sn)} - iter {sn['it'] - 1}",
                     **self._dot_kw(len(tms), ms=2.6))
@@ -10388,6 +10602,14 @@ class App:
                         color=col, lw=0.7, ms=2.5, alpha=0.6,
                         label=f"{stem} rms error", zorder=CMP_ZORDER)
             n_it = max(n_it, len(chist))
+        for j, p in enumerate(self._opt_passes(s), 1):
+            if hist and p < len(hist):
+                kk = np.arange(p, len(hist))
+                ax.semilogy(kk, [hist[i]["peak_err_hv"] for i in kk], "D", color="#d62728", ms=5,
+                            mfc="none", label="after an optical correction" if j == 1 else None, zorder=4)
+            ax.axvline(p - 0.5, color="#d62728", lw=0.8, ls="--")
+            ax.annotate(f"optical pass {j} applied", (p - 0.4, 0.02), xycoords=("data", "axes fraction"),
+                        fontsize=6.5, color="#d62728", ha="left", va="bottom", rotation=90)
         if n_it:
             ax.set_xticks(np.arange(n_it))
             ax.legend(loc="best", fontsize=7)
@@ -10441,6 +10663,10 @@ class App:
                         ms=4, label="peak error")
             ax.semilogy(xs, [sn["m"]["rms_err_hv"] for sn in base], "s--", color=c, lw=0.8,
                         ms=3, alpha=0.6, label="rms error")
+            opt = [(x, sn["m"]["peak_err_hv"]) for x, sn in zip(xs, base) if self._opt_pass_of(s, sn["it"])]
+            if opt:
+                ax.semilogy(*zip(*opt), "D", color="#d62728", ms=5, mfc="none",
+                            label="after an optical correction")
             for x, sn in zip(xs, base):
                 ax.annotate(str(sn["it"]), (x, sn["m"]["peak_err_hv"]), fontsize=6,
                             color="#666666", xytext=(0, 4), textcoords="offset points",
@@ -10529,17 +10755,17 @@ class App:
                 ch = -1
         deg = float(st.get("analyzer_deg", float("nan"))) if st else float("nan")
         for idx, sn in enumerate(sel):
-            col = self._iter_colour(idx, n)
+            col = self._iter_colour(idx, n, self._opt_pass_of(s, sn["it"]))
             lw = 1.1 if idx == n - 1 else 0.8
             ax.plot(tms, sn["pd"], color=col, lw=lw,
-                    label=f"iter {sn['it']}: peak {float(np.max(sn['pd'])):.3f} V",
+                    label=f"iter {sn['it']}{self._it_tag(s, sn['it'])}: peak {float(np.max(sn['pd'])):.3f} V",
                     **self._dot_kw(len(tms)))
             rms = f"{key or s.channel} monitor rms {sn['m']['rms_err_hv']:.2f} V"
             osn = other[1].get(sn["it"]) if other is not None else None
             if osn is not None:
                 rms += f", {other[0]} {osn['m']['rms_err_hv']:.2f} V"
             axd.plot(tms, (sn["pd"] - ref["pd"]) * 1e3, color=col, lw=lw,
-                     label=f"iter {sn['it']}: {rms}", **self._dot_kw(len(tms)))
+                     label=f"iter {sn['it']}{self._it_tag(s, sn['it'])}: {rms}", **self._dot_kw(len(tms)))
         ax.set_title(f"PD on CH{ch if ch > 0 else '?'} by iteration, {pstem}"
                      + (f", analyzer {deg:+.1f} deg" if np.isfinite(deg) else ""))
         ax.set_ylabel("PD (V)")
@@ -10578,7 +10804,7 @@ class App:
             ax.errorbar(st["fold_centres"], st["fold_mean"] * sc * 1e3,
                         yerr=st["fold_sem"] * sc * 1e3,
                         fmt="o--" if sn.get("run") is not None else "o-", ms=3,
-                        lw=0.9, capsize=2, color=self._iter_colour(idx, n),
+                        lw=0.9, capsize=2, color=self._iter_colour(idx, n, self._opt_pass_of(self.session, sn["it"])),
                         label=f"{self._snap_label(sn)}: {st['fold_amp']*sc:.2f} V pk-pk, "
                               f"{st['fold_amp']/max(st['fold_sig'], 1e-12):.1f} sigma")
         if sel:
