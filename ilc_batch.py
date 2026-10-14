@@ -73,6 +73,21 @@ reverts to its best drive); or a drive failing the limit check. The keeper is
 the measured iteration with the lowest rms error at or after `min_iterations`
 (or overall, if it stopped before that).
 
+THE PD, THE ANALYZER, THE SHOT COUNT
+------------------------------------
+The loop trains the monitors; the light is what the atoms get. With a PD
+channel in the Scope channels map, every measurement also reads the analyzer
+photodiode from the same frozen shots (offset dithered, on X1's grid) and keeps
+it as meas_<stem>PD_iNN.npy plus a stats sidecar; the manifest's "iterations"
+list carries pd_peak_v and pd_change_mv (rms change against the previous PD,
+mV) per iteration, and the log one "PD:" line. The analyzer's angle is read
+once at each campaign start through the polarimeter's ELL14 driver (never
+moved; NaN when it does not answer) into the manifest and the PD sidecars.
+"repeats_early" in the loop block takes fewer shots on iteration 0 and while
+any active channel's last rms is above "early_rms_v" (default 2 V): the noise
+floor 64 shots buy matters only near the end. The manifest records the shots
+of every iteration.
+
 OPTICAL STAGE
 -------------
 With an "optical" block in the plan (at its root, or per campaign, which wins;
@@ -129,7 +144,13 @@ DEFAULT_WIRING = {
 DEFAULT_LOOP = dict(max_iterations=20, min_iterations=8, stop_rms_v=0.8,
                     plateau=True, noise_floor_stop=True, diverge_factor=2.0,
                     repeats=64, wait_s=30.0, dither_codes=3, settle_s=0.5,
-                    t_offset_us=0.0, full_scale=10.0, first_shot="flat")
+                    t_offset_us=0.0, full_scale=10.0, first_shot="flat",
+                    repeats_early=None, early_rms_v=2.0)
+# repeats_early: the shots per measurement while the error is far above the
+# noise -- on iteration 0 and whenever the last measured rms of any active
+# channel was above early_rms_v (V at the EOM). 64 shots buy a noise floor the
+# loop needs only near the end; while the error is volts, a quarter of them
+# resolves it as well. None = repeats, i.e. off.
 # Rough bench timing for the plan's estimate only; nothing is derived from it.
 # ilc_bench.capture_all: 64 HRES singles on two channels ~17 s at the 3.7 Hz trigger.
 DEFAULT_TIMING = dict(trigger_hz=3.7, read_s_per_channel=0.02, upload_s=2.5,
@@ -344,6 +365,12 @@ class ChannelRun:
     corr_layers: list = field(default_factory=list)
     since: int = 0               # decide()'s divergence best counts from measured[since:]
     extra: dict = field(default_factory=dict)      # other state keys carried through (line_fit)
+    # the campaign's per-iteration record (shots, PD), one list shared by the
+    # campaign's channels (run_campaign); never written into the state
+    rows: list = field(default_factory=list)
+    # the last measurement's noise floor (rms of the shot mean's standard
+    # error, V at the EOM; NaN until measured in this run): shots_for
+    floor_hv: float = float("nan")
 
     @property
     def channel(self):
@@ -682,23 +709,49 @@ def read_waveform(scope, ch, points, tries=3):
 ADC_CODE_PER_VDIV = float(os.environ.get("EOMILC_ADC_CODE_PER_VDIV", 0.04025))   # as ilc_gui
 
 
-def capture_monitors(scope, runs, plan, log=print, stop=None):
-    """`repeats` shots, every active channel's monitor read from the same frozen
-    acquisition, with the GUI's offset dither (ilc_gui._bench_capture): each
-    channel's offset steps across `dither_codes` ADC codes over the shots so the
-    converter's per-code error pattern averages out instead of being learned.
-    Offsets are restored however the capture ends. Returns {key: (mean, stack)}."""
+def pd_channel(plan):
+    """The scope channel the plan's recorded Scope channels map gives the PD
+    role (the analyzer photodiode), or None: no map recorded, no PD role, or
+    the role on two channels."""
+    rec = plan.get("_scope_channels")
+    chans = channels.from_record(rec) if rec else None
+    if not chans:
+        return None
+    try:
+        return channels.channel_for(chans, "PD")
+    except ValueError:
+        return None
+
+
+def capture_monitors(scope, runs, plan, log=print, stop=None, repeats=None):
+    """`repeats` shots (default the plan's), every active channel's monitor read
+    from the same frozen acquisition, with the GUI's offset dither
+    (ilc_gui._bench_capture): each channel's offset steps across `dither_codes`
+    ADC codes over the shots so the converter's per-code error pattern averages
+    out instead of being learned. Offsets are restored however the capture ends.
+
+    The PD (pd_channel: the analyzer photodiode, when the map has one and it is
+    not a monitor's channel) is read from the same frozen acquisition each
+    shot, its offset dithered like the monitors', resampled onto X1's grid.
+    Returns {key: (mean, stack)}, plus "PD": (mean, stack) when it was read."""
     from eomilc import scope as scopeio
     lp = plan["loop"]
-    repeats, codes = int(lp["repeats"]), int(lp["dither_codes"])
+    repeats = int(lp["repeats"] if repeats is None else repeats)
+    codes = int(lp["dither_codes"])
     time.sleep(lp["settle_s"])
+    pd = pd_channel(plan)
+    if pd is not None and pd in {cr.wiring["mon_ch"] for cr in runs}:
+        log(f"  PD not read: CH{pd} is also a monitor's channel")
+        pd = None
+    ref = next((cr for cr in runs if cr.key == "X1"), runs[0])
     plan_d = []
-    for cr in runs:
-        c = cr.wiring["mon_ch"]
+    for c in [cr.wiring["mon_ch"] for cr in runs] + ([pd] if pd is not None else []):
         sc, off = scope.try_get(f":CHANnel{c}:SCALe"), scope.try_get(f":CHANnel{c}:OFFSet")
         if codes and sc is not None and off is not None:
             plan_d.append((c, float(off), ADC_CODE_PER_VDIV * float(sc) * codes))
     stacks = {cr.key: [] for cr in runs}
+    if pd is not None:
+        stacks["PD"] = []
     try:
         for i in range(repeats):
             _stopped(stop)
@@ -710,10 +763,15 @@ def capture_monitors(scope, runs, plan, log=print, stop=None):
             for cr in runs:
                 pts = scopeio.scope_points_for(2.2 * len(cr.t))
                 shot[cr.key] = read_waveform(scope, cr.wiring["mon_ch"], pts)
+            if pd is not None:
+                shot["PD"] = read_waveform(scope, pd, scopeio.scope_points_for(2.2 * len(ref.t)))
             scope.run()
             for cr in runs:
                 ts, vs = shot[cr.key]
                 stacks[cr.key].append(scopeio.resample(np.asarray(ts), np.asarray(vs), cr.t, t_offset=cr.t_off))
+            if pd is not None:
+                ts, vs = shot["PD"]
+                stacks["PD"].append(scopeio.resample(np.asarray(ts), np.asarray(vs), ref.t, t_offset=ref.t_off))
     finally:
         for c, off0, _ in plan_d:
             try:
@@ -722,6 +780,156 @@ def capture_monitors(scope, runs, plan, log=print, stop=None):
                 log(f"  could not restore CH{c} offset: {e}")
     from eomilc import ilc
     return {k: (ilc.averaged(v), np.asarray(v)) for k, v in stacks.items()}
+
+
+# ------------------------------------------------------------ the PD record
+# The loop trains the MONITORS; the light is what the atoms get. During the
+# electrical iterations the analyzer sits still, so the PD reads cos^2 of the
+# light's rotation at one angle, and its trace iteration by iteration shows how
+# the light answers each update. Every measurement keeps it beside the
+# monitors': meas_<campaign stem>PD_iNN.npy (the shot mean, PD volts on X1's
+# grid) and its stats sidecar. NN is the campaign's iteration: the higher of
+# the two channels' counts when the capture was taken (one channel may have
+# stopped while the other learns on).
+def pd_stem(stem):
+    """The campaign stem of a channel stem (S25X1 -> S25), or None when the
+    stem does not end in X1 / X2."""
+    return stem[:-2] if len(stem) > 2 and stem[-2:] in ("X1", "X2") else None
+
+
+def pd_path(run_dir, stem, it):
+    return os.path.join(run_dir, f"meas_{stem}PD_i{int(it):02d}.npy")
+
+
+def read_vertical(scope, ch):
+    """(V/div, offset) of a scope channel, None for what it would not say."""
+    out = []
+    for what in ("SCALe", "OFFSet"):
+        try:
+            g = getattr(scope, "try_get", None) or scope.get
+            v = g(f":CHANnel{ch}:{what}")
+            out.append(float(v) if v is not None else None)
+        except Exception:
+            out.append(None)
+    return tuple(out)
+
+
+def save_pd(run_dir, stem, it, mean, stack, dt, vdiv=None, offset=None, scope_ch=None,
+            analyzer_deg=float("nan"), log=print):
+    """The PD of one measurement on disk: meas_<stem>PD_iNN.npy (the mean) and
+    its sidecar meas_<stem>PD_iNN_stats.npz (eomilc.diagnostics, as the
+    monitors' are: sem_t, floor_rms, the noise spectrum; the code fold is left
+    out, it means nothing on the PD) with the V/div it was read at, the scope
+    channel, and the analyzer angle (polarimeter frame, NaN when not known).
+    Returns dict(path, stats, peak_v, change_mv): the peak of the mean, and the
+    rms of its change against the latest earlier PD file of the campaign in
+    mV (NaN on i00 or with none on disk)."""
+    from eomilc import diagnostics as dg
+    mean = np.asarray(mean, float)
+    path = pd_path(run_dir, stem, it)
+    np.save(path, mean)
+    st = None
+    try:
+        # vdiv withheld from the stats call, so no fold is computed; the PD is
+        # its own reference (no target), the spectra are of its scatter
+        st = dg.measurement_stats(mean, stack, dt, vdiv=None, offset=offset)
+        st.update(vdiv=float(vdiv) if vdiv is not None else float("nan"),
+                  role="PD", scope_ch=int(scope_ch) if scope_ch is not None else -1,
+                  analyzer_deg=float(analyzer_deg))
+        dg.save_stats(dg.stats_path(path), st)
+    except (ValueError, OSError) as e:
+        log(f"  PD stats not kept: {e}")
+    change = float("nan")
+    for k in range(int(it) - 1, -1, -1):
+        p = pd_path(run_dir, stem, k)
+        if os.path.exists(p):
+            prev = np.load(p)
+            if len(prev) == len(mean):
+                change = float(np.sqrt(np.mean((mean - prev) ** 2))) * 1e3
+            break
+    return dict(path=path, stats=st, peak_v=float(np.max(mean)), change_mv=change)
+
+
+def pd_line(r):
+    """The log line of one PD record (save_pd's return)."""
+    if np.isfinite(r["change_mv"]):
+        return f"PD: peak {r['peak_v']:.2f} V, change vs last {r['change_mv']:.1f} mV rms"
+    return f"PD: peak {r['peak_v']:.2f} V, no earlier PD to compare"
+
+
+def pd_rows(run_dir, stem):
+    """The per-iteration PD record rebuilt from a campaign's PD files on disk
+    (a resumed campaign's earlier iterations): it, shots (from the sidecar),
+    pd_peak_v, pd_change_mv."""
+    import glob as _glob
+    import re as _re
+    from eomilc import diagnostics as dg
+    rows, prev = [], None
+    files = []
+    for f in _glob.glob(os.path.join(run_dir, f"meas_{stem}PD_i*.npy")):
+        m = _re.search(r"PD_i(\d+)\.npy$", f)
+        if m:
+            files.append((int(m.group(1)), f))
+    for it, f in sorted(files):
+        y = np.load(f)
+        ch = float("nan")
+        if prev is not None and len(prev) == len(y):
+            ch = float(np.sqrt(np.mean((y - prev) ** 2))) * 1e3
+        row = dict(it=it, pd_peak_v=float(np.max(y)), pd_change_mv=ch if it else float("nan"))
+        st = dg.load_stats(dg.stats_path(f))
+        if st is not None and "n_shots" in st:
+            row["shots"] = int(st["n_shots"])
+        rows.append(row)
+        prev = y
+    return rows
+
+
+EARLY_FLOOR_FACTOR = 3.0
+
+
+def shots_for(runs, lp):
+    """(shots, early) for the next measurement: repeats_early on iteration 0
+    and while the last measured rms of any active channel is above early_rms_v,
+    else repeats. repeats_early None (the default) = repeats: off.
+
+    "Far above the noise" is also checked against the noise itself: a channel
+    counts as far only while its rms is above EARLY_FLOOR_FACTOR x that
+    measurement's own noise floor. Few shots have a floor of their own (2
+    shots of the simulated chain: 2.5 V rms), and an rms held up by it would
+    otherwise keep the early count for good and stop the channel on that
+    floor -- the loss the early count must not cost."""
+    reps = int(lp["repeats"])
+    n_early = lp.get("repeats_early")
+    n_early = reps if n_early is None else max(2, int(n_early))
+    if n_early == reps:
+        return reps, False
+    first = max(cr.iteration for cr in runs) == 0
+    lim = float(lp.get("early_rms_v", 2.0))
+    far = any(cr.active and cr.measured and cr.measured[-1][1] > lim
+              and not cr.measured[-1][1] <= EARLY_FLOOR_FACTOR * cr.floor_hv
+              for cr in runs)
+    return (n_early, True) if (first or far) else (reps, False)
+
+
+def read_analyzer(plan, scope, args, log=print):
+    """The analyzer's angle at campaign start, read once through the
+    polarimeter's driver (ilc_hardware.read_analyzer: opened, asked, closed,
+    never moved). NaN when it did not answer -- logged, never a refusal -- and
+    on simulated instruments, where COM3 is not this run's to open. The mount
+    is closed before the optical stage opens it again."""
+    if getattr(args, "simulate", False) or type(scope).__module__.endswith("simbench"):
+        log("  analyzer not read (simulated instruments)")
+        return float("nan")
+    import ilc_hardware
+    try:
+        r = ilc_hardware.read_analyzer({"polarimeter_path": plan.get("_polarimeter_path") or None})
+    except Exception as e:                    # a mount problem never stops a campaign
+        r = dict(ok=False, deg=float("nan"), text=f"{type(e).__name__}: {e}")
+    if r["ok"] and np.isfinite(r["deg"]):
+        log(f"  analyzer at {r['deg']:+.1f} deg (polarimeter frame)")
+        return float(r["deg"])
+    log(f"  analyzer did not answer ({r['text']}); analyzer_deg NaN")
+    return float("nan")
 
 
 # ---------------------------------------------------------------- campaign
@@ -780,13 +988,22 @@ def iterate_once(awg, scope, runs, plan, args, log=print, stop=None,
     loop settings} in place of plan["loop"] for decide() and the keeper (the
     optical stage's per-pass iteration caps); the capture always uses the
     plan's. Raises BatchStopped when `stop` is set, BatchError when the
-    scope does not trigger."""
+    scope does not trigger.
+
+    The shot count is shots_for's (the plan's repeats_early while the error is
+    far above the noise); the PD, when the map has one, is saved beside the
+    monitors (save_pd) with plan["_analyzer_deg"] in its sidecar. One record
+    per call goes onto runs[0].rows: it (the campaign's iteration), shots,
+    early, and pd_peak_v / pd_change_mv when the PD was read."""
     from eomilc import ilc
     _stopped(stop)
     if stem is None:
         stem = runs[0].stem[:-len(runs[0].key)] if runs[0].stem.endswith(runs[0].key) else runs[0].stem
     states = {cr.key: cr.state_path for cr in runs}
-    caps = capture_monitors(scope, runs, plan, log, stop)
+    shots, early = shots_for(runs, plan["loop"])
+    camp_it = max(cr.iteration for cr in runs)
+    caps = capture_monitors(scope, runs, plan, log, stop, repeats=shots)
+    row = dict(it=camp_it, shots=shots, early=early)
     changed = []
     for cr in runs:
         y, stack = caps[cr.key]
@@ -795,8 +1012,20 @@ def iterate_once(awg, scope, runs, plan, args, log=print, stop=None,
         lp = (loop_for or {}).get(cr.key) or plan["loop"]
         m = cr.loop.metrics(y)
         np.save(os.path.join(plan["_run_dir"], f"meas_{cr.stem}_i{cr.iteration:02d}.npy"), y)
+        st = np.asarray(stack, float)
+        cr.floor_hv = (float(np.sqrt(np.mean(st.std(axis=0, ddof=1) ** 2 / st.shape[0])))
+                       * cr.loop.channel.mon_scale if st.ndim == 2 and st.shape[0] > 1 else float("nan"))
+        row.setdefault("rms_v", {})[cr.key] = m["rms_err_hv"]
+        row.setdefault("floor_v", {})[cr.key] = cr.floor_hv
         why = decide(cr, m, stack, lp, log)
+        if early and why in ("noise floor", "plateau"):
+            # judged against the early count's own floor: not a stop
+            log(f"  {cr.stem} i{cr.iteration:02d}: {why} on {shots} shots is the early count's; "
+                f"going on at {int(plan['loop']['repeats'])}")
+            cr.floor_hv = float("inf")
+            why = ""
         log(f"  {cr.stem} i{cr.iteration:02d}: rms {m['rms_err_hv']:6.2f} V  peak {m['peak_err_hv']:7.1f} V"
+            + (f"  ({shots} shots, early)" if early else "")
             + (f"  -> stop ({why})" if why else ""))
         emit("iteration", stem=stem, key=cr.key, it=cr.iteration, rms_v=m["rms_err_hv"],
              peak_v=m["peak_err_hv"], stop=why, states=states)
@@ -823,6 +1052,16 @@ def iterate_once(awg, scope, runs, plan, args, log=print, stop=None,
         save_state(cr)
         write_iteration(cr, plan["_run_dir"])
         changed.append(cr)
+    if "PD" in caps:
+        ref = next((cr for cr in runs if cr.key == "X1"), runs[0])
+        pch = pd_channel(plan)
+        vdiv, off = read_vertical(scope, pch)
+        r = save_pd(plan["_run_dir"], pd_stem(runs[0].stem) or runs[0].stem, camp_it, caps["PD"][0],
+                    caps["PD"][1], ref.loop.dt, vdiv=vdiv, offset=off, scope_ch=pch,
+                    analyzer_deg=plan.get("_analyzer_deg", float("nan")), log=log)
+        row.update(pd_peak_v=r["peak_v"], pd_change_mv=r["change_mv"])
+        log("  " + pd_line(r))
+    runs[0].rows.append(row)
     for cr in changed:
         upload(awg, cr, args.gui_names, log)
     # after the saves: a follower reloading the state sees this iteration
@@ -839,10 +1078,15 @@ def run_campaign(awg, scope, plan, camp, args, log=print, stop=None, emit=lambda
     n = {len(cr.t) for cr in runs}
     if len(n) != 1 or len({round(float(cr.loop.dt), 12) for cr in runs}) != 1:
         raise BatchError("X1 and X2 targets are not on one grid -- they must play together")
+    rows = []                                            # the campaign's per-iteration record
     for cr in runs:
         save_state(cr)                                   # the GUI can open it from now on
         cr.run_id = time.time()
+        cr.rows = rows
+    plan["_analyzer_deg"] = float("nan")
     prepare_campaign(awg, scope, runs, plan, args.gui_names, args.allow_output_on, log)
+    # read once and closed again: the optical stage opens the mount itself later
+    plan["_analyzer_deg"] = read_analyzer(plan, scope, args, log)
     for cr in runs:
         write_iteration(cr, plan["_run_dir"])
     resumed_at = {cr.key: cr.iteration for cr in runs}
@@ -876,6 +1120,13 @@ def run_campaign(awg, scope, plan, camp, args, log=print, stop=None, emit=lambda
         log(f"  {cr.stem}: keeper i{kb[0]:02d} (rms {kb[1]:.2f} V, peak {kb[2]:.1f} V), stopped: {why}")
     if opt_rec is not None:
         result["optical"] = opt_rec
+    # per iteration: this run's records, and a resumed campaign's earlier ones
+    # rebuilt from its PD files (shots then from their sidecars)
+    have = {r["it"] for r in rows}
+    fstem = pd_stem(runs[0].stem) or runs[0].stem
+    result["iterations"] = sorted(rows + [r for r in pd_rows(plan["_run_dir"], fstem) if r["it"] not in have],
+                                  key=lambda r: r["it"])
+    result["analyzer_deg"] = plan.get("_analyzer_deg", float("nan"))
     if plan.get("card") and len(kept) == 2:
         try:
             result["card"] = card_files(kept, targets, plan["card"], log)
@@ -1543,8 +1794,14 @@ def model_line(plan, key):
 def dry_run(plan, log=print):
     lp = plan["loop"]
     log(f"plan {plan.get('name', '')}: {len(plan['campaigns'])} campaigns, targets in {plan['_targets_dir']}")
+    early = lp.get("repeats_early")
+    early = int(lp["repeats"]) if early is None else max(2, int(early))
     log(f"loop: {lp['max_iterations']} iterations max (min {lp['min_iterations']}), stop at rms <= {lp['stop_rms_v']} V, "
-        f"{lp['repeats']} shots per measurement")
+        f"{lp['repeats']} shots per measurement"
+        + (f" ({early} while rms > {float(lp.get('early_rms_v', 2.0)):g} V)" if early != int(lp["repeats"]) else ""))
+    pd = pd_channel(plan)
+    log(f"PD: CH{pd} recorded every iteration (meas_<stem>PD_iNN.npy); the analyzer angle is read at "
+        f"each campaign start" if pd is not None else "PD: no PD channel in the Scope channels map, not recorded")
     for k, w in plan["wiring"].items():
         rb = f"readback CH{w['drive_ch']}" if w.get("drive_ch") else "no readback: alignment not verified"
         log(f"wiring {k}: AWG CH{w['awg_ch']} -> monitor CH{w['mon_ch']}, {rb}")

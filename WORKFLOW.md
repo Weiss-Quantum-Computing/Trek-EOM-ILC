@@ -455,6 +455,59 @@ histories. Running the plan again skips finished campaigns (`--redo` repeats
 them) and resumes an interrupted one from its states, earlier
 measurements included, so the keeper is chosen from the whole campaign.
 
+**The PD every iteration.** The loop trains the Trek MONITORS; the light is
+what the atoms get, and nothing used to record it while the loop ran. During
+the electrical iterations the analyzer sits still, so the analyzer photodiode
+reads cos² of the light's rotation at one angle, and its trace iteration by
+iteration shows how the light answers each update. With a PD channel in the
+Scope channels map (role `PD`, CH1 on this bench) every measurement reads it
+from the same frozen shots as the monitors, its offset dithered like theirs,
+resampled onto X1's grid, and keeps it as `run\meas_<stem>PD_iNN.npy` (the
+shot mean, PD volts) with a stats sidecar `meas_<stem>PD_iNN_stats.npz` (the
+monitors' format: standard error per sample and per bin, shots, plus the V/div
+it was read at, the scope channel and `analyzer_deg`; no code fold, which means
+nothing on the PD). `<stem>` is the campaign's (`S25`, or its 5-character AWG
+name), NN the campaign's iteration (the higher of the two channels' counts when
+one has stopped). The log carries one line per iteration
+(`  PD: peak 4.98 V, change vs last 12.3 mV rms`), and the manifest entry an
+`iterations` list: per iteration `shots`, `early`, `rms_v` and `floor_v` per
+channel, `pd_peak_v` and `pd_change_mv` (rms of PD(i) − PD(i−1), NaN on i00);
+a resumed campaign's earlier iterations are rebuilt from their PD files. No PD
+role in the map: nothing is read and the campaign runs as before. The optical
+stage's learning iterations record it the same way. The panel's **Load state**
+recalls the files and its Diagnostics → **pd** view draws them.
+
+**The analyzer angle.** At each campaign start, after the outputs are ON, the
+batch opens the ELL14 through the polarimeter's driver (its config's port,
+address and zero, as the Hardware tab's Check does), reads its position once
+and closes it again — it never moves it — and logs
+`  analyzer at +45.0 deg (polarimeter frame)`. The angle goes into the manifest
+entry (`analyzer_deg`) and every PD sidecar of the campaign. A mount that does
+not answer (the polarimeter window holds COM3) is logged and recorded as NaN,
+never a refusal; a simulated run does not read it. The optical stage opens the
+mount itself later, after this read has closed it.
+
+**Fewer shots while the error is far above the noise.** 64 shots buy a noise
+floor the loop needs only near the end; on i00 the error is the chain's raw
+tracking error, volts to hundreds of volts, and a quarter of the shots resolves
+it as well. Two `loop` keys:
+
+```json
+"loop": {"repeats": 64, "repeats_early": 16, "early_rms_v": 2.0}
+```
+
+`repeats_early` shots are taken on iteration 0 and while the last measured rms
+of ANY active channel is above `early_rms_v` (V at the EOM) — and above three
+times that measurement's own noise floor: few shots have a floor of their own
+(2 shots of the simulated chain: 2.5 V rms), and an rms held up by it would
+keep the early count for good and stop the channel on that floor. For the same
+reason a "noise floor" or "plateau" stop judged on an early measurement is not
+taken: the channel goes on at `repeats`. The iteration line says
+`(16 shots, early)` when the early count was used, the manifest records the
+shots of every iteration, and the dry run's loop line ends
+`64 shots per measurement (16 while rms > 2 V)`. `repeats_early` absent or
+equal to `repeats` (the default) is off.
+
 **The optical stage.** The loop makes the Trek MONITORS follow the target; the
 light leaves them by 0.7-1.7° at the top of every ramp and 0.3-0.95° in the
 first ms after the fall (8 Oct), which no monitor shows. With an `"optical"`
@@ -587,7 +640,13 @@ Two tests exercise the simulated bench:
     leaving the electrical keeper;
   - separate attribution: the PARK2 / PARK1 uploads before each solo scan,
     each crystal's file from its own scan, the keepers back before the
-    learn, the joint verification, and `joint_before` false.
+    learn, the joint verification, and `joint_before` false;
+  - the PD: its files and sidecars per iteration, `pd_peak_v` /
+    `pd_change_mv` in the manifest, the early shot count (repeats 8,
+    repeats_early 2: the simulated scope takes 2 shots while an rms is over
+    2 V, then 8), the dry-run line, the analyzer read against a stubbed mount
+    (read once, closed, never moved; NaN when held), and a map without a PD
+    running as before.
 - `tests/test_batch_gui.py <targets>` drives the batch window: plan builder,
   Check plan, Simulate, Stop, the confirmation, following, reopening.
 

@@ -2900,6 +2900,227 @@ print("[60] optical solo play: X1 alone (SOLX1_i00 on CH1, PARK2 on CH2, X2 park
       "targets, one optical layer each, log names both scans; learn 1 -> playing both; verify "
       "SOL_opt1_verify joint, no table, verdict logged; both OFF")
 
+# [61] The PD every iteration (14 Oct 2026): the pair loop reads the analyzer
+# photodiode (the Scope channels map's PD role, CH1 here) from the same frozen
+# shots as both monitors and keeps it as meas_<pair stem>PD_iNN.npy with a
+# stats sidecar carrying the analyzer angle last read on the Hardware tab;
+# Load state recalls it into both sessions' snapshots; the Diagnostics PD view
+# draws it per iteration. The Hardware tab's Move turns the analyzer (a stubbed
+# mount here: refused while "COM3" is held, then a move approached from
+# below). A pair run of one update is two measurements, i00 and i01. Stubs
+# as block 57's, put back at the end, so the block stands alone.
+import time as _time61
+import ilc_bench as _ib61
+import ilc_hardware as _ihw61
+from eomilc import simbench as _sb61
+from eomilc import diagnostics as _dg61
+_mb61 = ilc_gui.messagebox
+_saved61 = (_mb61.askyesno, _mb61.showerror, _mb61.showinfo, ilc_gui.AWG_WAVEFORMS,
+            _ihw61.open_ell14)
+_asked61 = []
+_mb61.askyesno = lambda title, msg, **k: (_asked61.append(title), True)[1]
+_mb61.showerror = lambda title, msg, **k: _asked61.append(("error", title, msg))
+_mb61.showinfo = lambda title, msg, **k: _asked61.append(("info", title, msg))
+ilc_gui.AWG_WAVEFORMS = os.path.join(SCRATCH, "Waveforms61")
+
+
+def _pump61(limit_s=300):
+    _t0 = _time61.time()
+    root.update()
+    while app.busy and _time61.time() - _t0 < limit_s:
+        root.update()
+        _time61.sleep(0.02)
+    for _ in range(10):
+        root.update()
+        _time61.sleep(0.01)
+    assert not app.busy, "the worker did not finish"
+
+
+class _Mount61:
+    """The ELL14 as rampol.hw.Rotator drives it: goto, move_by, position."""
+    def __init__(self, deg):
+        self.pos, self.calls, self.zero_offset = float(deg), [], 0.0
+
+    def goto(self, angle, tol=0.05, retries=2, settle=0.05):
+        self.calls.append(("goto", round(float(angle), 6)))
+        self.pos = float(angle) % 360.0
+        return self.pos
+
+    def move_by(self, d):
+        self.calls.append(("move_by", round(float(d), 6)))
+        self.pos = (self.pos + float(d)) % 360.0
+        return self.pos
+
+    def move_to(self, angle):
+        self.calls.append(("move_to", round(float(angle), 6)))
+        self.pos = float(angle) % 360.0
+        return self.pos
+
+    def position(self):
+        self.calls.append(("position",))
+        return self.pos
+
+    def close(self):
+        self.calls.append(("close",))
+
+
+try:
+    # the Hardware tab's Move: a word is refused before anything opens; the
+    # port held by the polarimeter refuses with "in use", in red, and a message
+    assert app.hw_move_btn in app._actions
+    _opened61 = []
+
+    def _busy61(cfg=None, pcfg=None):
+        _opened61.append("busy")
+        raise PermissionError("could not open port 'COM3': PermissionError(13, 'Access is denied.', None, 5)")
+    _ihw61.open_ell14 = _busy61
+    app.ell_move_var.set("forty")
+    app.do_hw_move()
+    _pump61()
+    assert _opened61 == [] and _asked61[-1][:2] == ("error", "ELL14") and "not an angle" in _asked61[-1][2]
+    app.ell_move_var.set("45")
+    app.do_hw_move()
+    _pump61()
+    assert _opened61 == ["busy"], _opened61
+    assert "in use" in app.hw_status["ell14"].cget("text") and \
+        str(app.hw_status["ell14"].cget("foreground")) == "#a93a2c"
+    assert _asked61[-1][:2] == ("error", "ELL14") and "Move refused" in _asked61[-1][2] and \
+        "polarimeter window" in _asked61[-1][2], _asked61[-1]
+    assert app._analyzer is None
+    # free: from 300 deg to +45 the way the polarimeter lands, from below
+    _m61 = _Mount61(300.0)
+    _ihw61.open_ell14 = lambda cfg=None, pcfg=None: _m61
+    app.do_hw_move()
+    _pump61()
+    assert ("goto", 42.0) in _m61.calls and ("move_by", 3.0) in _m61.calls and \
+        _m61.calls.index(("goto", 42.0)) < _m61.calls.index(("move_by", 3.0)) and \
+        _m61.calls[-1] == ("close",), _m61.calls
+    assert app.hw_status["ell14"].cget("text") == "moved to +45.00 deg" and \
+        str(app.hw_status["ell14"].cget("foreground")) == "#1b6e1b" and app.hw_time["ell14"].cget("text")
+    assert app._analyzer is not None and app._analyzer[0] == 45.0
+    assert "ell14: move to +45.00 deg: moved to +45.00 deg" in app.log_text.get("1.0", "end")
+
+    # the pair, as in block 57; files of an earlier PAIR run moved out of the way
+    for _f in glob.glob(os.path.join(ilc_gui.RUN_DIR, "*PAIR*")):
+        os.remove(_f)
+    _tus = np.arange(5501) * 2.0
+    _ramp = np.clip(np.minimum((_tus - 500) / 3000, (10500 - _tus) / 3000), 0, 1)
+    _v61 = 5000 * 0.5 * (1 - np.cos(np.pi * _ramp))
+    for _k in ("X1", "X2"):
+        np.savetxt(os.path.join(SCRATCH, f"target_PAIR{_k}.csv"), np.c_[_tus, _v61],
+                   delimiter=",", header="time_us,voltage_V", comments="", fmt="%.6g")
+    app._set_channels(ilc_gui.chanmap.DEFAULT_CHANNELS)   # CH1 PD, CH2 CmdX1, CH3 MonX1, CH4 MonX2
+    app.cmpsel_var.set("")
+    app.line_on_var.set(False)
+    app.pair_var.set(True)
+    app._on_pair_toggle()
+    root.update()
+    app.target_var.set(os.path.join(SCRATCH, "target_PAIRX1.csv"))
+    app.stem_var.set("PAIR")
+    app.seed_var.set("")
+    app.shotgain_var.set("")
+    app.toff_var.set("0")
+    app.fs_var.set("10.0")
+    app.model_var.set(ilc_gui.KEY2LABEL["resonant"])
+    app._on_model_change()
+    for _var, _val in ((app.pgain_var, "0.557"), (app.pfn_var, "7823"), (app.pzeta_var, "1.474"),
+                       (app.gamma_var, "0.6"), (app.fcut_var, "20000"), (app.notch_var, "")):
+        _var.set(_val)
+    app.model_var_2.set(ilc_gui.KEY2LABEL["resonant"])
+    app._on_model_change_2()
+    for _var, _val in ((app.pgain_var_2, "0.6116"), (app.pfn_var_2, "7823"), (app.pzeta_var_2, "1.474"),
+                       (app.gamma_var_2, "0.6"), (app.fcut_var_2, "20000"), (app.notch_var_2, "")):
+        _var.set(_val)
+    app.do_init()
+    root.update()
+    assert app.pair is not None and app.pair["X1"].stem == "PAIRX1"
+
+    # the simulated bench, its PD wired to X1's light stand-in (the simulated
+    # scope reads a PD role flat): X1's monitor
+    _awg61, _scope61, _mod61 = _sb61.make_bench({1: os.path.join(REPO, "run", "frf_WIDE_X1.csv"),
+                                                 2: os.path.join(REPO, "run", "frf_WIDE_X2.csv")},
+                                                channels=app.cfg)
+    _scope61.wiring[1] = ("mon", 1)
+
+    def _fake_pair61():
+        _ib61._AWGMOD = _mod61
+        return _awg61, _scope61
+    app._connect_pair = _fake_pair61
+    app._bench_modules = lambda: (None, _mod61)
+    app.do_autoset()
+    _pump61()
+    app.iters_var.set("1")
+    app.repeats_var.set("16")
+    app.wait_var.set("5")
+    app.skip_var.set(False)
+    app.keepnative_var.set(False)
+    _shots0 = _scope61.shots
+    app.do_bench()
+    _pump61()
+    assert not _awg61.is_on(1) and not _awg61.is_on(2)
+    assert _scope61.shots - _shots0 == 2 * 16 + 1, _scope61.shots - _shots0    # the PD costs no shot
+    _pdf = [os.path.join(ilc_gui.RUN_DIR, f"meas_PAIRPD_i{_i:02d}.npy") for _i in (0, 1)]
+    assert all(os.path.exists(_f) and os.path.exists(_dg61.stats_path(_f)) for _f in _pdf), _pdf
+    assert not os.path.exists(os.path.join(ilc_gui.RUN_DIR, "meas_PAIRPD_i02.npy"))
+    _st61 = _dg61.load_stats(_dg61.stats_path(_pdf[1]))
+    assert _st61["n_shots"] == 16 and _st61["scope_ch"] == 1 and _st61["role"] == "PD" and \
+        _st61["analyzer_deg"] == 45.0 and _st61["vdiv"] > 0 and "fold_amp" not in _st61, _st61
+    _y61 = np.load(_pdf[1])
+    assert len(_y61) == len(app.pair["X1"].t) and 4.0 < _y61.max() < 6.5      # X1's monitor, ~5 V
+    _log61 = app.log_text.get("1.0", "end")
+    assert "the PD (CH1) is read with the monitors every iteration: meas_PAIRPD_iNN.npy" in _log61
+    assert re.search(r"PD: peak \d+\.\d\d V, change vs last \d+\.\d mV rms \(analyzer \+45\.0 deg", _log61)
+    for _k in ("X1", "X2"):
+        assert [sn["it"] for sn in app.pair[_k].snapshots if sn.get("pd") is not None] == [0, 1]
+
+    # Load state recalls the PD into both sessions' snapshots, sidecars too
+    app.state_var.set(app.pair["X1"].state_path)
+    app.do_load()
+    root.update()
+    for _k in ("X1", "X2"):
+        _sn = {sn["it"]: sn for sn in app.pair[_k].snapshots if sn.get("run") is None}
+        assert sorted(_sn) == [0, 1] and all(_sn[_i].get("pd") is not None for _i in (0, 1)), _k
+        assert np.allclose(_sn[1]["pd"], _y61) and _sn[1]["pd_stats"]["analyzer_deg"] == 45.0
+    assert "the PD with 2 (meas_PAIRPD_iNN.npy)" in app.log_text.get("1.0", "end")
+
+    # the Diagnostics PD view: two iterations, the change against the last, rms in the legend
+    app._show_fig(app.fig_pd)
+    app._redraw_iterations()
+    root.update()
+    assert app.fig_pd._tab == "Diagnostics" and app.fig_pd._view == "pd" and not app.fig_pd._stale
+    assert len(app.ax_pd.lines) == 2 and np.allclose(app.ax_pd.lines[1].get_ydata(), _y61)
+    assert app.ax_pd.get_title() == "PD on CH1 by iteration, PAIR, analyzer +45.0 deg", app.ax_pd.get_title()
+    _lab61 = [t.get_text() for t in app.ax_pdd.get_legend().get_texts()]
+    assert len(_lab61) == 2 and all("X1 monitor rms" in t and ", X2 " in t for t in _lab61), _lab61
+    assert np.allclose(app.ax_pdd.lines[1].get_ydata(), 0.0)          # the last against itself
+    assert any("cos^2" in t.get_text() for t in app.ax_pd.texts)          # the note
+    assert app.ax_pd.get_xlabel() == "time (ms)" and app.ax_pdd.get_xlabel() == "time (ms)"
+
+    # a session with no PD files (the same pair, its PD files gone): nothing but a note
+    for _f in _pdf:
+        os.remove(_f)
+        os.remove(_dg61.stats_path(_f))
+    app.do_load()
+    root.update()
+    app._show_fig(app.fig_pd)
+    root.update()
+    assert not any(sn.get("pd") is not None for sn in app.pair["X1"].snapshots)
+    assert not app.ax_pd.lines and not app.ax_pdd.get_visible() and \
+        any("no PD recorded for PAIR" in t.get_text() for t in app.ax_pd.texts)
+    app.pair_var.set(False)
+    app._on_pair_toggle()
+    root.update()
+finally:
+    (_mb61.askyesno, _mb61.showerror, _mb61.showinfo, ilc_gui.AWG_WAVEFORMS,
+     _ihw61.open_ell14) = _saved61
+    for _a in ("_connect_pair", "_bench_modules"):
+        app.__dict__.pop(_a, None)
+print("[61] PD record: Move refused for a word and while COM3 is held (red, message), then "
+      "approached from below to +45.00 deg; a pair run of one update writes meas_PAIRPD_i00/i01 "
+      "+ sidecars (16 shots, CH1, analyzer +45.0) with no extra shot; Load state recalls both "
+      "into X1 and X2; the Diagnostics PD view draws two iterations with the monitor rms in the "
+      "legend; a session without PD files shows the note")
+
 # Figure PNGs for eyeballing, straight from the canvases. There used to be an
 # ImageGrab pass over the nine tabs as well, and it went because it could not
 # be believed: ImageGrab shoots the SCREEN, so anything sitting on top of the

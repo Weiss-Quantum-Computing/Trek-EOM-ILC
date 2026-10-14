@@ -590,7 +590,27 @@ def recall_snapshots(s: Session):
             du = pd.read_csv(dcsv, comment="#").iloc[:, 1].to_numpy(float)
             if len(du) == len(s.t):
                 snap["u"] = du
+        if run is None:
+            recall_pd(snap, run_dir, s)
         s.snapshots.append(snap)
+
+
+def recall_pd(snap, run_dir, s):
+    """The PD of a base measurement, when it was recorded: the pair's (or a
+    batch campaign's) meas_<stem>PD_iNN.npy, <stem> the session's stem without
+    its X1 / X2, into snap["pd"] and its sidecar into snap["pd_stats"]. Both
+    chains of a pair recall the same file."""
+    pstem = ilc_batch.pd_stem(s.stem)
+    if pstem is None:
+        return
+    f = ilc_batch.pd_path(run_dir, pstem, snap["it"])
+    if not os.path.exists(f):
+        return
+    y = np.load(f)
+    if len(y) != len(s.t):
+        return
+    snap["pd"] = y
+    snap["pd_stats"] = dg.load_stats(dg.stats_path(f))
 
 
 def read_captures(pattern, mon_col, t, t_off, stack=None):
@@ -1758,6 +1778,9 @@ class App:
         self.fig_dac, (self.ax_dac,) = self._tab("DAC step", 1, tab="Diagnostics",
                                                  view="DAC step")
         self._dac_inset = None
+        # the analyzer photodiode per iteration: how the light answered the loop
+        self.fig_pd, (self.ax_pd, self.ax_pdd) = self._tab("PD", 2, tab="Diagnostics",
+                                                           view="pd")
         self._table_tab()
         self.fig_frf, self.ax_frf = self._tab("FRF", 3, sharex=True, tab="Inputs",
                                               view="FRF")
@@ -1932,7 +1955,12 @@ class App:
         f = ttk.LabelFrame(parent, text="Devices (opened, asked, closed)", padding=3)
         f.pack(fill="x", pady=(0, 2))
         self.hw_status, self.hw_time = {}, {}
-        for i, (key, name, what) in enumerate(self.HW_ROWS):
+        # the analyzer's last known angle (deg, time.time()) from a Check or a
+        # Move here; the pair loop writes it into the PD sidecars
+        self._analyzer = None
+        self.ell_move_var = tk.StringVar(value="")
+        i = 0
+        for key, name, what in self.HW_ROWS:
             ttk.Label(f, text=name, width=7).grid(row=i, column=0, sticky="w", pady=1)
             self.hw_status[key] = ttk.Label(f, text="not checked", foreground="#666666",
                                             wraplength=330, justify="left")
@@ -1943,6 +1971,20 @@ class App:
                            command=lambda k=key: self.do_hw_check([k]))
             b.grid(row=i, column=3, padx=(4, 0))
             self._actions.append(b)
+            i += 1
+            if key == "ell14":
+                # the one control on this tab that moves anything: the
+                # analyzer, to an angle in the polarimeter's frame, from below
+                mv = ttk.Frame(f)
+                mv.grid(row=i, column=1, columnspan=2, sticky="w")
+                ttk.Label(mv, text="move to deg").pack(side="left")
+                ttk.Entry(mv, textvariable=self.ell_move_var, width=8).pack(
+                    side="left", padx=(4, 0))
+                b = ttk.Button(f, text="Move", width=7, command=self.do_hw_move)
+                b.grid(row=i, column=3, padx=(4, 0), pady=(0, 2))
+                self._actions.append(b)
+                self.hw_move_btn = b
+                i += 1
         f.columnconfigure(1, weight=1)
         r = ttk.Frame(parent)
         r.pack(fill="x", pady=(0, 2))
@@ -1954,7 +1996,11 @@ class App:
             "\n".join(f"{name}: {what}" for _k, name, what in self.HW_ROWS)
             + "\nThe ILC drives the scope and the AWG only. A device held by another "
               "program (the polarimeter on COM3, Scope Grab on the scope) reports "
-              "'in use'. The Run tab's Bench line keeps the last thing a run reported.")
+              "'in use'. The Run tab's Bench line keeps the last thing a run reported."
+              "\nMove turns the analyzer to the angle typed (polarimeter frame), from "
+              "below as the polarimeter does, reads it back and closes the mount; "
+              "refused while the polarimeter window holds COM3. The pair loop records "
+              "the last angle read here with the PD.")
         ).pack(fill="x")
 
     def do_hw_check(self, keys):
@@ -1987,6 +2033,36 @@ class App:
         self.hw_status[key].configure(text=res["text"],
                                       foreground="#1b6e1b" if res["ok"] else "#a93a2c")
         self.hw_time[key].configure(text=ilc_hardware.stamp())
+        if key == "ell14" and res.get("ok") and np.isfinite(res.get("deg", float("nan"))):
+            self._analyzer = (float(res["deg"]), time.time())
+
+    def do_hw_move(self):
+        """Main thread: the angle from the entry, then a worker opens the
+        mount (as the Check does), approaches the angle from below, reads it
+        back and closes it. The row says where it landed, with the time."""
+        txt = self.ell_move_var.get().strip()
+        try:
+            deg = float(txt)
+            if not np.isfinite(deg):
+                raise ValueError
+        except ValueError:
+            return messagebox.showerror("ELL14", f"move to deg: {txt!r} is not an angle")
+        cfg = {"polarimeter_path": self.cfg.get("polarimeter_path")}
+        pcfg = ilc_hardware.polarimeter_config()
+        self.run_worker(lambda: self._hw_move_work(deg, cfg, pcfg),
+                        f"moving the analyzer to {deg:+.2f} deg...")
+
+    def _hw_move_work(self, deg, cfg, pcfg):
+        res = ilc_hardware.move_ell14(deg, cfg, pcfg)
+        print(f"ell14: move to {deg:+.2f} deg: {res['text']}"
+              + (("\n   " + res["detail"]) if res.get("detail") else ""))
+        self.msgs.put(("call", lambda r=res: self._hw_show("ell14", r)))
+        if not res["ok"]:
+            why = ("the polarimeter window holds the mount's port -- close it (or "
+                   "move the analyzer from there) and Move again"
+                   if res.get("in_use") else "the mount did not move")
+            self.msgs.put(("call", lambda r=res, w=why: messagebox.showerror(
+                "ELL14", f"Move refused: {r['text']}\n\n{w}.")))
 
     # ------------------------------------------------- scope channel roles
     def _build_channels_frame(self, parent):
@@ -4038,7 +4114,7 @@ class App:
         if s.snapshots:
             its = sorted({sn["it"] for sn in s.snapshots})
             self.log(f"  recalled {len(its)} stored measurement(s): "
-                     f"iterations {', '.join(str(i) for i in its)}")
+                     f"iterations {', '.join(str(i) for i in its)}" + self._pd_recalled(s))
         rec = chanmap.from_record(s.scope_channels) if s.scope_channels else None
         if rec is not None:
             diff = chanmap.differences(rec, self.cfg)
@@ -5788,7 +5864,7 @@ class App:
         if s2.snapshots:
             its = sorted({sn["it"] for sn in s2.snapshots})
             self.log(f"  recalled {len(its)} stored X2 measurement(s): "
-                     f"iterations {', '.join(str(i) for i in its)}")
+                     f"iterations {', '.join(str(i) for i in its)}" + self._pd_recalled(s2))
         self._refresh_run_state()
         self._refresh_summary()
 
@@ -6076,23 +6152,69 @@ class App:
                              + f" output OFF ({why})")
             self._opt_mark_outputs("OFF", why)
 
-    def _pair_capture(self, scope, ss, mon, repeats, wait_s):
+    def _pair_capture(self, scope, ss, mon, repeats, wait_s, pd=None):
         """Both monitors from the same frozen acquisitions, shot by shot,
         with the offset dither on both: _bench_capture with X2's monitor as
         its aux channel (read between :SINGle and run, like X1's), which is
         ilc_batch.capture_monitors' recipe with this panel's progress bar
         and Stop. Returns {key: (mean, stack)} on X1's grid (the pair shares
-        one -- _check_pair)."""
+        one -- _check_pair). `pd`: the PD's scope channel, read as one more
+        aux channel (dithered the same way) and returned as "PD"."""
         s1 = ss["X1"]
         stk = {}
         self._bench_capture(scope, mon["X1"], s1.t, s1.t_off, repeats, wait_s,
-                            aux=(mon["X2"],), aux_store=stk)
+                            aux=(mon["X2"],) + ((pd,) if pd is not None else ()),
+                            aux_store=stk)
         grid = stk["capture"].grid
         out = {}
         for k in PAIR_KEYS:
             stack = np.asarray(grid[f"CH{mon[k]}"], float)
             out[k] = (ilc.averaged(stack), stack)
+        if pd is not None:
+            stack = np.asarray(grid[f"CH{pd}"], float)
+            out["PD"] = (ilc.averaged(stack), stack)
         return out
+
+    @staticmethod
+    def _pd_recalled(s):
+        """The load line's note on the PD files recalled with a session."""
+        n = len({sn["it"] for sn in s.snapshots if sn.get("pd") is not None})
+        return (f"; the PD with {n} (meas_{ilc_batch.pd_stem(s.stem)}PD_iNN.npy)" if n else "")
+
+    def _pd_channel(self, mon):
+        """Worker side: the PD's scope channel from the Scope channels map,
+        or None (no PD role, the role on two channels, or a monitor's
+        channel -- said in the log)."""
+        try:
+            pd = chanmap.channel_for(self.cfg, "PD")
+        except ValueError as e:
+            print(f"  PD not read: {e}")
+            return None
+        if pd is not None and pd in mon.values():
+            print(f"  PD not read: CH{pd} is also a monitor's channel")
+            return None
+        return pd
+
+    def _pair_pd(self, ss, caps, scope, pd):
+        """Worker side, after a pair measurement: the PD saved beside the
+        monitors as meas_<pair stem>PD_iNN.npy + its sidecar (ilc_batch.save_pd,
+        the batch's recipe; NN the higher of the two iteration counts, as the
+        batch numbers it), its line logged, and the mean and stats onto both
+        sessions' newest snapshots."""
+        s1 = ss["X1"]
+        it = max(s.iteration for s in ss.values())
+        vdiv, off = ilc_batch.read_vertical(scope, pd)
+        deg = self._analyzer[0] if self._analyzer is not None else float("nan")
+        r = ilc_batch.save_pd(RUN_DIR, ilc_batch.pd_stem(s1.stem) or s1.stem, it,
+                              caps["PD"][0], caps["PD"][1], s1.loop.dt, vdiv=vdiv,
+                              offset=off, scope_ch=pd, analyzer_deg=deg)
+        print("         " + ilc_batch.pd_line(r)
+              + (f" (analyzer {deg:+.1f} deg, as last read on the Hardware tab)"
+                 if np.isfinite(deg) else ""))
+        for s in ss.values():
+            if s.snapshots and s.snapshots[-1].get("run") is None:
+                s.snapshots[-1]["pd"] = np.asarray(caps["PD"][0], float)
+                s.snapshots[-1]["pd_stats"] = r["stats"]
 
     def _do_bench_pair(self):
         w = self._pair_ready("Bench")
@@ -6136,6 +6258,10 @@ class App:
             if wires[k]["drive_ch"] is None:
                 print(f"  NOTE: no Cmd{k} readback channel -- {k}'s trigger "
                       f"alignment is not verified on this run")
+        pd_ch = self._pd_channel(mon)
+        if pd_ch is not None:
+            print(f"  the PD (CH{pd_ch}) is read with the monitors every iteration: "
+                  f"meas_{ilc_batch.pd_stem(ss['X1'].stem) or ss['X1'].stem}PD_iNN.npy")
         if keep_native:
             print("  note: 'keep native-rate avg' is a single-channel option; "
                   "pair runs keep the decimated measurements only")
@@ -6224,7 +6350,7 @@ class App:
                                 ilc_bench.verify_alignment(
                                     scope, wires[k]["drive_ch"], u[k], ss[k].t,
                                     ss[k].t_off, wait_s)
-                caps = self._pair_capture(scope, ss, mon, repeats, wait_s)
+                caps = self._pair_capture(scope, ss, mon, repeats, wait_s, pd=pd_ch)
                 for k in PAIR_KEYS:
                     s = ss[k]
                     y, stack = caps[k]
@@ -6244,6 +6370,8 @@ class App:
                     s.snapshots.append(dict(it=it, y=y, m=m, u=u[k],
                                             t_wall=time.time(),
                                             run_id=self._run_id, stats=st))
+                if "PD" in caps:
+                    self._pair_pd(ss, caps, scope, pd_ch)
                 self.msgs.put(("call", self._after_pair_measurement))
                 if n < iterations and not self.stop_evt.is_set():
                     for k in PAIR_KEYS:
@@ -9595,6 +9723,7 @@ class App:
         self._plot_contraction()
         self._plot_heatmap()
         self._plot_dacstep(snaps)
+        self._plot_pd()
 
     def _with_stats(self, snaps=None, base_only=True):
         s = self.session
@@ -9602,6 +9731,81 @@ class App:
         out = [sn for sn in pool if sn.get("stats") is not None
                and not (base_only and sn.get("run") is not None)]
         return sorted(out, key=lambda sn: (sn["it"], sn.get("run") or 0))
+
+    def _plot_pd(self):
+        """The analyzer photodiode per stored iteration of the shown session
+        (top: volts against ms, coloured as the Waveforms tab) and each one's
+        change against the last stored (bottom: mV), with each iteration's
+        monitor error rms in the legend. From meas_<stem>PD_iNN.npy, which the
+        pair bench loop and the batch keep when the Scope channels map has a
+        PD channel; nothing but a note when the session has none."""
+        s = self.session
+        ax, axd = self.ax_pd, self.ax_pdd
+        ax.clear()
+        axd.clear()
+        pstem = ilc_batch.pd_stem(s.stem) or s.stem
+        by = {}
+        for sn in s.snapshots:
+            if sn.get("run") is None and sn.get("pd") is not None and len(sn["pd"]) == len(s.t):
+                by[sn["it"]] = sn            # a later base measurement replaces an earlier one
+        sel = [by[k] for k in sorted(by)]
+        if not sel:
+            ax.set_axis_off()
+            axd.set_visible(False)
+            ax.text(0.5, 0.5, f"no PD recorded for {pstem}\n(the pair bench loop and the batch keep "
+                              f"meas_{pstem}PD_iNN.npy when the Scope channels map has a PD channel)",
+                    ha="center", va="center", transform=ax.transAxes, color="#888888")
+            self._draw(self.fig_pd)
+            return
+        ax.set_axis_on()
+        axd.set_visible(True)
+        tms = s.t * 1e3
+        n = len(sel)
+        ref = sel[-1]
+        key = self._pair_key_of(s) or None
+        other = None
+        if key is not None:
+            ok = "X2" if key == "X1" else "X1"
+            other = (ok, self._snaps_by_it(self.pair[ok]))
+        st = ref.get("pd_stats") or {}
+        ch = int(st.get("scope_ch", -1)) if st else -1
+        if ch < 1:
+            try:
+                ch = chanmap.channel_for(self.cfg, "PD") or -1
+            except ValueError:
+                ch = -1
+        deg = float(st.get("analyzer_deg", float("nan"))) if st else float("nan")
+        for idx, sn in enumerate(sel):
+            col = self._iter_colour(idx, n)
+            lw = 1.1 if idx == n - 1 else 0.8
+            ax.plot(tms, sn["pd"], color=col, lw=lw,
+                    label=f"iter {sn['it']}: peak {float(np.max(sn['pd'])):.3f} V",
+                    **self._dot_kw(len(tms)))
+            rms = f"{key or s.channel} monitor rms {sn['m']['rms_err_hv']:.2f} V"
+            osn = other[1].get(sn["it"]) if other is not None else None
+            if osn is not None:
+                rms += f", {other[0]} {osn['m']['rms_err_hv']:.2f} V"
+            axd.plot(tms, (sn["pd"] - ref["pd"]) * 1e3, color=col, lw=lw,
+                     label=f"iter {sn['it']}: {rms}", **self._dot_kw(len(tms)))
+        ax.set_title(f"PD on CH{ch if ch > 0 else '?'} by iteration, {pstem}"
+                     + (f", analyzer {deg:+.1f} deg" if np.isfinite(deg) else ""))
+        ax.set_ylabel("PD (V)")
+        ax.set_xlabel("time (ms)")
+        lo, hi = ax.get_ylim()
+        ax.set_ylim(lo, hi + 0.3 * (hi - lo))        # headroom: the note sits above the traces
+        ax.legend(loc="upper right", fontsize=6, ncols=2 if n > 8 else 1)
+        ax.grid(True, alpha=0.3)
+        self._plot_note(ax, "at a fixed analyzer angle the PD reads cos^2 of the light's rotation, so "
+                            "its change tracks the light's response to the loop;\nmost sensitive with "
+                            "the analyzer ~45 deg from the polarization, blind at extinction or full "
+                            "transmission")
+        axd.axhline(0, color=TARGET_COLOUR, lw=0.5)
+        axd.set_title(f"PD minus iter {ref['it']} (the last stored)")
+        axd.set_ylabel("PD change (mV)")
+        axd.set_xlabel("time (ms)")
+        axd.legend(loc="best", fontsize=6, ncols=2 if n > 8 else 1)
+        axd.grid(True, alpha=0.3)
+        self._draw(self.fig_pd)
 
     def _plot_fold(self, snaps):
         """The residual folded on one ADC display code, for the selected

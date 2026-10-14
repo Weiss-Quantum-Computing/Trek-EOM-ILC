@@ -48,7 +48,7 @@ visible.
 |---|---|
 | **Session** | load a state file, or build one: target + channel + name + first-shot gain → Init. The **Pair (X1 + X2)** tick on top makes Load and Init act on both chains at once (§5) |
 | **Model** | *Inverse model*: what the update divides the error by — the model ladder, its parameters, γ and `f_cut`, the learning notches, and the FRF band. In pair mode a second block under it is X2's, with its own everything |
-| **Hardware** | one look at the rack: Scope, AWG, ELL14, DS345, each with a **Check** that opens the device, asks its identity and how it stands (acquisition mode and V/div; outputs ON/OFF, FRQ and waveform; mount position; gate address), closes it again, and writes the answer and the time into the row, red when it did not answer. The mount and the DS345 are the polarimeter's: their port and address come from its config, and while its window is open they report "in use". Nothing is moved or programmed. |
+| **Hardware** | one look at the rack: Scope, AWG, ELL14, DS345, each with a **Check** that opens the device, asks its identity and how it stands (acquisition mode and V/div; outputs ON/OFF, FRQ and waveform; mount position; gate address), closes it again, and writes the answer and the time into the row, red when it did not answer. The mount and the DS345 are the polarimeter's: their port and address come from its config, and while its window is open they report "in use". Nothing is moved or programmed by a Check. The ELL14 row has one control that does move: **move to deg** and **Move** turn the analyzer to that angle (the polarimeter's frame), approached from below as the polarimeter does (3° short, then a positive step), read it back and close the mount; the row then says `moved to +45.00 deg` with the time. Refused, red and with a message, while the polarimeter window holds COM3 ("in use"). The angle a Check or a Move last read is what the pair loop writes into its PD sidecars. |
 | **Scope** | the *Scope channels* map (which channel is the PD, the monitors, the Trek commands — the polarimeter's roles), the capture settings (`t-offset`, baseline), and the line-ripple switch with its **Line ripple…** dialog |
 | **Run** | the bench flow in order: a *Bench* line (wiring in force, the last thing a run reported about the instruments), **1 Instruments** (Auto-set, Upload), **2 Learn** (iterations, repeats, Run, Stop), **3 Hold**, then **Batch…**, **Manual step…** (one iteration from captures you took) and **Bench settings…** (trigger timeout, the skip/keep ticks, GEN's channel numbers). In pair mode Auto-set, Run and Hold act on both chains |
 | **Optical** | the optical close by hand, both chains (pair mode only): a state line (the pair, the outputs as last reported, what the AWG was last given and whether one crystal plays alone, the last scan, the correction files held, the last verdict) and seven numbered steps — **1 Play** (both, X1 alone or X2 alone), **2 Scan**, **3 Compare**, **4 Apply**, **5 Learn**, **6 Verify**, **7 Outputs OFF** — each greyed, with the reason under it, until the step before has a result; **Settings…** for the scan's rarely changed numbers — §11 |
@@ -227,6 +227,19 @@ both moving; the batch has always trained them together. Tick **Pair
    its own loop, state saved, drive files written. Log lines carry `X1` /
    `X2` in front. Both outputs go OFF at the end. **Hold** re-measures both
    drives the same way, runs numbered per chain.
+
+   **The PD rides along.** With a PD channel in the Scope channels map the
+   loop also reads the analyzer photodiode from the same frozen shots (one
+   more channel per shot, dithered like the monitors, no extra trigger) and
+   keeps it as `run\meas_<pair stem>PD_iNN.npy` — the pair stem is X1's
+   without its trailing `X1` (`PAIRX1` → `meas_PAIRPD_i01.npy`) — with a
+   stats sidecar (`…_stats.npz`: shots, standard error, the V/div it was read
+   at, the channel, and the analyzer angle the Hardware tab last read, NaN
+   when none). The log gets `PD: peak … V, change vs last … mV rms` per
+   iteration. The batch writes the same files under the campaign's stem, so
+   **Load state** recalls either into both sessions' measurements and the
+   Diagnostics → **pd** view draws them. The loop trains the monitors; this is
+   the record of what the light did meanwhile. Hold does not read it.
 5. The **shown X1 / X2** switch above the plots picks which session the
    plots, the summary ("… (X2 of a pair)"), the status hint and every
    single-channel tool — Upload, Manual step, Corrections, Measure FRF, the
@@ -470,6 +483,7 @@ every draw and overrides anything the sliders set.
 | **Diagnostics → contraction** | |1 − γ × achieved/predicted| per model-check band from every bench iteration after the first of a run: under 1 the band converges, the shaded region above 1 means the correction overshoots; hollow markers where the monitor's change did not correlate with the update (noise). |
 | **Diagnostics → heatmap** | every stored base iteration's error as one image (time across, iteration down, colour symmetric to the 99th percentile): corner ripple, hold creep and end effects separate at a glance; a band growing at the corners is a stripe brightening down the image. |
 | **Diagnostics → DAC step** | the newest selected update's |Δu| histogram in generator steps (0.31 mV), the fraction under one step (rounded away) and that fraction's history inset: once most of an update is under a step the loop can only limit-cycle on the quantizer. |
+| **Diagnostics → pd** | the analyzer photodiode per stored iteration of the shown session (top, volts against ms, coloured as the Waveforms tab; title `PD on CH1 by iteration, <stem>` with the analyzer angle when it was known) and each iteration's PD minus the last stored one in mV (bottom), each iteration's monitor error rms in the legend (both chains in pair mode). At a fixed analyzer angle the PD reads cos² of the light's rotation, so its change tracks how the light answered each update: most sensitive with the analyzer ~45° from the polarization, blind at extinction or full transmission. From `meas_<stem>PD_iNN.npy` (pair loop, batch); a session without them shows a note only. |
 | **Table** | the ledger: one row per stored iteration and hold run — peak/rms error (V and %FS), the played drive's peak, wall-clock timestamp, Δt against the reference — compare stems included, the Iterations box deliberately *not* applied. The *model* column names the model that **built that row's drive**: iteration 0 is blank (Init's flat first shot involves no model), hold runs inherit their base iteration's label, and a model whose drive was never measured does not appear. **Save CSV…** writes exactly what the table shows (this tab's equivalent of the figures' toolbar save). |
 | **Inputs → FRF** | measured magnitude/phase/coherence, dropped tones flagged, taper band shaded, current parametric model overlaid. |
 
@@ -482,6 +496,7 @@ every draw and overrides anything the sliders set.
 | `<stem>_iNN.csv` | the AWG GUI's `Waveforms\` | upload-ready copy (±1, Normalise OFF) |
 | `meas_<stem>_iNN.npy` | beside the state | the iteration's averaged measurement — bench mode and Step both save it, so every measured iteration reloads with the session |
 | `meas_<stem>_iNN_rMM.npy` | beside the state | a Hold run's averaged measurement — run M of iteration N, same drive, no update |
+| `meas_<pair stem>PD_iNN.npy` + `_stats.npz` | `run\` | the pair loop's (and the batch's) analyzer photodiode for iteration N, shot mean on X1's grid, and its sidecar with the analyzer angle; only with a PD channel in the map |
 | `ilc_gui.log` | `run\` | timestamped append-only copy of everything the panel logged |
 | `<stem>_optN\`, `<stem>_optN_X1\` / `_X2\` (one crystal alone), `<stem>_optN_verify\` | `run\optical\` | an Optical-tab scan: the polarimeter's scan folder (Scope Grab captures + `<name>_scan.json`, readable by its data viewer); the comparison in its `analysis\target_compare\` (`corr_<stem>X1/X2_optical.csv`, `target_<stem>X1/X2_played.csv`, `summary.json`, `target_compare.npz`) |
 

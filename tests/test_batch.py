@@ -5,7 +5,7 @@ targets (or any target_<stem>X1/X2 pair) -- pass the folder as argv[1].
 
     python tests/test_batch.py <suite>/targets
 """
-import json, os, shutil, sys, tempfile, types
+import glob, json, os, re, shutil, sys, tempfile, types
 import numpy as np
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -540,6 +540,139 @@ def main():
         check(rows["S25"]["error"] and "does not exist" in rows["S25"]["error"], "the S25 row reports its missing target")
         plan = ilc_batch.load_plan(path, cfg=bench_cfg)
         check("already there" in plan["_echo_notes"][0], "a second load finds the files unchanged")
+
+        print("[14] the PD every iteration, the analyzer angle, the early shot count")
+        from eomilc import diagnostics as dg
+        path = write_plan(tmp, ["S25"], name="t14", max_iterations=8, repeats=8, repeats_early=2, early_rms_v=2.0)
+        raw = json.load(open(path))
+        raw["run_dir"] = os.path.join(tmp, "run14")
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)                # PD on CH1
+        msgs = []
+        ilc_batch.dry_run(plan, log=msgs.append)
+        want = "8 shots per measurement (2 while rms > 2 V)"
+        check(any(m.startswith("loop:") and m.endswith(want) for m in msgs), f"the dry run says '{want}'")
+        awg14, scope14 = bench(bench_cfg)
+        scope14.wiring[1] = ("mon", 1)     # the simulated PD: X1's monitor (the sim's PD role reads flat)
+        counts = []
+        orig_cap = ilc_batch.capture_monitors
+
+        def counting(scope, *a, **k):
+            s0 = scope.shots
+            out = orig_cap(scope, *a, **k)
+            counts.append(scope.shots - s0)
+            return out
+        ilc_batch.capture_monitors = counting
+        try:
+            msgs = []
+            man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=(awg14, scope14))
+        finally:
+            ilc_batch.capture_monitors = orig_cap
+        c = man["campaigns"]["S25"]
+        rows = c.get("iterations") or []
+        sim = plan["_run_dir"]
+        check(c["status"] == "done" and len(rows) == len(counts) and len(rows) >= 6,
+              f"done, one record per measurement ({len(rows)} records, {len(counts)} captures)")
+        check([r["it"] for r in rows] == list(range(len(rows))), "records i00 .. i%02d" % (len(rows) - 1))
+        files_ok = all(os.path.exists(os.path.join(sim, f"meas_S25PD_i{r['it']:02d}.npy"))
+                       and os.path.exists(os.path.join(sim, f"meas_S25PD_i{r['it']:02d}_stats.npz")) for r in rows)
+        check(files_ok, "meas_S25PD_iNN.npy and meas_S25PD_iNN_stats.npz for every iteration")
+        pds = [np.load(os.path.join(sim, f"meas_S25PD_i{r['it']:02d}.npy")) for r in rows]
+        check(all(abs(r["pd_peak_v"] - float(p.max())) < 1e-12 for r, p in zip(rows, pds))
+              and all(p.shape == pds[0].shape for p in pds),
+              f"pd_peak_v = the file's peak ({rows[0]['pd_peak_v']:.3f} V on i00)")
+        ch_ok = np.isnan(rows[0]["pd_change_mv"]) and all(
+            abs(r["pd_change_mv"] - 1e3 * float(np.sqrt(np.mean((p - q) ** 2)))) < 1e-9
+            for r, p, q in zip(rows[1:], pds[1:], pds[:-1]))
+        check(ch_ok, "pd_change_mv: NaN on i00, then rms(PD(i) - PD(i-1)) in mV ("
+              + ", ".join(f"{r['pd_change_mv']:.1f}" for r in rows[1:4]) + ", ...)")
+        check(rows[1]["pd_change_mv"] > rows[-1]["pd_change_mv"] > 0,
+              "the PD changes less as the loop converges")
+        st = dg.load_stats(os.path.join(sim, "meas_S25PD_i01_stats.npz"))
+        check(st is not None and st["n_shots"] == rows[1]["shots"] and st["role"] == "PD" and st["scope_ch"] == 1
+              and st["vdiv"] == 1.0 and np.isnan(st["analyzer_deg"]) and len(st["sem_t"]) == len(pds[1])
+              and "fold_amp" not in st,
+              "the PD sidecar: shots, role, CH1, the V/div it was read at, analyzer NaN, sem_t, no fold")
+        check(sum(m.startswith("  PD: peak ") for m in msgs) == len(rows)
+              and any(re.match(r"  PD: peak \d+\.\d\d V, change vs last \d+\.\d mV rms$", m) for m in msgs),
+              "one 'PD: peak .. V, change vs last .. mV rms' line per iteration")
+        check(np.isnan(c.get("analyzer_deg", 0.0)) and "  analyzer not read (simulated instruments)" in msgs,
+              "analyzer_deg NaN in the manifest; the log says it was not read on simulated instruments")
+        shots = [r["shots"] for r in rows]
+        check(counts == shots, f"the scope's shot count per measurement is the manifest's: {counts}")
+        n2 = shots.index(8) if 8 in shots else len(shots)
+        check(shots[0] == 2 and 1 < n2 < len(shots) and set(shots[:n2]) == {2} and set(shots[n2:]) == {8},
+              f"2 shots from i00 to i{n2 - 1:02d}, then 8")
+        far = [any(v > 2.0 for v in r["rms_v"].values()) for r in rows]
+        check(all(far[:n2 - 1]) and all(r["early"] for r in rows[:n2]) and not any(r["early"] for r in rows[n2:]),
+              "2 shots only while an rms was over 2 V (" + ", ".join(
+                  f"i{r['it']:02d} {max(r['rms_v'].values()):.1f}" for r in rows[:n2 + 1]) + " V)")
+        prev = rows[n2 - 1]
+        check(all(v <= 2.0 or v <= ilc_batch.EARLY_FLOOR_FACTOR * prev["floor_v"][k] for k, v in prev["rms_v"].items()),
+              f"8 from the first measurement whose predecessor was at 2 V or within "
+              f"{ilc_batch.EARLY_FLOOR_FACTOR:g}x its own floor (" + ", ".join(
+                  f"{k} {v:.2f} V, floor {prev['floor_v'][k]:.2f} V" for k, v in prev["rms_v"].items()) + ")")
+        check(any("(2 shots, early)" in m for m in msgs)
+              and not any("early" in m for m in msgs if re.search(r"i%02d: rms" % n2, m)),
+              "the iteration lines say '(2 shots, early)' and stop saying it")
+
+        # the analyzer read: through the polarimeter's driver, opened, asked, closed, never moved
+        import ilc_hardware
+
+        class Mount:
+            def __init__(self, deg):
+                self.deg, self.calls = deg, []
+
+            def position(self):
+                self.calls.append("position")
+                return self.deg
+
+            def close(self):
+                self.calls.append("close")
+
+            def __getattr__(self, name):          # goto, move_to, move_by, home: must not be called
+                raise AssertionError(f"the batch called {name} on the mount")
+        mounts = [Mount(45.0)]
+        real_open = ilc_hardware.open_ell14
+        ilc_hardware.open_ell14 = lambda cfg=None, pcfg=None: mounts[-1]
+        try:
+            msgs = []
+            deg = ilc_batch.read_analyzer(plan, object(), args(simulate=False), log=msgs.append)
+            check(deg == 45.0 and mounts[0].calls == ["position", "close"]
+                  and msgs == ["  analyzer at +45.0 deg (polarimeter frame)"],
+                  f"read once and closed, never moved: {msgs}")
+            mounts.append(Mount(315.0))
+            check(ilc_batch.read_analyzer(plan, object(), args(simulate=False), log=lambda s: None) == -45.0,
+                  "315 deg on the mount reads -45.0 deg")
+
+            def busy(cfg=None, pcfg=None):
+                raise PermissionError("could not open port 'COM3': PermissionError(13, 'Access is denied.')")
+            ilc_hardware.open_ell14 = busy
+            msgs = []
+            deg = ilc_batch.read_analyzer(plan, object(), args(simulate=False), log=msgs.append)
+            check(np.isnan(deg) and "did not answer" in msgs[0] and "in use" in msgs[0] and "NaN" in msgs[0],
+                  f"held by the polarimeter: NaN, logged, no refusal ({msgs[0][:70]}...)")
+        finally:
+            ilc_hardware.open_ell14 = real_open
+
+        # no PD in the map: the campaign runs as before, no PD files, no PD keys
+        path = write_plan(tmp, ["S25"], name="t14b")
+        raw = json.load(open(path))
+        raw["run_dir"] = os.path.join(tmp, "run14b")
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg={"scope_channels": SIM_MAP})
+        msgs = []
+        ilc_batch.dry_run(plan, log=msgs.append)
+        check(any(m.startswith("loop:") and m.endswith("6 shots per measurement") for m in msgs)
+              and any(m.startswith("PD: no PD channel") for m in msgs), "dry run: no early count, no PD")
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=bench())
+        c = man["campaigns"]["S25"]
+        rows = c.get("iterations") or []
+        check(c["status"] == "done" and not glob.glob(os.path.join(plan["_run_dir"], "meas_*PD*"))
+              and rows and all("pd_peak_v" not in r and r["shots"] == 6 and not r["early"] for r in rows)
+              and not any(m.startswith("  PD:") for m in msgs),
+              f"no PD role: done, no PD files, {len(rows)} records of 6 shots, no PD lines")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
