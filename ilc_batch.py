@@ -96,6 +96,11 @@ simulated bench (optical.open_devices(simulate=True) + sim_play), where the
 only light-only term is its rotator error (sim_rot_err, 0.5 deg); what it
 plays is what the simbench chains make of the drives (sim_bridge, see
 _sim_drives) and it is cabled without a command channel (_optical_cfg).
+"attribution": "separate" measures the correction per crystal instead of
+splitting one joint residual: X1 alone (X2 parked flat at its idle, AWG name
+PARK2, output ON), X2 alone (X1 parked, PARK1), each compared alone, both
+files applied, and a joint scan verifies; "joint_before" (default true) adds
+a joint scan before the first pass for the before/after table.
 """
 from __future__ import annotations
 
@@ -144,12 +149,18 @@ DEFAULT_SETTINGS = {
 # simulation unless the plan says otherwise), split 0.5 for parallel shapes.
 # cap_v: the gate's cap at the EOM (V), None = the panel's 300 V. sim_rot_err:
 # the simulated rotator error (deg) that gives the closure something to do.
+# attribution (the design's addendum, 13 Oct 2026): "joint" measures both
+# crystals in one scan and splits the residual by `split`; "separate" scans X1
+# alone (X2 parked) and X2 alone (X1 parked), each crystal gets its own
+# measured correction, and a joint scan verifies. joint_before: in "separate",
+# a joint scan before the first pass (the before of the table), not applied.
 DEFAULT_OPTICAL = dict(
     scan=dict(angles="0:359:22.5", shots=8, points=20000, ref_every=9, hold_null=True,
               settle_s=1.0),
     band_hz=5000.0, pd_delay_us=1.7, split=0.5, gains=[0.7, 1.0], iterations=5,
     name="{stem}_opt{pass}", outdir="", verify=True, require_keeper=True, cap_v=None,
-    figs=True, sim_rot_err=0.5, sim_bridge=True)
+    figs=True, sim_rot_err=0.5, sim_bridge=True, attribution="joint", joint_before=True)
+ATTRIBUTIONS = ("joint", "separate")
 
 
 class BatchError(RuntimeError):
@@ -911,6 +922,10 @@ def optical_settings(plan, camp):
         raise BatchError(f"{camp['stem']}: optical gains {g} -- each must be in (0, 2]")
     if s["iterations"] < 1:
         raise BatchError(f"{camp['stem']}: optical iterations {s['iterations']} -- at least 1")
+    if s["attribution"] not in ATTRIBUTIONS:
+        raise BatchError(f"{camp['stem']}: optical attribution {s['attribution']!r} -- "
+                         f"{' or '.join(repr(a) for a in ATTRIBUTIONS)}")
+    s["joint_before"] = bool(s["joint_before"])
     try:
         s["name"].format_map({"stem": camp["stem"], "pass": 1})
     except (KeyError, IndexError, ValueError) as e:
@@ -926,6 +941,9 @@ def optical_line(s):
     line = (f"optical: {n} pass{'es' if n != 1 else ''} gains {'/'.join(_num(g) for g in s['gains'])}, "
             f"{s['iterations']} iterations each, scan {sc['angles']} x {sc['shots']} shots, "
             f"band {float(s['band_hz'])/1e3:g} kHz")
+    if s.get("attribution", "joint") == "separate":
+        line += (", attribution separate (X1 alone, X2 alone, then both to verify"
+                 + ("" if s.get("joint_before", True) else "; no joint before scan") + ")")
     if not s["verify"]:
         line += ", no verification scans"
     if s.get("cap_v") is not None:
@@ -1012,8 +1030,9 @@ def _optical_cfg(plan, simulate, log=print):
     return cfg
 
 
-def _sim_drives(byc, dev, scope, dt, bridge):
-    """What optical.sim_play is given: the drives, or with `bridge` (a
+def _sim_drives(byc, dev, scope, dt, bridge, drives=None):
+    """What optical.sim_play is given: the drives (`drives` {"EO1": u, ...}
+    overrides a channel's, e.g. the park drive of a solo scan), or with `bridge` (a
     simulated run whose batch scope is eomilc.simbench's) what the simbench
     chains make of them divided by rampol.sim's own AWG -> monitor gain. The
     two simulations model the chain differently (rampol.sim: the drive x
@@ -1025,7 +1044,7 @@ def _sim_drives(byc, dev, scope, dt, bridge):
     out = {}
     for c in ("EO1", "EO2"):
         cr = byc[c]
-        u = np.asarray(cr.u, float)
+        u = np.asarray((drives or {}).get(c, cr.u), float)
         if bridge and dev.sim is not None:
             ch = int(c[-1])
             u = scope.chains[cr.wiring["awg_ch"]].respond(u, dt) / float(dev.sim.awg_gain[ch])
@@ -1064,7 +1083,18 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
     (iterate_once, both channels, the stop rules with the caps of the pass);
     then the verification scan <name> and its comparison. A pass whose
     verification scan is complete on disk and recorded done is not
-    repeated. Stop raises BatchStopped (the scan on disk resumes)."""
+    repeated. Stop raises BatchStopped (the scan on disk resumes).
+
+    attribution "separate" (docs/OPTICAL_CLOSE_DESIGN.md, addendum section
+    5): the correction is measured per crystal in every pass. The before is
+    the previous pass's verification, or on the first pass a joint scan
+    <name>_before (joint_before; compared jointly, NOT applied); then X1
+    alone (X2's channel plays optical.park_drive of its drive, uploaded as
+    PARK2; outputs stay ON) -> scan <name>_X1, compared solo="X1" -> EO1's
+    file; then X2 alone (X2's keeper back on, X1 parked as PARK1) -> scan
+    <name>_X2 -> EO2's file; both keepers uploaded again, both files
+    applied, the loop learns, and the joint verification scan <name> reads
+    the after (its own residual recorded, never applied)."""
     from eomilc import corrections as corrmod, optical
     lp = plan["loop"]
     stem = camp["stem"]
@@ -1191,33 +1221,80 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                                         **dict(optical.GATE_DEFAULTS, cap_out=float(s["cap_v"])))
         cancelled = (lambda: stop is not None and stop.is_set())
 
-        def do_scan(name, p):
-            optical.sim_play(dev, _sim_drives(byc, dev, scope, dt, bridge), dt=dt)
+        def do_scan(name, p, drives=None, solo=None):
+            # drives: a channel's override (a solo scan's park drive); solo: the crystal that drives
+            optical.sim_play(dev, _sim_drives(byc, dev, scope, dt, bridge, drives), dt=dt)
             emit("optical", stem=stem, step="scan", scan=name, **{"pass": p})
             log(f"  scan {name}: analyzer {sc['angles']} deg x {sc['shots']} shots, {sc['points']} points")
+            xb = {"plan": plan.get("_path", ""), "campaign": stem, "pass": p, "gain": gains[p - 1]}
+            if solo:
+                xb.update(attribution="separate", solo=solo,
+                          parked={c: optical.PARK_NAMES[k] for c, k in (("EO1", "X1"), ("EO2", "X2"))
+                                  if k != solo})
             folder = _optical(f"scan {name}", optical.scan, dev, outdir, name, t, log=olog,
                               cancelled=cancelled, angles=sc["angles"], shots=int(sc["shots"]),
                               points=int(sc["points"]), ref_every=int(sc["ref_every"]),
                               hold_null=bool(sc["hold_null"]), ends_deg=ends,
                               settle_s=float(sc["settle_s"]), states=states, stop=stop,
-                              extra={"ilc_batch": {"plan": plan.get("_path", ""), "campaign": stem,
-                                                   "pass": p, "gain": gains[p - 1]}})
+                              extra={"ilc_batch": xb})
             log(f"  scan {name}: {folder}")
             return folder
 
-        def do_compare(folder, p, when):
+        def do_compare(folder, p, when, solo=None):
             emit("optical", stem=stem, step="compare", scan=os.path.basename(folder), **{"pass": p})
             log(f"  compare {os.path.basename(folder)}: band {float(s['band_hz'])/1e3:g} kHz, "
-                f"PD delay {pd:g} us, split {float(s['split']):g}")
+                f"PD delay {pd:g} us, "
+                + (f"{solo} alone (the whole correction to {solo})" if solo else f"split {float(s['split']):g}"))
             summ = _optical(f"compare {os.path.basename(folder)}", optical.compare, folder,
                             states["x1"], states["x2"], band_hz=float(s["band_hz"]), pd_delay_us=pd,
-                            split=float(s["split"]), log=olog, figs=bool(s["figs"]), stop=stop)
+                            split=float(s["split"]), log=olog, figs=bool(s["figs"]), solo=solo, stop=stop)
             v = optical.verdict(summ)
             for line in optical.verdict_lines(v):
                 log(f"  {when}: {line}")
             return summ, v
 
+        def play_keepers(why):
+            # both keepers back on the generator, both play (FRQ and the outputs as they are)
+            for cr in runs:
+                name_, n_, frac_ = upload(awg, cr, args.gui_names, log)
+                log(f"  {cr.stem} i{cr.iteration:02d} uploaded as {name_} ({n_} pts, "
+                    f"{100*frac_:.1f}% of DAC range){why}")
+
+        def solo_scans(name, p, prec):
+            """Attribution "separate": X1 alone with X2 parked, then X2 alone
+            with X1 parked, each compared alone. Returns the files {EOn: corr}
+            and the played targets, each from its own crystal's scan."""
+            import ilc_bench
+            files, played = {}, {}
+            prec.update(solo_scans={}, verdicts_solo={}, parked={})
+            for k, other in (("X1", "X2"), ("X2", "X1")):
+                me, pk = byc["EO" + k[-1]], byc["EO" + other[-1]]
+                if k == "X2":
+                    # CH of X2 holds PARK2 since X1's scan: its keeper goes back on
+                    name_, n_, frac_ = upload(awg, me, args.gui_names, log)
+                    log(f"  {me.stem} i{me.iteration:02d} uploaded as {name_} ({n_} pts, "
+                        f"{100*frac_:.1f}% of DAC range): {k} drives")
+                park = optical.park_drive(pk.u)
+                pname = optical.PARK_NAMES[other]
+                n_, frac_ = ilc_bench.upload_drive(awg, pk.wiring["awg_ch"], pname, park, pk.full_scale)
+                log(f"  {other} parked: CH{pk.wiring['awg_ch']} plays {pname}, flat at its idle "
+                    f"{float(park[0]):+.3f} V ({n_} pts; the output stays ON)")
+                prec["parked"][other] = dict(name=pname, idle_V=float(park[0]))
+                sname = f"{name}_{k}"
+                folder = do_scan(sname, p, drives={pk.channel.name: park}, solo=k)
+                prec["solo_scans"][k] = folder
+                save()
+                summ_k, v_k = do_compare(folder, p, f"{k} alone", solo=k)
+                c = me.channel.name
+                if summ_k["files"].get(c):
+                    files[c] = summ_k["files"][c]
+                    played[c] = (summ_k.get("played") or {}).get(c, "")
+                prec["verdicts_solo"][k] = v_k
+                save()
+            return files, played
+
         carry = None                  # this run's previous verification: (folder, summary, verdict)
+        separate = s.get("attribution", "joint") == "separate"     # per crystal: X1 alone, X2 alone
         for i in range(p0, len(gains)):
             p, g = i + 1, gains[i]
             name = s["name"].format_map({"stem": stem, "pass": p})
@@ -1227,24 +1304,48 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             save()
             log(f"  optical pass {p}/{len(gains)}: gain {_num(g)}")
             prev = passes[i - 1] if i > 0 else None
-            if carry is not None:
-                src, summ, vb = carry
-                log(f"  the correction is pass {p - 1}'s verification ({os.path.basename(src)})")
-            elif prev and s["verify"] and prev.get("verify_corr_files") and all(
-                    os.path.exists(f) for f in prev["verify_corr_files"].values()):
-                src = prev["verify_scan"]
-                summ = {"files": prev["verify_corr_files"], "played": prev.get("verify_played", {})}
-                vb = prev.get("verdict_after")
-                log(f"  the correction is pass {p - 1}'s verification ({os.path.basename(src)}, on disk)")
-            elif prev and s["verify"] and _scan_done(prev.get("verify_scan")):
-                src = prev["verify_scan"]
-                summ, vb = do_compare(src, p, "before")
+            if separate:
+                # the before (the table's), never applied: the previous pass's
+                # verification, else a joint scan of its own (joint_before)
+                bsrc, vb = None, None
+                if carry is not None:
+                    bsrc, _, vb = carry
+                    log(f"  before: pass {p - 1}'s verification ({os.path.basename(bsrc)})")
+                elif prev and prev.get("verdict_after") is not None:
+                    bsrc, vb = prev.get("verify_scan"), prev["verdict_after"]
+                    log(f"  before: pass {p - 1}'s verification ({os.path.basename(bsrc or '')}, on disk)")
+                elif s["joint_before"]:
+                    bsrc = do_scan(name + "_before", p)
+                    _, vb = do_compare(bsrc, p, "before")
+                    log(f"  {os.path.basename(bsrc)}: both crystals, the before only (not applied)")
+                else:
+                    log("  no joint before scan (joint_before false): the table has no before")
+                prec.update(attribution="separate", before_scan=bsrc, verdict_before=vb)
+                save()
+                files, played = solo_scans(name, p, prec)
+                prec.update(corr_files=dict(files), played_targets=dict(played))
+                save()
+                play_keepers(": both play")
             else:
-                src = do_scan(name + "_before", p)
-                summ, vb = do_compare(src, p, "before")
-            prec.update(scan=src, corr_files=dict(summ["files"]),
-                        played_targets=dict(summ.get("played") or {}), verdict_before=vb)
-            save()
+                if carry is not None:
+                    src, summ, vb = carry
+                    log(f"  the correction is pass {p - 1}'s verification ({os.path.basename(src)})")
+                elif prev and s["verify"] and prev.get("verify_corr_files") and all(
+                        os.path.exists(f) for f in prev["verify_corr_files"].values()):
+                    src = prev["verify_scan"]
+                    summ = {"files": prev["verify_corr_files"], "played": prev.get("verify_played", {})}
+                    vb = prev.get("verdict_after")
+                    log(f"  the correction is pass {p - 1}'s verification ({os.path.basename(src)}, on disk)")
+                elif prev and s["verify"] and _scan_done(prev.get("verify_scan")):
+                    src = prev["verify_scan"]
+                    summ, vb = do_compare(src, p, "before")
+                else:
+                    src = do_scan(name + "_before", p)
+                    summ, vb = do_compare(src, p, "before")
+                files = summ["files"]
+                prec.update(scan=src, corr_files=dict(summ["files"]),
+                            played_targets=dict(summ.get("played") or {}), verdict_before=vb)
+                save()
             # both targets move, or neither
             emit("optical", stem=stem, step="apply", **{"pass": p})
             snap = {c: (np.array(cr.loop.target, float),
@@ -1254,7 +1355,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             try:
                 for c in ("EO1", "EO2"):
                     cr = byc[c]
-                    path = summ["files"].get(c)
+                    path = files.get(c)
                     if not path:
                         raise optical.CorrectionRefused([("fail", f"the comparison wrote no correction for {c}")])
                     try:
@@ -1281,7 +1382,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             for c, a in applied.items():
                 cr = byc[c]
                 cr.base_target, cr.corr_total, cr.corr_layers = a.base_target, a.corr_total, a.layers
-                path = os.path.abspath(summ["files"][c])
+                path = os.path.abspath(files[c])
                 L = next((L for L in a.layers if L.get("path") == path), a.layers[-1])
                 moved = float(np.max(np.abs(a.corr_total))) * cr.channel.mon_scale
                 prec["applied"][cr.key] = dict(file=path, gain=g, kept_peak_V=float(L.get("kept_peak", 0.0)),
@@ -1290,7 +1391,8 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                                                notes=[list(n_) for n_ in a.notes if n_[0] not in ("ok", "info")])
                 log(f"  {cr.stem}: {os.path.basename(path)} applied x{_num(g)}: {float(L.get('kept_peak', 0)):.1f} V "
                     f"peak kept at the EOM, {100*float(L.get('resolved', 0)):.0f}% resolved; target = base "
-                    f"+ {moved:.1f} V peak")
+                    f"+ {moved:.1f} V peak" + (f" (from {os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path))))})"
+                                               if separate else ""))
                 for lev, txt in a.notes:
                     if lev not in ("ok", "info"):
                         log(f"    {lev}: {txt}")
@@ -1328,6 +1430,9 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                 prec.update(verify_scan=vfolder, verify_corr_files=dict(vs["files"]),
                             verify_played=dict(vs.get("played") or {}), verdict_after=va)
                 carry = (vfolder, vs, va)
+                if separate:
+                    log(f"  {os.path.basename(vfolder)}: both crystals; its own residual is reported, not applied "
+                        f"(the next pass measures each crystal alone again)")
             else:
                 prec["verdict_after"] = None
                 carry = None

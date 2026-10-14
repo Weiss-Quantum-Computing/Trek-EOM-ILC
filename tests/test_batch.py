@@ -337,6 +337,143 @@ def main():
                       f"{k} state: target = base_target + corr_total, one layer (pass 2's file x1.0 replaced pass 1's)")
             check(json.load(open(o["record"]))["status"] == "done", "the stage's own record is written")
 
+        print("[11b] attribution separate: X1 alone (X2 parked), X2 alone (X1 parked), both to verify")
+        path = write_plan(tmp, ["S25"], name="t11b")
+        raw = json.load(open(path))
+        raw["run_dir"] = os.path.join(tmp, "run11b")
+        raw["optical"] = {"scan": {"angles": "0:359:45", "shots": 2}, "gains": [1.0], "iterations": 2,
+                          "pd_delay_us": 0.0, "figs": False, "attribution": "separate"}
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        msgs = []
+        ilc_batch.dry_run(plan, log=msgs.append)
+        want = "attribution separate (X1 alone, X2 alone, then both to verify)"
+        check(any(want in m for m in msgs), f"the dry run prints '{want}'")
+        awg11b, scope11b = bench(bench_cfg)
+        marks, at_scan = {}, {}
+
+        def mark(kind, info):
+            if kind == "optical" and info.get("step") in ("scan", "learn"):
+                key = info["scan"] if info["step"] == "scan" else f"learn{info['pass']}"
+                marks[key] = len(awg11b.log)
+                if info["step"] == "scan":
+                    at_scan[key] = {c: (awg11b.ch[c]["name"], float(np.ptp(awg11b.ch[c]["wave"])),
+                                        float(awg11b.ch[c]["wave"][0] * awg11b.fs)) for c in (1, 2)}
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, on_event=mark, bench=(awg11b, scope11b))
+        c = man["campaigns"]["S25"]
+        o = c.get("optical") or {}
+        P = o.get("passes") or [{}]
+        p1 = P[0]
+        odir = os.path.join(plan["_run_dir"], "optical")
+        names = ["S25_opt1_before", "S25_opt1_X1", "S25_opt1_X2", "S25_opt1"]
+        check(all(os.path.exists(os.path.join(odir, n, f"{n}_scan.json")) for n in names),
+              "scans on disk: " + ", ".join(names))
+        check(c["status"] == "done" and o.get("status") == "done" and p1.get("status") == "done"
+              and p1.get("attribution") == "separate",
+              f"done, one separate pass ({o.get('status')}, {p1.get('status')})")
+        ss = p1.get("solo_scans") or {}
+        check(set(ss) == {"X1", "X2"} and os.path.basename(ss["X1"]) == "S25_opt1_X1"
+              and os.path.basename(ss["X2"]) == "S25_opt1_X2", "the pass record's solo_scans")
+        cf = p1.get("corr_files") or {}
+        check(set(cf) == {"EO1", "EO2"}
+              and os.path.commonpath([cf["EO1"], ss.get("X1", "")]) == os.path.normpath(ss.get("X1", ""))
+              and os.path.commonpath([cf["EO2"], ss.get("X2", "")]) == os.path.normpath(ss.get("X2", "")),
+              "corr_files: EO1 from the X1 scan, EO2 from the X2 scan")
+
+        def finite(v):
+            return bool(v) and all(np.isfinite(leg[k]) for leg in v["legs"]
+                                   for k in ("top_lt_mdeg", "top_lm_mdeg", "lt_rms_mdeg"))
+        vs = p1.get("verdicts_solo") or {}
+        check(set(vs) == {"X1", "X2"} and finite(vs["X1"]) and finite(vs["X2"]), "verdicts_solo finite")
+        check(finite(p1.get("verdict_before")) and finite(p1.get("verdict_after"))
+              and os.path.basename(p1.get("before_scan") or "") == "S25_opt1_before",
+              "verdict_before from the joint S25_opt1_before (not applied), verdict_after from the verification")
+        ap = p1.get("applied") or {}
+        check(set(ap) == {"X1", "X2"} and all(a["status"] == "applied" for a in ap.values())
+              and ap["X1"]["file"] == os.path.abspath(cf.get("EO1", "")) and ap["X2"]["file"] == os.path.abspath(cf.get("EO2", "")),
+              "both applied, each its own crystal's file ("
+              + ", ".join(f"{k} {a['kept_peak_V']:.1f} V" for k, a in ap.items()) + ")")
+        # The sequence is what is tested here, not the physics: rampol.sim's
+        # light-only term is an analyzer error that follows the TOTAL rotation,
+        # not either crystal's own, so each solo scan reads about the whole of
+        # it and the two files add to ~twice the joint one; the verification
+        # need not improve in simulation.
+        if finite(p1.get("verdict_before")) and finite(p1.get("verdict_after")):
+            b, a = p1["verdict_before"]["legs"][0], p1["verdict_after"]["legs"][0]
+            print(f"       joint before -> after: ramp top light-monitors {b['top_lm_mdeg']:+.0f} -> "
+                  f"{a['top_lm_mdeg']:+.0f} mdeg; light-target spread {b['lt_std_mdeg']:.0f} -> "
+                  f"{a['lt_std_mdeg']:.0f} mdeg; correction peak joint "
+                  + "/".join(f"{x['peak_V']:.1f}" for x in p1["verdict_before"]["correction"]["crystals"].values())
+                  + " V, solo X1 " + "/".join(f"{x['peak_V']:.1f}" for x in vs["X1"]["correction"]["crystals"].values())
+                  + " V, solo X2 " + "/".join(f"{x['peak_V']:.1f}" for x in vs["X2"]["correction"]["crystals"].values())
+                  + " V (EO1/EO2)")
+        check(os.path.basename(p1.get("verify_scan") or "") == "S25_opt1" and ilc_batch._scan_done(p1.get("verify_scan"))
+              and set(p1.get("verify_corr_files") or {}) == {"EO1", "EO2"},
+              "verify_scan S25_opt1 (joint), its files recorded")
+        log = awg11b.log
+        i1, i2, il = marks.get("S25_opt1_X1", -1), marks.get("S25_opt1_X2", -1), marks.get("learn1", -1)
+        ib = marks.get("S25_opt1_before", -1)
+        check(0 <= ib < i1 and ("upload", 2, "PARK2") in log[ib:i1], "('upload', 2, 'PARK2') before the X1 scan")
+        check(0 <= i1 < i2 and ("upload", 1, "PARK1") in log[i1:i2]
+              and any(e[0] == "upload" and e[1] == 2 and e[2].startswith("BX2") for e in log[i1:i2]),
+              "('upload', 1, 'PARK1') and X2's keeper on CH2 before the X2 scan")
+        check(at_scan.get("S25_opt1_X1", {}).get(2, ("", 1))[0] == "PARK2" and at_scan["S25_opt1_X1"][2][1] == 0.0
+              and at_scan["S25_opt1_X1"][1][0].startswith("BX1")
+              and at_scan.get("S25_opt1_X2", {}).get(1, ("", 1))[0] == "PARK1" and at_scan["S25_opt1_X2"][1][1] == 0.0
+              and at_scan["S25_opt1_X2"][2][0].startswith("BX2")
+              and at_scan.get("S25_opt1", {}).get(1, ("",))[0].startswith("BX1")
+              and at_scan["S25_opt1"][2][0].startswith("BX2"),
+              "the generator holds: X1 scan BX1/PARK2 (flat), X2 scan PARK1 (flat)/BX2, verification both keepers")
+        up = [e for e in log[i2:il] if e[0] == "upload"] if 0 <= i2 < il else []
+        check({e[1] for e in up} == {1, 2} and all(e[2].startswith(f"BX{e[1]}") for e in up),
+              f"both keepers uploaded again before the learn ({', '.join(e[2] for e in up)})")
+        check(not any(e[0] == "output" and not e[2] for e in log[marks.get("S25_opt1_before", 0):il]),
+              "no output switched off to park")
+        with open(os.path.join(ss.get("X1", ""), "S25_opt1_X1_scan.json")) as fh:
+            idle1 = json.load(fh)["drive"]["idle_V"]
+        # the manifest holds what the simulated polarimeter played: bridged
+        # (ilc_batch._sim_drives), the simbench chain's response to the flat
+        # park drive over rampol.sim's CH2 gain (0.5924), so EO2 is flat at
+        # what the bridge makes of the idle, not at the AWG volts themselves
+        park_v = (p1.get("parked") or {}).get("X2", {}).get("idle_V", float("nan"))
+        with np.load(c["channels"]["X2"]["state"], allow_pickle=True) as st:
+            t2 = np.asarray(st["t"], float)
+        flat = np.full(len(t2), park_v)
+        want = scope11b.chains[2].respond(flat, float(np.median(np.diff(t2))))[0] / 0.5924
+        check(abs(idle1["EO2"] - want) < 1e-6 and abs(park_v - at_scan["S25_opt1_X1"][2][2]) < 1e-3,
+              f"the X1 scan's manifest has EO2 at the idle (PARK2 {park_v:+.3f} V on the AWG, played by the "
+              f"bridged simulation as {idle1['EO2']:+.4f} V)")
+        check(any("X2 parked: CH2 plays PARK2" in m for m in msgs) and any("X1 parked: CH1 plays PARK1" in m for m in msgs),
+              "the log names the parked channel")
+        check(not awg11b.is_on(1) and not awg11b.is_on(2), "outputs off at the end")
+        for k in ("X1", "X2"):
+            ch = c["channels"][k]
+            with np.load(ch["state"], allow_pickle=True) as st:
+                lay = json.loads(str(st["corrections"])) if "corrections" in st.files else []
+            check(ch["keeper_iteration"] == p1.get("kept", {}).get(k) and len(lay) == 1
+                  and lay[0]["path"] == os.path.abspath(cf.get("EO" + k[-1], "")),
+                  f"{k}: keeper i{ch['keeper_iteration']:02d} after the correction, one layer from its own scan")
+        bad = dict(raw, optical=dict(raw["optical"], attribution="sideways"))
+        try:
+            ilc_batch.optical_settings(bad, bad["campaigns"][0])
+            check(False, "attribution 'sideways' refused")
+        except ilc_batch.BatchError as e:
+            check("sideways" in str(e), f"attribution 'sideways' refused ({e})")
+        # joint_before false: no _before scan, no before verdict
+        raw["run_dir"] = os.path.join(tmp, "run11c")
+        raw["optical"]["joint_before"] = False
+        json.dump(raw, open(path, "w"))
+        plan = ilc_batch.load_plan(path, cfg=bench_cfg)
+        msgs = []
+        man = ilc_batch.run_batch(plan, args(), log=msgs.append, bench=bench(bench_cfg))
+        o = man["campaigns"]["S25"].get("optical") or {}
+        p1 = (o.get("passes") or [{}])[0]
+        odir = os.path.join(plan["_run_dir"], "optical")
+        check(o.get("status") == "done" and not os.path.exists(os.path.join(odir, "S25_opt1_before"))
+              and p1.get("verdict_before", "absent") is None and finite(p1.get("verdict_after")),
+              "joint_before false: no S25_opt1_before, verdict_before None, the verification still runs")
+
         print("[12] a refused correction is recorded; the campaign keeps its electrical keeper")
         path = write_plan(tmp, ["S25"], name="t12")
         raw = json.load(open(path))

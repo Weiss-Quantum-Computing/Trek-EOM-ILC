@@ -505,6 +505,47 @@ be **scope-grab-multi** (the headless API): with the old checkout the stage
 stops before switching anything on and the log says how to point `SCOPE_GRAB`
 at the right one. The analyzer is the ELL14 of the polarimeter's config.
 
+**Per-crystal attribution.** The flow above (`"attribution": "joint"`, the
+default) scans with both drives playing and splits the one residual between
+the crystals by `split`: right for the light, which only needs the sum, but
+the file holds only for that pair of drives, and each crystal's own error
+(the 8 Oct creep was X1's alone; the ramp-top overshoot is per crystal) lands
+half on the wrong one. `"attribution": "separate"` measures each crystal's
+correction on its own, per pass:
+
+1. Before: on the first pass, with `"joint_before": true` (the default), a
+   joint scan `<stem>_opt1_before` and a joint comparison give
+   `verdict_before`; it is recorded, NOT applied. Later passes take the
+   previous verification as their before (with `verify` false, a joint
+   before scan of their own). `"joint_before": false` skips it
+   (`verdict_before` is then None).
+2. X1 alone: X2's channel gets its drive flattened at its idle
+   (`optical.park_drive`, the first sample, same length, so FRQ and the
+   trigger hold) uploaded as `PARK2`; the output stays ON (never OFF to
+   park). Scan `<stem>_opt1_X1`, compared with `solo="X1"`: the whole
+   light − monitors goes to X1, EO1's file only.
+3. X2 alone: X2's keeper back on CH2, X1 parked as `PARK1`, scan
+   `<stem>_opt1_X2`, `solo="X2"` → EO2's file.
+4. Both keepers uploaded again (both play), both files applied (both or
+   neither, as above), `iterations` iterations learn.
+5. The joint verification scan `<stem>_opt1` gives `verdict_after`; its own
+   residual is recorded (`verify_corr_files`) but never applied: the next pass
+   measures each crystal alone again.
+
+Three scans a pass instead of two (four on the first with `joint_before`).
+The pass record adds `attribution`, `before_scan`, `solo_scans` {X1, X2},
+`verdicts_solo` {X1, X2} and `parked` (name and idle volts); `corr_files` is
+EO1 from the X1 scan and EO2 from the X2 scan. A solo scan on disk resumes
+under its name; a pass recorded done is not repeated. Any other attribution
+value is refused when the plan is checked. The dry-run line ends
+`attribution separate (X1 alone, X2 alone, then both to verify)`. In
+simulation the sequence runs but proves nothing about attribution: the
+simulated light-only term is an analyzer error that follows the TOTAL
+rotation, so each solo scan reads about all of it (S25: 29.5 V on the driving
+crystal's file, against 15.8 V per crystal from the joint split), the two
+files together correct about twice what is there, and the verification reads
+worse (light − target spread 290 → 416 mdeg after one pass at 1.0). Nothing of it has run on hardware.
+
 Offline, `--simulate` (or **Simulate**) runs a plan against
 `eomilc/simbench.py` (the measured FRFs with a gain and delay error). It writes
 into `run\sim`, never `run\`, so a simulated state cannot be resumed as if it
@@ -534,7 +575,10 @@ Two tests exercise the simulated bench:
   - a mis-set generator is refused with nothing switched on;
   - the optical stage: two passes, Stop in pass 2 and a resume that does not
     repeat pass 1, the states' correction keys, and a refused correction
-    leaving the electrical keeper.
+    leaving the electrical keeper;
+  - separate attribution: the PARK2 / PARK1 uploads before each solo scan,
+    each crystal's file from its own scan, the keepers back before the
+    learn, the joint verification, and `joint_before` false.
 - `tests/test_batch_gui.py <targets>` drives the batch window: plan builder,
   Check plan, Simulate, Stop, the confirmation, following, reopening.
 
