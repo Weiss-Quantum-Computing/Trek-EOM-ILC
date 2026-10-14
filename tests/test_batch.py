@@ -341,7 +341,9 @@ def main():
         path = write_plan(tmp, ["S25"], name="t11b")
         raw = json.load(open(path))
         raw["run_dir"] = os.path.join(tmp, "run11b")
-        raw["optical"] = {"scan": {"angles": "0:359:45", "shots": 2}, "gains": [1.0], "iterations": 2,
+        raw["optical"] = {"scan": {"angles": "0:359:45", "shots": 2, "solo_angles": "0:179:45",
+                                   "verify_angles": "0:179:45"},
+                          "gains": [1.0], "iterations": 2,
                           "pd_delay_us": 0.0, "figs": False, "attribution": "separate"}
         json.dump(raw, open(path, "w"))
         plan = ilc_batch.load_plan(path, cfg=bench_cfg)
@@ -349,6 +351,15 @@ def main():
         ilc_batch.dry_run(plan, log=msgs.append)
         want = "attribution separate (X1 alone, X2 alone, then both to verify)"
         check(any(want in m for m in msgs), f"the dry run prints '{want}'")
+        check(any("(solo scans 0:179:45) (verify scans 0:179:45)" in m for m in msgs),
+              "the dry run names the solo and verify scans' own angles")
+        s11b = ilc_batch.optical_settings(plan, plan["campaigns"][0])
+        full = dict(s11b, scan=dict(s11b["scan"], solo_angles=None, verify_angles=None))
+        est_h, n_h, _ = ilc_batch.optical_estimate(plan, s11b, 30.0)
+        est_f, n_f, _ = ilc_batch.optical_estimate(plan, full, 30.0)
+        check(n_h == n_f == 4 and est_h < est_f and ilc_batch.scan_angles(s11b["scan"], "solo") == "0:179:45"
+              and ilc_batch.scan_angles(s11b["scan"], "before") == "0:359:45",
+              f"the estimate counts the half-circle scans: {est_h/60:.1f} min against {est_f/60:.1f} at full circle")
         awg11b, scope11b = bench(bench_cfg)
         marks, at_scan = {}, {}
 
@@ -375,6 +386,12 @@ def main():
         ss = p1.get("solo_scans") or {}
         check(set(ss) == {"X1", "X2"} and os.path.basename(ss["X1"]) == "S25_opt1_X1"
               and os.path.basename(ss["X2"]) == "S25_opt1_X2", "the pass record's solo_scans")
+        angs = {}
+        for nm in ("S25_opt1_before", "S25_opt1_X1", "S25_opt1"):
+            mf = os.path.join(os.path.dirname(ss["X1"]), nm, nm + "_scan.json")
+            angs[nm] = json.load(open(mf, encoding="utf-8"))["plan"].get("angles") if os.path.exists(mf) else None
+        check(angs == {"S25_opt1_before": "0:359:45", "S25_opt1_X1": "0:179:45", "S25_opt1": "0:179:45"},
+              f"the before scan runs the full circle, the solo and verify scans their own half: {angs}")
         cf = p1.get("corr_files") or {}
         check(set(cf) == {"EO1", "EO2"}
               and os.path.commonpath([cf["EO1"], ss.get("X1", "")]) == os.path.normpath(ss.get("X1", ""))

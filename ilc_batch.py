@@ -179,7 +179,12 @@ DEFAULT_SETTINGS = {
 # measured correction, and a joint scan verifies. joint_before: in "separate",
 # a joint scan before the first pass (the before of the table), not applied.
 DEFAULT_OPTICAL = dict(
-    scan=dict(angles="0:359:22.5", shots=8, points=None, sample_us=2.0, ref_every=9, hold_null=True,
+    # solo_angles / verify_angles: the X1-alone, X2-alone and verification scans'
+    # angles when they differ from the before scan's (None = the same); a half
+    # circle ("0:179:22.5") carries the same polarization information in half
+    # the time, the full circle adds the 1-theta / 4-theta diagnostics (14 Oct 2026)
+    scan=dict(angles="0:359:22.5", solo_angles=None, verify_angles=None,
+              shots=8, points=None, sample_us=2.0, ref_every=9, hold_null=True,
               settle_s=1.0),
     band_hz=5000.0, pd_delay_us=1.7, split=0.5, gains=[0.7, 1.0], iterations=5,
     name="{stem}_opt{pass}", outdir="", verify=True, require_keeper=True, cap_v=None,
@@ -1275,8 +1280,10 @@ def optical_line(s):
     """The optical settings as one line (dry_run, the log)."""
     n, sc = len(s["gains"]), s["scan"]
     line = (f"optical: {n} pass{'es' if n != 1 else ''} gains {'/'.join(_num(g) for g in s['gains'])}, "
-            f"{s['iterations']} iterations each, scan {sc['angles']} x {sc['shots']} shots, "
-            f"band {float(s['band_hz'])/1e3:g} kHz")
+            f"{s['iterations']} iterations each, scan {sc['angles']} x {sc['shots']} shots"
+            + (f" (solo scans {sc['solo_angles']})" if sc.get("solo_angles") else "")
+            + (f" (verify scans {sc['verify_angles']})" if sc.get("verify_angles") else "")
+            + f", band {float(s['band_hz'])/1e3:g} kHz")
     if s.get("attribution", "joint") == "separate":
         line += (", attribution separate (X1 alone, X2 alone, then both to verify"
                  + ("" if s.get("joint_before", True) else "; no joint before scan") + ")")
@@ -1564,11 +1571,13 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                                         **dict(optical.GATE_DEFAULTS, cap_out=float(s["cap_v"])))
         cancelled = (lambda: stop is not None and stop.is_set())
 
-        def do_scan(name, p, drives=None, solo=None):
-            # drives: a channel's override (a solo scan's park drive); solo: the crystal that drives
+        def do_scan(name, p, drives=None, solo=None, kind="before"):
+            # drives: a channel's override (a solo scan's park drive); solo: the crystal that drives;
+            # kind: before / solo / verify -- the solo and verify scans may use their own angles
+            ang = scan_angles(sc, kind)
             optical.sim_play(dev, _sim_drives(byc, dev, scope, dt, bridge, drives), dt=dt)
             emit("optical", stem=stem, step="scan", scan=name, **{"pass": p})
-            log(f"  scan {name}: analyzer {sc['angles']} deg x {sc['shots']} shots, "
+            log(f"  scan {name}: analyzer {ang} deg x {sc['shots']} shots, "
                 + (f"{int(sc['points'])} points" if sc.get("points") else
                    f"readout at {float(sc.get('sample_us') or 2.0):g} us"))
             xb = {"plan": plan.get("_path", ""), "campaign": stem, "pass": p, "gain": gains[p - 1]}
@@ -1581,7 +1590,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             ends_k = ({solo: ends[solo], ("X2" if solo == "X1" else "X1"): 0.0}
                       if (solo and ends) else ends)
             folder = _optical(f"scan {name}", optical.scan, dev, outdir, name, t, log=olog,
-                              cancelled=cancelled, angles=sc["angles"], shots=int(sc["shots"]),
+                              cancelled=cancelled, angles=ang, shots=int(sc["shots"]),
                               points=(int(sc["points"]) if sc.get("points") else None),
                               sample_us=float(sc.get("sample_us") or 2.0), ref_every=int(sc["ref_every"]),
                               hold_null=bool(sc["hold_null"]), ends_deg=ends_k,
@@ -1631,7 +1640,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                     f"{float(park[0]):+.3f} V ({n_} pts; the output stays ON)")
                 prec["parked"][other] = dict(name=pname, idle_V=float(park[0]))
                 sname = f"{name}_{k}"
-                folder = do_scan(sname, p, drives={pk.channel.name: park}, solo=k)
+                folder = do_scan(sname, p, drives={pk.channel.name: park}, solo=k, kind="solo")
                 prec["solo_scans"][k] = folder
                 save()
                 summ_k, v_k = do_compare(folder, p, f"{k} alone", solo=k)
@@ -1805,7 +1814,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             final = dict(kept)
             save()
             if s["verify"]:
-                vfolder = do_scan(name, p)
+                vfolder = do_scan(name, p, kind="verify")
                 vs, va = do_compare(vfolder, p, "after")
                 prec.update(verify_scan=vfolder, verify_corr_files=dict(vs["files"]),
                             verify_played=dict(vs.get("played") or {}), verdict_after=va)
@@ -1862,23 +1871,39 @@ def optical_estimate(plan, s, per_it, ncamp_channels=2):
     if not s:
         return 0.0, 0, 0
     tm, sc = plan["timing"], s["scan"]
-    try:
-        a, b, step = (float(x) for x in str(sc["angles"]).split(":"))
-        n_ang = int((b - a) // step) + 1
-    except (ValueError, KeyError):
-        n_ang = 16
-    steps = n_ang + (2 if sc.get("hold_null", True) else 0) + n_ang // max(1, int(sc.get("ref_every", 9)))
     shots = int(sc["shots"])
     step_s = (shots * (1.0 / tm["trigger_hz"] + tm["read_s_per_channel"] * (ncamp_channels + 2))
               + float(sc.get("settle_s", 1.0)) + tm.get("scan_step_overhead_s", 2.0))
+
+    def scan_s(kind):
+        n_ang = n_angles(scan_angles(sc, kind))
+        steps = n_ang + (2 if sc.get("hold_null", True) else 0) + n_ang // max(1, int(sc.get("ref_every", 9)))
+        return steps * step_s + tm.get("compare_s", 10.0)
     passes = len(s["gains"])
+    kinds = []
     if s.get("attribution", "joint") == "separate":
-        scans = (1 if s.get("joint_before", True) else 0) + 2 + (passes if s["verify"] else 0)
+        kinds += (["before"] if s.get("joint_before", True) else []) + ["solo", "solo"]
     else:
-        scans = 1 + (passes if s["verify"] else 0)
+        kinds += ["before"]
+    kinds += ["verify"] * (passes if s["verify"] else 0)
     learn = passes * int(s["iterations"])
-    total = scans * (steps * step_s + tm.get("compare_s", 10.0)) + learn * per_it
-    return total, scans, learn
+    total = sum(scan_s(k) for k in kinds) + learn * per_it
+    return total, len(kinds), learn
+
+
+def scan_angles(sc, kind):
+    """The analyzer angles of a scan of `kind` (before / solo / verify): the
+    kind's own when the settings give them, else the before scan's."""
+    key = {"solo": "solo_angles", "verify": "verify_angles"}.get(kind)
+    return (sc.get(key) if key else None) or sc["angles"]
+
+
+def n_angles(angles):
+    try:
+        a, b, step = (float(x) for x in str(angles).split(":"))
+        return int((b - a) // step) + 1
+    except (ValueError, TypeError):
+        return 16
 
 
 def plan_rows(plan):

@@ -525,7 +525,11 @@ Those are the defaults, with `scan.sample_us` 2.0 (the readout per capture is
 the scan's screen, 0.5 ms before the trigger to 8 ms after the record, at that
 spacing: the ILC's own grid whatever the record length, ~8000 points for S25,
 ~18500 for a 27.5 ms spin-echo record; `scan.points` set to a number fixes the
-count instead), `scan.ref_every` 9,
+count instead), `scan.ref_every` 9, `scan.solo_angles` and `scan.verify_angles`
+null (the X1-alone, X2-alone and verification scans use the before scan's
+`angles`; a half circle such as `"0:179:22.5"` carries the same polarization
+information in half the time, the full circle is kept for the before scan's
+1-theta / 4-theta diagnostics -- the suite plans do this since 15 Oct 2026),
 `scan.hold_null` true, `scan.settle_s` 1.0, `outdir` `run\optical`, `verify`
 true and `require_keeper` true (no stage when a channel diverged or failed the
 limit check); `cap_v` lowers the gate's 300 V cap at the EOM. Per campaign:
