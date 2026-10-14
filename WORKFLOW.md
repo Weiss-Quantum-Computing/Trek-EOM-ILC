@@ -544,7 +544,16 @@ simulated light-only term is an analyzer error that follows the TOTAL
 rotation, so each solo scan reads about all of it (S25: 29.5 V on the driving
 crystal's file, against 15.8 V per crystal from the joint split), the two
 files together correct about twice what is there, and the verification reads
-worse (light − target spread 290 → 416 mdeg after one pass at 1.0). Nothing of it has run on hardware.
+worse (light − target spread 290 → 416 mdeg after one pass at 1.0). The bench
+has the same exposure for any light error that follows the TOTAL rotation
+rather than one crystal's voltage (an analyzer or extinction term): both solo
+scans read all of it and the two files apply it twice, so at gain g a pass
+leaves −(2g − 1) of it; 0.5 corrects it exactly, 1.0 flips its sign every
+pass. A crystal's own error converges at any gain up to 1. So run separate
+passes at **gains 0.5** (the dry-run line says so when a gain is higher) and
+read the joint verification: a residual that comes back with the opposite
+sign and about the same size is a common term that was doubled. Nothing of
+it has run on hardware.
 
 Offline, `--simulate` (or **Simulate**) runs a plan against
 `eomilc/simbench.py` (the measured FRFs with a gain and delay error). It writes

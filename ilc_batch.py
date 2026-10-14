@@ -944,6 +944,14 @@ def optical_line(s):
     if s.get("attribution", "joint") == "separate":
         line += (", attribution separate (X1 alone, X2 alone, then both to verify"
                  + ("" if s.get("joint_before", True) else "; no joint before scan") + ")")
+        # A light error that follows the TOTAL rotation (an analyzer or
+        # extinction term, not a crystal's own) is read in full by BOTH
+        # solo scans and applied twice: at gain g the pass leaves -(2g - 1)
+        # of it, so gains over 0.5 overshoot such a term and 1.0 flips its
+        # sign every pass. Crystal-own errors converge at any gain <= 1.
+        if any(g > 0.5 for g in s["gains"]):
+            line += (" -- NOTE: gains over 0.5 double-count a light error common to both "
+                     "crystals (each solo scan reads all of it); 0.5 per pass is safe")
     if not s["verify"]:
         line += ", no verification scans"
     if s.get("cap_v") is not None:
