@@ -1033,6 +1033,11 @@ def verdict(summary) -> dict:
         tr = f.get("transports") or (summary.get("transports") if e["leg"] == 1 else None)
         if tr:
             rec["transports"] = [dict(t) for t in tr]
+            hold_numbers(summary, e["leg"], rec["transports"])
+            hv = [t["hold_lt_mdeg"] for t in rec["transports"] if np.isfinite(t.get("hold_lt_mdeg", float("nan")))]
+            if hv:
+                rec["hold_lt_mdeg"] = max(hv, key=abs)
+                rec["hold_lm_mdeg"] = max((t["hold_lm_mdeg"] for t in rec["transports"]), key=abs)
             if len(tr) > 1:
                 # the leg's own extremes come from the envelope, whose hold
                 # window spans the idle between the transports: take the
@@ -1068,12 +1073,52 @@ def verdict(summary) -> dict:
             "source": ext.get("source", "")}
 
 
+HOLD_IN = 0.2e-3     # s inside the flat top's ends: the hold's own number, clear of the ramp edges
+
+
+def hold_numbers(summary, leg, transports):
+    """Each transport's light - target and light - monitors averaged over the
+    inside of its flat top (HOLD_IN clear of both ends), low-passed at the
+    band, from the comparison's target_compare.npz: hold_lt_mdeg,
+    hold_lm_mdeg and hold_lt_sd_mdeg on the transport dicts. The verdict's
+    "ramp top" extreme is taken over the top with a 0.3 ms pad, where the
+    ramp edges sit; the edge artefact of the comparison's time map (14 Oct
+    2026: +300..+600 mdeg at the rise foot) dominates it, the hold's own
+    number does not see it. NaN when the file or the leg is not there."""
+    out = summary.get("out")
+    path = os.path.join(out, "target_compare.npz") if out else None
+    if not path or not os.path.exists(path):
+        for t in transports:
+            t.setdefault("hold_lt_mdeg", float("nan"))
+            t.setdefault("hold_lm_mdeg", float("nan"))
+        return
+    z = np.load(path)
+    key = f"leg{leg}_d_light"
+    if key not in z.files:
+        return
+    tl = z["t_leg1"]
+    ms, dt = (tl - tl[0]) * 1e3, float(np.median(np.diff(tl)))
+    band = float(summary.get("f_cut_Hz") or 5000.0)
+    lt = corrmod.lowpass(z[key], dt, band) * 1e3
+    lm = corrmod.lowpass(z[f"leg{leg}_d_lm"], dt, band) * 1e3
+    for t in transports:
+        a, b, c, d = (float(x) for x in t["landmarks_ms"])
+        m = (ms > b + HOLD_IN * 1e3) & (ms < c - HOLD_IN * 1e3)
+        if m.any():
+            t["hold_lt_mdeg"], t["hold_lm_mdeg"] = float(np.mean(lt[m])), float(np.mean(lm[m]))
+            t["hold_lt_sd_mdeg"] = float(np.std(lt[m]))
+        else:
+            t["hold_lt_mdeg"] = t["hold_lm_mdeg"] = float("nan")
+
+
 def verdict_lines(v) -> list:
     """verdict() as log lines."""
     out = []
     for L in v["legs"]:
         out.append(f"leg {L['leg']}: ramp top light-monitors {L['top_lm_mdeg']:+.0f} mdeg, "
-                   f"light-target {L['top_lt_mdeg']:+.0f}; first ms after the fall "
+                   f"light-target {L['top_lt_mdeg']:+.0f}"
+                   + (f" (inside the hold {L['hold_lt_mdeg']:+.0f})" if np.isfinite(L.get("hold_lt_mdeg", float("nan"))) else "")
+                   + f"; first ms after the fall "
                    f"{L['after_fall_lm_mdeg']:+.0f} / {L['after_fall_lt_mdeg']:+.0f} mdeg; "
                    f"light-target rms {L['lt_rms_mdeg']:.0f} mdeg")
         for t in L.get("transports") or []:
@@ -1082,7 +1127,8 @@ def verdict_lines(v) -> list:
             lm = t.get("landmarks_ms") or [float("nan")] * 4
             out.append(f"   transport {t.get('index', '?')} ({lm[0]:.2f}-{lm[3]:.2f} ms): ramp top "
                        f"light-monitors {t.get('top_lm_mdeg', float('nan')):+.0f} mdeg, light-target "
-                       f"{t.get('top_lt_mdeg', float('nan')):+.0f}; after the fall "
+                       f"{t.get('top_lt_mdeg', float('nan')):+.0f} (inside the hold "
+                       f"{t.get('hold_lt_mdeg', float('nan')):+.0f}); after the fall "
                        f"{t.get('after_fall_lm_mdeg', float('nan')):+.0f} / "
                        f"{t.get('after_fall_lt_mdeg', float('nan')):+.0f} mdeg; light-target rms "
                        f"{t.get('lt_rms_mdeg', float('nan')):.0f} mdeg")

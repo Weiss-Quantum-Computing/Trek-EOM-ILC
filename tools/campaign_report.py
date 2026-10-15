@@ -41,6 +41,27 @@ def leg_tolerance_mdeg(stem):
     return 10.0
 
 
+def hold_lt(scan, band):
+    """(worst transport's light - target inside the hold, the first scan's
+    per-transport list) in mdeg, from the comparison and the verdict's
+    landmarks; nan without them."""
+    z = cf.npz_of(scan)
+    v = scan.get("verdict") or {}
+    tr = ((v.get("legs") or [{}])[0].get("transports")) or []
+    if z is None or not tr:
+        return float("nan")
+    tl = z["t_leg1"]
+    ms, dt = (tl - tl[0]) * 1e3, float(np.median(np.diff(tl)))
+    lt = corrmod.lowpass(z["leg1_d_light"], dt, band) * 1e3
+    vals = []
+    for t in tr:
+        a, b, c, d = (float(x) for x in t["landmarks_ms"])
+        m = (ms > b + 0.2) & (ms < c - 0.2)
+        if m.any():
+            vals.append(float(np.mean(lt[m])))
+    return max(vals, key=abs) if vals else float("nan")
+
+
 def leg_diff_top(scan, band):
     """Light leg 2 - leg 1, mean over the ramp top (mdeg), from a scan's
     comparison and its verdict's transport landmarks; nan when not there."""
@@ -88,7 +109,9 @@ def fill_row(row, plan, man, log_path, figures_to=None):
         joint = [s for s in c.scans if s["kind"] in ("before", "verify") and s.get("verdict")]
         if joint:
             wb, wa = cf.worst(joint[0]["verdict"]), cf.worst(joint[-1]["verdict"])
-            row["light_minus_target_top_mdeg"] = f"{wb.get('top_lt_mdeg', float('nan')):+.0f} -> {wa.get('top_lt_mdeg', float('nan')):+.0f}"
+            hb, ha = hold_lt(joint[0], band), hold_lt(joint[-1], band)
+            row["light_minus_target_top_mdeg"] = (f"hold {hb:+.0f} -> {ha:+.0f} (edge {wb.get('top_lt_mdeg', float('nan')):+.0f} "
+                                                  f"-> {wa.get('top_lt_mdeg', float('nan')):+.0f})")
             after = [s for s in joint if s["kind"] == "verify"]
             if after:
                 d = leg_diff_top(after[-1], band)
@@ -100,8 +123,8 @@ def fill_row(row, plan, man, log_path, figures_to=None):
                 stop = float(row.get("stop_deg") or 180.0)
             except ValueError:
                 stop = 180.0
-            if stop < 180.0 and abs(float(wa.get("top_lt_mdeg", 0.0))) > 250.0:
-                notes.append(f"FLAG light - target at the stop {wa.get('top_lt_mdeg', float('nan')):+.0f} mdeg (> 250)")
+            if stop < 180.0 and np.isfinite(ha) and abs(ha) > 250.0:
+                notes.append(f"FLAG light - target at the stop {ha:+.0f} mdeg inside the hold (> 250)")
             fa = float(wa.get("after_fall_lt_mdeg", float("nan")))
             notes.append(f"after the fall {fa:+.0f} mdeg; rms {wa.get('lt_rms_mdeg', float('nan')):.0f}")
     if opt and opt.get("status") not in (None, "done"):
@@ -174,12 +197,15 @@ def main(argv=None):
          f"learning iterations each (set from the plans' 3 on the evening of 14 Oct: three left a 16-shot keeper near "
          f"0.5 V rms; the last allowed iteration now measures at the full count), before scan full circle, solo "
          f"and verify scans half circle.", "",
-         "| # | stem | status | keeper | rms X1 / X2 (V) | light - target top (mdeg) | leg 2 - leg 1 top (mdeg) | card pause (ms) | notes |",
+         "| # | stem | status | keeper | rms X1 / X2 (V) | light - target, hold (edge) before -> after (mdeg) | leg 2 - leg 1 top (mdeg) | card pause (ms) | notes |",
          "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         L.append(f"| {r.get('order', '')} | {r['stem']} | {r.get('status', '')} | {r.get('keeper_iteration', '')} | "
                  f"{r.get('final_rms_V_X1', '')} / {r.get('final_rms_V_X2', '')} | {r.get('light_minus_target_top_mdeg', '')} | "
                  f"{r.get('leg2_minus_leg1_top_mdeg', '')} | {r.get('card_pause_ms', '')} | {r.get('notes', '')} |")
+    L += ["", "The hold number is light - target averaged over the inside of the flat top (0.2 ms clear of both "
+              "ends), the worst of the two transports; the edge number is the verdict's ramp-top extreme over the "
+              "top with its 0.3 ms pad, which the comparison's time-map artefact at the ramp edges dominates.", ""]
     L += ["", "## Needs Maarten", ""] + ([f"- {n}" for n in needs] or ["- nothing flagged"])
     L += ["", "Figure sets: `figures/<stem>/` (eight figures and a README per campaign, tools/campaign_figures.py)."]
     with open(os.path.join(folder, "campaign_report.md"), "w", encoding="utf-8") as fh:
