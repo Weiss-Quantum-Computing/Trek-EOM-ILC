@@ -152,7 +152,7 @@ def fill_row(row, plan, man, log_path, figures_to=None):
         notes.append(f"error: {e['error']}")
     if e.get("minutes") is not None:
         notes.append(f"{e['minutes']:.0f} min")
-    row["notes"] = "; ".join(notes)
+    row["notes"] = " ".join("; ".join(notes).split())      # one line: the limit check's message spans several
     if figures_to and c and e.get("status", "").startswith("done"):
         dst = os.path.join(figures_to, estem)
         if not os.path.exists(os.path.join(dst, "README.md")):
@@ -185,7 +185,7 @@ def main(argv=None):
         row, notes = fill_row(row, plan, man, log_path, figs)
         for n in notes:
             if n.startswith(("FLAG", "STOP")) or "stopped:" in n or n.startswith("error") or n.startswith("optical "):
-                needs.append(f"{row['stem']}: {n}")
+                needs.append(f"{row['stem']}: " + " ".join(n.split()))
     with open(mpath, "w", encoding="utf-8", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
         w.writeheader()
