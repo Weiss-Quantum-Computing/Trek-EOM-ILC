@@ -40,9 +40,19 @@ from eomilc import optical, corrections as corrmod, echo         # noqa: E402
 REANALYSIS = os.path.join(os.path.dirname(ROOT), "scope_data", "polarimetry", "reanalysis")
 HV90 = {"X1": 5128.3, "X2": 5137.4}          # HV volts for 90 deg (the targets' V90)
 CH_COL = {"X1": "#2a78d6", "X2": "#eb6834"}
-PASS_COL = ["#898781", "#2a78d6", "#e34948", "#1baf7a", "#4a3aa7", "#eda100"]
+# before the close purple, then one hue per pass (no gray: the before scan carries the same weight)
+PASS_COL = ["#4a3aa7", "#2a78d6", "#e34948", "#1baf7a", "#eda100", "#e87ba4"]
+# a channel's second series (after the close, the moved target): its own hue, never a dash of the first
+CH_COL2 = {"X1": "#4a3aa7", "X2": "#e34948"}
+LIGHT, MON, TGT = "#2a78d6", "#eb6834", "#0b0b0b"   # light, monitors, target in the optical views
 IT_COL = ["#cfd8e6", "#9ec5f4", "#3987e5", "#1c5cab", "#0d366b"]
 OPT_COL = [["#f5b48a", "#eb6834"], ["#ef9a9a", "#e34948"], ["#e6c35c", "#c99700"], ["#b39ddb", "#4a3aa7"]]
+
+
+def legend_out(ax, **kw):
+    """The legend beside the axes (constrained layout makes room), never on the data."""
+    kw.setdefault("fontsize", 10.5)
+    return ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0.0, **kw)
 
 
 def rp():
@@ -165,27 +175,33 @@ def worst(v, key="top_lt_mdeg"):
 def fig1_targets(c, R, out):
     import matplotlib.pyplot as plt
     tms = c.t * 1e3
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7.2), layout="constrained")
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10.0), layout="constrained")
+    moved = False
     for k in ("X1", "X2"):
         if k not in c.states:
             continue
         axes[0].plot(tms, c.target(k) * c.mon_scale(k) / 1e3, color=CH_COL[k], label=f"{k} base target")
         st = c.states[k]
-        if "corr_total" in st:
-            axes[0].plot(tms, np.asarray(st["target"], float) * c.mon_scale(k) / 1e3, color=CH_COL[k],
-                         ls="--", lw=1.0, label=f"{k} target after the optical corrections")
         axes[1].plot(tms, c.drives(k), color=CH_COL[k], label=f"{k} drive now (iteration {int(st['iteration'])})")
-    axes[0].set_ylabel("target at the EOM (kV)")
+        if "corr_total" in st:
+            d = np.asarray(st["corr_total"], float) * c.mon_scale(k) * 90.0 / HV90[k] * 1e3
+            axes[2].plot(tms, d, color=CH_COL2[k], label=f"{k}: target now minus base, peak {np.max(np.abs(d)):.0f} mdeg")
+            moved = True
+    axes[0].set_ylabel("base target at the EOM (kV)")
     axes[1].set_ylabel("drive (V at the AWG)")
+    axes[2].set_ylabel("added by the optical passes (mdeg)")
+    axes[2].axhline(0, color=R.INK2, lw=0.6)
+    if not moved:
+        axes[2].text(0.5, 0.5, "no optical correction applied", transform=axes[2].transAxes, ha="center", color=R.MUTED)
     for a in axes:
         a.set_xlabel("time in the record (ms)")
-        a.legend(loc="upper right")
+        legend_out(a)
     n = len(c.t)
-    R.note(axes[0], f"{n} points, {n * c.dt * 1e3:.3f} ms record, {c.dt * 1e6:.1f} us grid; "
-                    f"V90 {HV90['X1']:.1f} / {HV90['X2']:.1f} V", loc="upper left")
     R.finish(fig, f"Targets and learned drives, {c.stem}",
-             f"Base target pair of the campaign and, dashed, the target after the optical corrections moved it "
-             f"(HV volts at the EOM, 1000 V per monitor volt). Below: the drive each channel plays now, AWG volts. "
+             f"Top: the base target pair (HV volts at the EOM, 1000 V per monitor volt). Middle: the drive each "
+             f"channel plays now, AWG volts. Bottom: what the optical passes added to each channel's target, "
+             f"in degrees of rotation at the EOM. {n} points, {n * c.dt * 1e3:.3f} ms record on a "
+             f"{c.dt * 1e6:.1f} us grid; V90 {HV90['X1']:.1f} / {HV90['X2']:.1f} V. "
              f"Plan {c.plan.get('name', '')}, run folder {c.run_dir}.", out)
     plt.close(fig)
 
@@ -214,6 +230,7 @@ def fig2_error(c, R, out):
     import matplotlib.pyplot as plt
     tms = c.t * 1e3
     fig, axes = plt.subplots(2, 1, figsize=(12, 7.6), layout="constrained")
+    notes = []
     for row, k in enumerate(("X1", "X2")):
         ax = axes[row]
         if k not in c.states:
@@ -239,13 +256,14 @@ def fig2_error(c, R, out):
         ax.set_ylabel(f"{k}: target - measured (V at the EOM)")
         ax.set_xlabel("time in the record (ms)")
         ax.axhline(0, color=R.INK2, lw=0.6)
-        ax.legend(loc="upper right", fontsize=10.5, ncols=2)
-        R.note(ax, f"{len(c.meas[k])} iterations stored; optical passes took effect at "
-                   + (", ".join(f"i{p:02d}" for p in ps) if ps else "none"), loc="upper left")
+        legend_out(ax)
+        notes.append(f"{k}: {len(c.meas[k])} iterations stored, optical passes took effect at "
+                     + (", ".join(f"i{p:02d}" for p in ps) if ps else "none"))
     R.finish(fig, f"Monitor error through the iterations, {c.stem}",
              "Target minus the measured monitor, HV volts at the EOM, for the first iteration, a middle and the "
-             "last electrical one, and the first and last iteration after each optical pass (measured against "
-             "the moved target). Shot means at the plan's shot count; the early iterations use 16 shots.", out)
+             "last electrical one (blues), and the first and last iteration after each optical pass (warm hues, "
+             "measured against the moved target). Shot means at the plan's shot count; the early iterations use "
+             "16 shots. " + "; ".join(notes) + ".", out)
     plt.close(fig)
 
 
@@ -260,7 +278,7 @@ def fig3_convergence(c, R, out):
         rm = [float(m["rms_err_hv"]) for m in h]
         x = np.arange(len(h))
         ax.semilogy(x, pk, "o-", color=CH_COL[k], label=f"{k} peak error")
-        ax.semilogy(x, rm, "s--", color=CH_COL[k], alpha=0.6, label=f"{k} rms error")
+        ax.semilogy(x, rm, "s-", color=CH_COL2[k], label=f"{k} rms error")
         for j, p in enumerate(c.passes(k), 1):
             if k == "X1":
                 ax.axvline(p - 0.5, color=R.INK2, lw=0.8, ls=":")
@@ -268,7 +286,7 @@ def fig3_convergence(c, R, out):
                             rotation=90, fontsize=10.5, color=R.INK2, va="bottom")
     ax.set_xlabel("iteration")
     ax.set_ylabel("error at the EOM (V)")
-    ax.legend(loc="upper right")
+    legend_out(ax)
     ax.grid(True, which="both")
     R.finish(fig, f"Convergence, {c.stem}",
              "Peak and rms of target minus measured monitor per iteration, HV volts. The iterations after a "
@@ -303,8 +321,9 @@ def fig4_drive_noise(c, R, out):
     the drive's change from the first shot (spectrum), the drive's and the
     monitor's content above the loop band on the ramp top, per iteration."""
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8.4), layout="constrained")
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8.4), layout="constrained")
     stats = {}
+    notes = []
     for col, k in enumerate(("X1", "X2")):
         if k not in c.states:
             continue
@@ -323,7 +342,7 @@ def fig4_drive_noise(c, R, out):
         ax.set_xlabel("frequency (Hz)")
         ax.set_ylabel("drive spectrum (V / sqrt(Hz))")
         ax.set_xlim(50, 0.5 / c.dt)
-        ax.legend(loc="lower left")
+        legend_out(ax)
         # above-band content on the hold: drive and measured monitor per iteration
         ax = axes[1, col]
         top = hold_mask(c)
@@ -349,17 +368,17 @@ def fig4_drive_noise(c, R, out):
             ax.axvline(p - 0.5, color=R.INK2, lw=0.8, ls=":")
         ax.set_xlabel("iteration")
         ax.set_ylabel("rms above the loop band (V at the EOM)")
-        ax.legend(loc="center right")
-        R.note(ax, f"drive now above {f_cut / 1e3:g} kHz on the hold: {u_hp:.1f} mV rms at the AWG "
-                   f"(= {u_hp:.1f} V at the EOM)", loc="upper left")
+        legend_out(ax)
+        notes.append(f"{k} drive now above {f_cut / 1e3:g} kHz on the hold: {u_hp:.1f} mV rms at the AWG, "
+                     f"{u_hp:.1f} V at the EOM")
         stats[k] = dict(f_cut=f_cut, drive_hp_mV=u_hp, mon_hp_V=hp, its=its)
     R.finish(fig, f"What the loop added to the drive, {c.stem}",
              "Top: amplitude spectral density of the drive each channel plays now against the target's own "
              "shape (scaled to the drive's peak), the loop's cut-off dotted. Bottom: rms of the measured "
              "monitor above the cut-off over the ramp top, per iteration (what rides on the hold beyond "
              "what the loop can place; hollow markers are the 16-shot early iterations, whose shot-mean "
-             "noise is twice the 64-shot one), with the same number for the drive now in the note. Dotted "
-             "lines mark the optical passes.", out)
+             "noise is twice the 64-shot one). Dotted lines mark the optical passes. "
+             + "; ".join(notes) + ".", out)
     plt.close(fig)
     return stats
 
@@ -379,16 +398,16 @@ def fig5_scans(c, R, out):
             continue
         tl = z["t_leg1"]
         ms = (tl - tl[0]) * 1e3
-        ax.plot(ms, z["phi_target"], color=R.INK2, lw=0.9, ls=":", label="target")
-        ax.plot(ms, z["leg1_phi_mon"], color="#898781", lw=0.9, label="monitors")
-        ax.plot(ms, z["leg1_phi_light"], color=CH_COL["X1"], lw=0.9, label="light")
+        ax.plot(ms, z["phi_target"], color=TGT, lw=0.9, ls=":", label="target")
+        ax.plot(ms, z["leg1_phi_mon"], color=MON, lw=0.9, label="monitors")
+        ax.plot(ms, z["leg1_phi_light"], color=LIGHT, lw=0.9, label="light")
         ax.set_ylabel("rotation (deg)")
         ax.set_xlabel("time from the leg start (ms)")
         v = worst(s["verdict"])
         ax.set_title(f"{s['label']}: {s['scan']}" + (f"  --  light - target at the ramp top {v['top_lt_mdeg']:+.0f} mdeg, "
                                                        f"after the fall {v['after_fall_lt_mdeg']:+.0f}, rms {v['lt_rms_mdeg']:.0f}"
                                                        if v else ""))
-        ax.legend(loc="upper right")
+        legend_out(ax)
     R.finish(fig, f"Light, monitors and target through the record, per joint scan, {c.stem}",
              "The analyzer scan's light rotation (per-sample harmonic fit over the analyzer angles, in the "
              "target's sense), the monitors' rotation (90 deg x V / V90 per channel, summed) and the base "
@@ -425,9 +444,7 @@ def fig6_passes(c, R, out):
     ax.axhline(0, color=R.INK2, lw=0.6)
     ax.set_ylabel("light - target (mdeg)")
     ax.set_xlabel("time from the leg start (ms)")
-    ax.legend(loc="upper right", fontsize=10.5)
-    R.note(ax, f"low-passed at {band:g} Hz; shaded: ramp top (yellow), first ms after the fall (blue), per transport",
-           loc="upper left")
+    legend_out(ax)
     ax = axes[1]
     total = None
     for key, s in sorted(solo.items()):
@@ -446,13 +463,14 @@ def fig6_passes(c, R, out):
     if z is not None:
         tl = z["t_leg1"]
         ms, dt = (tl - tl[0]) * 1e3, float(np.median(np.diff(tl)))
-        ax.plot(ms, corrmod.lowpass(z["leg1_d_lm"], dt, band) * 1e3, color="#898781", label="both, before")
+        ax.plot(ms, corrmod.lowpass(z["leg1_d_lm"], dt, band) * 1e3, color=PASS_COL[0], label="both, before")
     ax.axhline(0, color=R.INK2, lw=0.6)
     ax.set_ylabel("light - monitors (mdeg)")
     ax.set_xlabel("time from the leg start (ms)")
-    ax.legend(loc="upper right", fontsize=10.5)
+    legend_out(ax)
     R.finish(fig, f"Light against the base target through the optical passes, {c.stem}",
-             "Top: light minus the base target over the record before the close and after each pass. "
+             f"Top: light minus the base target over the record before the close and after each pass, low-passed "
+             f"at {band:g} Hz; shaded per transport: the ramp top (yellow) and the first ms after the fall (blue). "
              "Bottom: light minus monitors with X1 driving alone (X2 parked at idle), with X2 alone, their sum, "
              "and both together before the close; the correction each pass applies is minus this difference, "
              "per crystal.", out)
@@ -486,13 +504,13 @@ def fig7_legs(c, R, out):
             y = c.meas[k][it] * c.mon_scale(k)
             d = y[sl2] - y[sl1]
             p = c.pass_of(k, it)
-            ax.plot(tms, d, color=CH_COL[k], lw=0.9, ls="-" if p else "--",
+            ax.plot(tms, d, color=CH_COL2[k] if p else CH_COL[k], lw=0.9,
                     label=f"{k} i{it:02d}" + (f" after optical pass {p}" if p else " electrical") + f": rms {np.sqrt(np.mean(d ** 2)):.2f} V")
             numbers[f"{k} i{it:02d}"] = float(np.sqrt(np.mean(d ** 2)))
     ax.axhline(0, color=R.INK2, lw=0.6)
     ax.set_ylabel("measured monitor, leg 2 - leg 1 (V at the EOM)")
     ax.set_xlabel("time from the leg's transport start (ms)")
-    ax.legend(loc="upper right", fontsize=10.5)
+    legend_out(ax)
     ax = axes[1]
     band = float(((c.rec or {}).get("settings") or {}).get("band_hz") or 5000.0)
     for j, s in enumerate((joint[:1] + joint[-1:]) if len(joint) > 1 else joint):
@@ -511,21 +529,24 @@ def fig7_legs(c, R, out):
             continue
         s1, s2 = slice(k0, k0 + nn), slice(k0 + kk, k0 + kk + nn)
         tt = ms_all[s1] - la1
-        col = PASS_COL[0] if s["kind"] == "before" else PASS_COL[min(s["pass"], len(PASS_COL) - 1)]
-        for name, x, ls in (("light", z["leg1_phi_light"], "-"), ("monitors", z["leg1_phi_mon"], ":")):
+        before = s["kind"] == "before"
+        # four series, four hues: light before (purple) / after (green), monitors before (pink) / after (orange)
+        hues = {("light", True): PASS_COL[0], ("light", False): "#1baf7a",
+                ("monitors", True): "#e87ba4", ("monitors", False): MON}
+        for name, x in (("light", z["leg1_phi_light"]), ("monitors", z["leg1_phi_mon"])):
             d = corrmod.lowpass(x[s2] - x[s1], dt, band) * 1e3
-            lab = ("before" if s["kind"] == "before" else f"after pass {s['pass']}") + f", {name}: rms {np.sqrt(np.mean(d ** 2)):.0f} mdeg"
-            ax.plot(tt, d, color=col, ls=ls, lw=1.0, label=lab)
+            lab = ("before" if before else f"after pass {s['pass']}") + f", {name}: rms {np.sqrt(np.mean(d ** 2)):.0f} mdeg"
+            ax.plot(tt, d, color=hues[(name, before)], lw=1.0, label=lab)
             numbers[f"{s['scan']} {name}"] = float(np.sqrt(np.mean(d ** 2)))
     ax.axhline(0, color=R.INK2, lw=0.6)
     ax.set_ylabel("leg 2 - leg 1 (mdeg)")
     ax.set_xlabel("time from the leg's transport start (ms)")
-    ax.legend(loc="upper right", fontsize=10.5)
+    legend_out(ax)
     R.finish(fig, f"The spin echo's second leg against its first, {c.stem}",
              f"Legs {shift * c.dt * 1e3:.3f} ms apart. Top: measured monitor on leg 2 minus leg 1 for the last "
-             f"electrical iteration (dashed) and the last iteration after the optical close (solid). Bottom: the "
-             f"light (solid) and the monitors (dotted), leg 2 minus leg 1, before the close and after the last "
-             f"pass, low-passed at {band:g} Hz.", out)
+             f"electrical iteration (X1 blue, X2 orange) and the last iteration after the optical close (X1 purple, "
+             f"X2 red). Bottom: the light and the monitors, leg 2 minus leg 1, before the close (light purple, "
+             f"monitors pink) and after the last pass (light green, monitors orange), low-passed at {band:g} Hz.", out)
     plt.close(fig)
     return numbers
 
@@ -534,8 +555,9 @@ def fig8_quality(c, R, out):
     """PD screen use per analyzer angle in the last scan, per-scan fit numbers,
     the analyzer zero, kept shots and dither from the log."""
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8.4), layout="constrained")
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8.4), layout="constrained")
     q = {}
+    notes = []
     ax = axes[0, 0]
     last = c.scans[-1] if c.scans else None
     if last:
@@ -552,8 +574,8 @@ def fig8_quality(c, R, out):
                 ax.axhline(hi, color=R.INK2, lw=0.8, ls=":")
                 ax.axhline(lo, color=R.INK2, lw=0.8, ls=":")
                 q["pd_screen"] = (lo, hi, float(np.nanmax(I)), float(np.nanmin(I)))
-                R.note(ax, f"screen {lo:+.1f} to {hi:+.1f} V ({vdiv:g} V/div, offset {off:+.2f} V); "
-                           f"PD {np.nanmin(I):+.3f} to {np.nanmax(I):+.3f} V", loc="lower right")
+                notes.append(f"PD screen {lo:+.1f} to {hi:+.1f} V ({vdiv:g} V/div, offset {off:+.2f} V), "
+                             f"PD {np.nanmin(I):+.3f} to {np.nanmax(I):+.3f} V")
             ax.set_title(f"PD per analyzer angle, {last['scan']} ({len(th)} angles)")
         except Exception as e:
             ax.text(0.5, 0.5, f"{type(e).__name__}: {e}", transform=ax.transAxes, ha="center", fontsize=10)
@@ -575,9 +597,8 @@ def fig8_quality(c, R, out):
         ax.plot(x, [r[2] for r in rows], "s-", color=CH_COL["X2"], label="angle noise per sample, median (mdeg)")
         ax.set_xticks(x)
         ax.set_xticklabels([r[0].replace(c.stem + "_", "") for r in rows], rotation=30, ha="right", fontsize=10.5)
-        ax.legend(loc="upper right")
-        R.note(ax, "analyzer zero off by " + ", ".join(f"{r[4]:+.2f}" for r in rows) + " deg (crossed + 90)",
-               loc="lower left")
+        legend_out(ax)
+        notes.append("analyzer zero off by " + ", ".join(f"{r[4]:+.2f}" for r in rows) + " deg from crossed + 90")
     ax.set_title("Per scan: fit residual and angle noise")
     ax.set_xlabel("scan")
     ax.set_ylabel("mV rms / mdeg")
@@ -588,8 +609,7 @@ def fig8_quality(c, R, out):
     if kept2:
         ax.plot(range(len(kept2)), [a / b for a, b in kept2], "o-", color=CH_COL["X1"])
         ax.set_ylim(0, 1.05)
-        R.note(ax, f"{len(kept2)} measurements with dropped shots; lowest {min(a / b for a, b in kept2):.2f} kept",
-               loc="lower left")
+        notes.append(f"{len(kept2)} measurements with dropped shots, lowest {min(a / b for a, b in kept2):.2f} kept")
     else:
         ax.text(0.5, 0.5, "no dropped shots in the log" if c.log is not None else "no log given",
                 transform=ax.transAxes, ha="center", color=R.MUTED)
@@ -604,13 +624,13 @@ def fig8_quality(c, R, out):
         ax.plot(its, np.asarray(flo) * 1e3, "o-", color=CH_COL["X1"], label="PD shot-mean noise floor (mV rms)")
         pk = [float(np.max(c.pd[i][0])) for i in its]
         ax2 = ax.twinx()
-        ax2.plot(its, pk, "s--", color=CH_COL["X2"], label="PD peak (V)")
+        ax2.plot(its, pk, "s-", color=CH_COL["X2"], label="PD peak (V)")
         ax2.set_ylabel("PD peak (V)")
         h1, l1 = ax.get_legend_handles_labels()
         h2, l2 = ax2.get_legend_handles_labels()
-        ax.legend(h1 + h2, l1 + l2, loc="upper right")
+        ax.legend(h1 + h2, l1 + l2, loc="upper left", bbox_to_anchor=(1.12, 1.0), borderaxespad=0.0, fontsize=10.5)
         deg = [float(c.pd[i][1].get("analyzer_deg", np.nan)) for i in its]
-        R.note(ax, f"analyzer during training at {np.nanmedian(deg):+.1f} deg (polarimeter frame)", loc="lower left")
+        notes.append(f"analyzer during training at {np.nanmedian(deg):+.1f} deg (polarimeter frame)")
     ax.set_title("PD during the electrical iterations")
     ax.set_xlabel("iteration")
     ax.set_ylabel("mV rms")
@@ -619,7 +639,7 @@ def fig8_quality(c, R, out):
              "(dotted). Top right: each comparison's harmonic-fit residual and per-sample angle noise, the "
              "analyzer zero's offset from crossed + 90 in the note. Bottom left: measurements the batch "
              "dropped shots from (scope reads that failed), fraction kept. Bottom right: the analyzer "
-             "photodiode's noise floor and peak through the electrical iterations.", out)
+             "photodiode's noise floor and peak through the electrical iterations. " + "; ".join(notes) + ".", out)
     plt.close(fig)
     return q
 
