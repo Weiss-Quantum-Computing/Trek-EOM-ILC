@@ -224,6 +224,23 @@ def main():
         rep_d = loop7f.check(rip)
         check(bool(rep_t) and not rep_d and "the drive, predicted" in str(rep_d),
               "40 kHz ripple: passes against the target alone, FAILs on the drive's predicted slew/current")
+
+        print("[8] scope.resample: no half-sample shift at an even decimation (G1-7)")
+        from eomilc import scope as scopeio, corrections as corrmod
+        t_dst = np.arange(5501) * 2e-6
+        for ratio in (2.2, 4.0, 3.0):
+            dts = 2e-6 / ratio
+            t_src = np.arange(-1e-3, 12e-3, dts)
+            y = np.sin(2 * np.pi * 1e3 * t_src)
+            r = scopeio.resample(t_src, y, t_dst)
+            M = np.column_stack([np.sin(2 * np.pi * 1e3 * t_dst), np.cos(2 * np.pi * 1e3 * t_dst)])
+            a, b = np.linalg.lstsq(M, r, rcond=None)[0]
+            delay_us = -np.arctan2(b, a) / (2 * np.pi * 1e3) * 1e6
+            n = int(round(2e-6 / dts))
+            check(abs(delay_us) < 0.02, f"ratio {ratio:g} (box of {n}): 1 kHz sine delayed {delay_us:+.3f} us")
+        d = corrmod._onto(t_dst, t_src, np.sin(2 * np.pi * 1e3 * t_src), dts, 2e-6)
+        a, b = np.linalg.lstsq(M, d, rcond=None)[0]
+        check(abs(np.arctan2(b, a) / (2 * np.pi * 1e3) * 1e6) < 0.02, "corrections._onto: centred too")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

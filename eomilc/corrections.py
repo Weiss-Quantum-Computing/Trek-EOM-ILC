@@ -263,10 +263,11 @@ def _onto(t_dst, t_src, y, dt_src, dt_dst):
     """y onto t_dst: box-averaged first when the source is finer (so its
     noise really is averaged, as the sigma scaling assumes -- plain
     interpolation would only pick samples), zero outside the source span."""
+    from .scope import box_average        # centred for even n too (review G1-7)
     y = np.asarray(y, float)
     n = int(round(dt_dst / dt_src)) if dt_src < dt_dst else 1
     if n > 1:
-        y = np.convolve(y, np.ones(n) / n, mode="same")
+        y = box_average(y, n)
     return np.interp(t_dst, t_src, y, left=0.0, right=0.0)
 
 

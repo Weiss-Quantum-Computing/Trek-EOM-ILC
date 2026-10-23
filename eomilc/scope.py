@@ -128,6 +128,29 @@ def load(csv_path: str) -> Trace:
     return Trace(t=t, data=data, header=_read_header(stem + ".txt"))
 
 
+def box_average(y, n):
+    """A running mean of `n` samples CENTRED on each sample.
+
+    np.convolve(y, ones(n)/n, mode="same") is centred only for odd n: for
+    even n output i averages samples i - n/2 .. i + n/2 - 1, centred half a
+    sample before i, so the trace comes out half a source sample LATE --
+    0.45 us at the 2.2x decimation the ILC reads at, which the loop then
+    learns as a drive that much early and the alignment check cannot see
+    (review G1-7, 15 Oct 2026). An even n here averages n + 1 samples with
+    the two end ones at half weight: the same width, centred."""
+    y = np.asarray(y, float)
+    n = int(n)
+    if n <= 1:
+        return y
+    if n % 2:
+        k = np.ones(n) / n
+    else:
+        k = np.ones(n + 1)
+        k[0] = k[-1] = 0.5
+        k /= n
+    return np.convolve(y, k, mode="same")
+
+
 def resample(t_src: np.ndarray, y: np.ndarray, t_dst: np.ndarray,
              t_offset: float = 0.0, antialias: bool = True) -> np.ndarray:
     """Put a scope trace onto the waveform grid.
@@ -141,8 +164,7 @@ def resample(t_src: np.ndarray, y: np.ndarray, t_dst: np.ndarray,
     if antialias and dt_dst > 2 * dt_src:
         n = int(round(dt_dst / dt_src))
         if n > 1:                                  # boxcar to the target rate
-            k = np.ones(n) / n
-            y = np.convolve(y, k, mode="same")
+            y = box_average(y, n)
     return np.interp(t_dst, t_src - t_offset, y)
 
 
