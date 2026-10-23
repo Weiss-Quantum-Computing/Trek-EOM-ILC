@@ -241,6 +241,19 @@ def main():
         d = corrmod._onto(t_dst, t_src, np.sin(2 * np.pi * 1e3 * t_src), dts, 2e-6)
         a, b = np.linalg.lstsq(M, d, rcond=None)[0]
         check(abs(np.arctan2(b, a) / (2 * np.pi * 1e3) * 1e6) < 0.02, "corrections._onto: centred too")
+
+        print("[9] FRF mode smooths the drive far above f_max (G1-11)")
+        loop9 = run_ilc.build_loop({k: z[k] for k in z.files})
+        loop9.frf = ilc.FRF(FRFS[1], f_use=15e3, f_max=22e3)
+        tt = np.asarray(z["t"], float)
+        hf = 0.05 * np.sin(2 * np.pi * 150e3 * tt)
+        u9 = u7 + hf
+        u9n = loop9.update(u9, loop9.target)        # no error: only the smoothing acts
+        f9 = np.fft.rfftfreq(len(tt), loop9.dt)
+        spec = lambda x: np.abs(np.fft.rfft(x - np.mean(x)))
+        at = lambda x, f0: float(spec(x)[np.argmin(abs(f9 - f0))])
+        check(at(u9n, 150e3) < 0.05 * at(u9, 150e3), f"150 kHz seed content cut {at(u9, 150e3)/max(at(u9n, 150e3), 1e-12):.0f}x")
+        check(abs(at(u9n, 5e3) - at(u9, 5e3)) <= 0.01 * at(u9, 5e3) + 1e-9, "content at 5 kHz untouched")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

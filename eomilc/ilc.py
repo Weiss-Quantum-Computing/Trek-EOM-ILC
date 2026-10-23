@@ -20,6 +20,11 @@ from .plant import Plant, smooth
 from .config import Channel, Limits, LIMITS, HV_PER_MON
 
 
+# FRF mode: the drive is low-passed at this multiple of the FRF's f_max
+# every update (Loop.update); 0 / None turns it off
+FRF_DRIVE_CUT = 2.0
+
+
 @dataclass
 class GuardReport:
     ok: bool
@@ -218,6 +223,14 @@ class Loop:
             e = smooth(self.target - y_k, self.dt, self.frf.f_max)
             e = notch_filter(e, self.dt, self.notches)
             u_next = u_k + self.frf.lead(e, self.dt, self.gamma)
+            # f_cut is inert here by design, so without this a seed drive's
+            # (or an earlier parametric step's) content far above the
+            # measured band stayed in the drive for good: the chain does not
+            # answer it, the loop cannot see it, and it costs Trek slew and
+            # current. Smoothed well above f_max -- the band the inverse
+            # acts in is untouched (review G1-11, 15 Oct 2026).
+            if FRF_DRIVE_CUT and FRF_DRIVE_CUT * self.frf.f_max < 0.5 / self.dt:
+                u_next = smooth(u_next, self.dt, FRF_DRIVE_CUT * self.frf.f_max)
         else:
             e = smooth(self.target - y_k, self.dt, self.f_cut)
             e = notch_filter(e, self.dt, self.notches)
