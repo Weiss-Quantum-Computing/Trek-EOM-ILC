@@ -194,6 +194,36 @@ def main():
         with np.load(st6, allow_pickle=True) as zz:
             it6 = int(zz["iteration"])
         check(code is None and it6 == 0, "--overwrite-state replaces it deliberately")
+
+        print("[7] check_limits: a NaN drive FAILs first; slew/current also from the drive (G1-10)")
+        from eomilc import ilc
+        from eomilc.config import CHANNELS
+        loop7 = run_ilc.build_loop({k: z[k] for k in z.files})
+        u7 = np.asarray(z["u"], float)
+        rep = loop7.check(u7)
+        check(bool(rep), f"the fixture's own drive passes ({str(rep).splitlines()[-1].strip()[:90]})")
+        bad = u7.copy()
+        bad[len(bad) // 2] = np.nan
+        rep = ilc.check_limits(bad, loop7.target, loop7.dt, CHANNELS["EO1"])
+        check(not rep and "non-finite" in str(rep), "one NaN sample: FAIL, named")
+        check(not loop7.check(bad), "Loop.check: FAIL too")
+        try:
+            ilc_bench.upload_drive(awg, 1, "NANTEST", bad, 10.0)
+            check(False, "upload_drive refuses a NaN drive")
+        except ValueError:
+            check(True, "upload_drive refuses a NaN drive")
+        # learned HF ripple the target does not have: 40 kHz at 0.15 V on the
+        # drive, through a flat-gain model (the fixture's 2.3 kHz resonance
+        # would hide it -- the prediction is only as good as the loop's model)
+        z7 = {k: z[k] for k in z.files}
+        z7.update(fn=0.0, zeta=0.0, tau=0.0, tau2=0.0)
+        loop7f = run_ilc.build_loop(z7)
+        rip = u7 + 0.15 * np.sin(2 * np.pi * 40e3 * np.asarray(z["t"], float))
+        rip[0] = u7[0]
+        rep_t = ilc.check_limits(rip, loop7f.target, loop7f.dt, CHANNELS["EO1"])
+        rep_d = loop7f.check(rip)
+        check(bool(rep_t) and not rep_d and "the drive, predicted" in str(rep_d),
+              "40 kHz ripple: passes against the target alone, FAILs on the drive's predicted slew/current")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

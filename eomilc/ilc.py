@@ -34,9 +34,31 @@ class GuardReport:
 
 
 def check_limits(u_awg: np.ndarray, v_mon: np.ndarray, dt: float,
-                 ch: Channel, lim: Limits = LIMITS) -> GuardReport:
-    """Verify a candidate drive against every hard limit before you play it."""
+                 ch: Channel, lim: Limits = LIMITS,
+                 v_pred: np.ndarray | None = None) -> GuardReport:
+    """Verify a candidate drive against every hard limit before you play it.
+
+    `v_mon` is the monitor waveform the drive is meant to produce (the
+    target); `v_pred`, when given, is what the drive itself is predicted to
+    produce (Loop.predict: the loop's own forward model). Output peak, slew
+    and current are then judged on the LARGER of the two, so drive content
+    the target does not have -- learned HF ripple, a seed's noise -- is
+    guarded by more than the AWG rail (review G1-10, 15 Oct 2026).
+
+    A drive with a non-finite sample is the first FAIL: every comparison
+    with NaN is False, so it used to PASS with 'AWG peak nan V', and the
+    generator plays NaN as code 0 -- 0 V samples inside the record."""
     msgs, ok = [], True
+    u_awg = np.asarray(u_awg, float)
+    if u_awg.size == 0 or not np.all(np.isfinite(u_awg)):
+        bad = int(u_awg.size - np.isfinite(u_awg).sum())
+        return GuardReport(False, [f"drive has {bad} non-finite sample(s) (NaN/inf) of "
+                                   f"{u_awg.size}: refused -- the generator would play them "
+                                   f"as code 0 (0 V) inside the record"])
+    v_mon = np.asarray(v_mon, float)
+    if v_mon.size == 0 or not np.all(np.isfinite(v_mon)):
+        return GuardReport(False, ["the monitor waveform the drive is judged against has "
+                                   "non-finite samples (NaN/inf): nothing can be checked"])
 
     peak = float(np.abs(u_awg).max())
     if peak > lim.awg_rail:
@@ -53,23 +75,41 @@ def check_limits(u_awg: np.ndarray, v_mon: np.ndarray, dt: float,
 
     hv = v_mon * ch.mon_scale
     hv_pk = float(np.abs(hv).max())
+    slew = float(np.abs(np.gradient(hv, dt)).max())
+    pk_src = sl_src = ""
+    pred_txt = ""
+    if v_pred is not None:
+        vp = np.asarray(v_pred, float).ravel()
+        if vp.shape == hv.shape and np.all(np.isfinite(vp)):
+            hvp = vp * ch.mon_scale
+            hvp_pk = float(np.abs(hvp).max())
+            slew_p = float(np.abs(np.gradient(hvp, dt)).max())
+            pred_txt = (f" (target {hv_pk:.0f} V / {slew/1e6:.2f} V/us, the drive predicted "
+                        f"{hvp_pk:.0f} V / {slew_p/1e6:.2f} V/us)")
+            if hvp_pk > hv_pk:
+                hv_pk, pk_src = hvp_pk, " (the drive, predicted)"
+            if slew_p > slew:
+                slew, sl_src = slew_p, " (the drive, predicted)"
+        else:
+            ok = False
+            msgs.append("the drive's predicted output has non-finite samples (NaN/inf) "
+                        "or the wrong length: its slew cannot be checked")
     if hv_pk > lim.hv_max:
         ok = False
-        msgs.append(f"peak output {hv_pk:.0f} V exceeds the {lim.hv_max:.0f} V "
+        msgs.append(f"peak output {hv_pk:.0f} V{pk_src} exceeds the {lim.hv_max:.0f} V "
                     f"{ch.out_name} limit")
 
-    slew = float(np.abs(np.gradient(hv, dt)).max())
     if slew > lim.slew_hv:
         ok = False
-        msgs.append(f"peak slew {slew/1e6:.2f} V/us exceeds {lim.slew_hv/1e6:.0f} V/us")
+        msgs.append(f"peak slew {slew/1e6:.2f} V/us{sl_src} exceeds {lim.slew_hv/1e6:.0f} V/us")
     elif slew > 0.5 * lim.slew_hv:
-        msgs.append(f"peak slew {slew/1e6:.2f} V/us is over half the limit")
+        msgs.append(f"peak slew {slew/1e6:.2f} V/us{sl_src} is over half the limit")
 
     i_pk = lim.load_capacitance * slew
     if lim.load_capacitance > 0 and np.isfinite(lim.current):
         if i_pk > lim.current:
             ok = False
-            msgs.append(f"peak current {i_pk*1e3:.2f} mA into {lim.load_capacitance*1e12:.0f} pF "
+            msgs.append(f"peak current {i_pk*1e3:.2f} mA{sl_src} into {lim.load_capacitance*1e12:.0f} pF "
                         f"exceeds {lim.current*1e3:.1f} mA "
                         f"(max load here is {lim.current/slew*1e12:.0f} pF)")
         else:
@@ -84,7 +124,7 @@ def check_limits(u_awg: np.ndarray, v_mon: np.ndarray, dt: float,
                     f"between bursts")
     msgs.append(f"AWG peak {peak:.3f} V, idle (first sample) {idle*1e3:+.1f} mV "
                 f"of the {lim.idle_awg*1e3:.0f} mV cap, Trek input {trek_in:.3f} V, "
-                f"output {hv_pk:.0f} V, slew {slew/1e6:.2f} V/us")
+                f"output {hv_pk:.0f} V, slew {slew/1e6:.2f} V/us" + pred_txt)
     return GuardReport(ok, msgs)
 
 
@@ -198,9 +238,29 @@ class Loop:
                     peak_pct=100 * float(np.abs(e).max()) / span,
                     rms_pct=100 * float(e.std()) / span)
 
+    def predict(self, u_awg: np.ndarray) -> np.ndarray:
+        """The monitor this drive is predicted to produce, by the loop's own
+        forward model: the measured FRF when the loop learns with one, else
+        the plant. Taken about the drive's idle (its first sample), so the
+        step from zero into the record's idle is not read as a slew."""
+        u = np.asarray(u_awg, float)
+        u0 = float(u[0])
+        if self.frf is not None:
+            return self.frf.forward(u - u0, self.dt) + self.plant.gain * u0
+        return self.plant.forward(u - u0) + self.plant.gain * u0
+
     def check(self, u_awg: np.ndarray, y: np.ndarray | None = None) -> GuardReport:
+        """check_limits against the target (or `y`), with output peak, slew
+        and current also taken from the drive's predicted output (predict)."""
         v = self.target if y is None else y
-        return check_limits(u_awg, v, self.dt, self.channel, self.limits)
+        u = np.asarray(u_awg, float)
+        pred = None
+        if u.size and np.all(np.isfinite(u)) and len(u) == len(np.asarray(v)):
+            try:
+                pred = self.predict(u)
+            except Exception:       # a model that cannot run is reported by check_limits
+                pred = np.full(len(u), np.nan)
+        return check_limits(u, v, self.dt, self.channel, self.limits, v_pred=pred)
 
     def report(self) -> str:
         if not self.history:

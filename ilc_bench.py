@@ -344,6 +344,11 @@ def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
     one millivolt between iterations is a change of one millivolt at the output
     -- not a change that gets normalised away.
     """
+    u_awg = np.asarray(u_awg, float)
+    if u_awg.size == 0 or not np.all(np.isfinite(u_awg)):
+        # `peak > full_scale` is False for NaN, and the generator plays a NaN
+        # sample as code 0 -- 0 V inside the record (review G1-10)
+        raise ValueError(f"{name}: the drive has non-finite samples (NaN/inf); not uploaded")
     peak = float(np.abs(u_awg).max())
     if peak > full_scale:
         raise ValueError(f"drive peaks at {peak:.3f} V, past the {full_scale:g} V "
