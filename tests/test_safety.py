@@ -168,6 +168,32 @@ def main():
         code, out = run_main(run_ilc.main, ["run_ilc.py", "step", "--state", st5, "--measured", meas,
                                             "--mon-col", "CH3", "--awg-dir", os.path.join(tmp, "Waveforms")])
         check(code is not None and "--frf" in str(code), "an FRF state whose file is gone is refused, naming --frf")
+
+        print("[6] run_ilc init refuses to replace an existing state (G1-20)")
+        tgt6 = os.path.join(tmp, "target_K6.csv")
+        with open(tgt6, "w") as f:
+            f.write("time_us,voltage_V\n")
+            for a, b in zip(np.asarray(z["t"]) * 1e6, np.asarray(z["target"]) * 1000.0):
+                f.write(f"{a:.4f},{b:.4f}\n")
+        out6 = os.path.join(tmp, "drive_K6_iter0.csv")
+        argv6 = ["run_ilc.py", "init", "--target", tgt6, "--channel", "EO1", "--out", out6,
+                 "--name", "K6", "--awg-dir", os.path.join(tmp, "Waveforms")]
+        code, _o = run_main(run_ilc.main, argv6)
+        st6 = os.path.join(tmp, "drive_K6.state.npz")
+        check(code is None and os.path.exists(st6), "the first init writes the state")
+        with np.load(st6, allow_pickle=True) as zz:
+            zz6 = {k: zz[k] for k in zz.files}
+        zz6["iteration"] = 4                        # a campaign under way
+        np.savez(st6, **zz6)
+        code, _o = run_main(run_ilc.main, argv6)
+        with np.load(st6, allow_pickle=True) as zz:
+            it6 = int(zz["iteration"])
+        check(code is not None and "--overwrite-state" in str(code) and it6 == 4,
+              "a second init is refused, naming --overwrite-state; the state is untouched")
+        code, _o = run_main(run_ilc.main, argv6 + ["--overwrite-state"])
+        with np.load(st6, allow_pickle=True) as zz:
+            it6 = int(zz["iteration"])
+        check(code is None and it6 == 0, "--overwrite-state replaces it deliberately")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

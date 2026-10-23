@@ -226,12 +226,18 @@ def cmd_init(a):
     print("\nlimit check :", loop.check(u))
 
     out = a.out or f"drive_{ch.name}_iter0.csv"
-    outputs.write_awg_csv(out, t, u, comment=f"{ch.name} ILC iteration 0 ({kind})\n{p}")
     wname = f"{a.name or ch.name}_i00"
     gui = os.path.join(a.awg_dir, wname + ".csv")
+    st = os.path.splitext(out)[0].rsplit("_iter", 1)[0] + ".state.npz"
+    if os.path.exists(st) and not a.overwrite_state:
+        # ilc_bench's rule: a second init would replace a running campaign's
+        # state (and its _i00 drive files) without a word
+        sys.exit(f"{st} already exists. A fresh init would destroy it and its "
+                 f"{os.path.basename(out)} / {wname}.csv. Use 'step --state {st}' "
+                 f"to continue it, or --overwrite-state to discard it deliberately.")
+    outputs.write_awg_csv(out, t, u, comment=f"{ch.name} ILC iteration 0 ({kind})\n{p}")
     os.makedirs(a.awg_dir, exist_ok=True)
     outputs.write_bk_waveform(gui, u, wname, a.full_scale)
-    st = os.path.splitext(out)[0].rsplit("_iter", 1)[0] + ".state.npz"
     save_state(st, t=t, target=v, u=u, dt=dt, channel=ch.name, gain=gain, tau=tau,
                offset=0.0, tau2=0.0, fn=p.fn, zeta=p.zeta,
                full_scale=a.full_scale, name=(a.name or ch.name),
@@ -414,6 +420,8 @@ def main():
                         "converged drive against its edited target, for "
                         "instance. Must share the target's point count and "
                         "grid. Recorded in the state as seed_path.")
+    i.add_argument("--overwrite-state", action="store_true",
+                   help="allow init to replace an existing state file (and its _i00 drives)")
     i.set_defaults(func=cmd_init)
 
     s = sub.add_parser("step", help="one ILC iteration from measured traces")
