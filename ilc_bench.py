@@ -18,8 +18,9 @@ Set the scope to HRES and let --repeats (default 64) average the single shots
 in software.  Do NOT use the scope's AVER mode here: :SINGle takes exactly one
 acquisition, so an AVER capture through this script carries one hit while
 claiming the full depth.  Averaged HRES singles also dither the instrument's
-2.5 mV word lattice away (per-shot noise 3.5 mV rms), putting the measurement
-floor near 0.5-1 V at the EOM -- below what hardware averaging can deliver.
+readout lattice away (2.5 mV at the 24 Aug V/div -- it scales with V/div;
+per-shot noise 3.5 mV rms), putting the measurement floor near 0.5-1 V at
+the EOM -- below what hardware averaging can deliver.
 
 Both GUIs hold their own VISA sessions; close or disconnect them first.
 
@@ -943,8 +944,9 @@ def main():
     ap.add_argument("--iterations", type=int, default=4)
     ap.add_argument("--repeats", type=int, default=64,
                     help="HRES single shots averaged in software per iteration. "
-                         "64 dithers the scope's 2.5 mV word lattice to the 0.16 mV "
-                         "floor and takes ~25 s at the 20 Hz trigger. Do NOT drop "
+                         "64 dithers the scope's readout lattice (2.5 mV at the 24 Aug "
+                         "V/div) to the 0.16 mV floor and takes ~17 s at the 3.7 Hz "
+                         "trigger, ~65 s at 1.0104 Hz. Do NOT drop "
                          "this and lean on scope-side AVER instead -- :SINGle takes "
                          "one hit of an average, measured.")
     ap.add_argument("--t-offset", type=float, default=None,
