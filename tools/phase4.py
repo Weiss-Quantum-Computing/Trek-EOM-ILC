@@ -28,6 +28,14 @@ where the ramp is flat, 3-6 mV wherever it moves.  The ramp carries content well
 above 83 kHz, which is where the monitor-to-crystal correction stops being
 measured because the anti-alias filter kills optical SNR there.  Read the
 numbers out of this tool with that ceiling in mind.
+
+SAFETY (review G1-33, 15 Oct 2026). Every drive passes the channel check
+(ilc_bench.check_awg_channel: FRQ = 1/(N dt), AMP 20 Vpp, OFST ~0, DDS) and
+the limit check (eomilc.ilc.check_limits against the target) and is uploaded
+through ilc_bench.upload_drive (refuses a peak past full scale instead of
+clipping it). The tool never switches an output: CH1 must already be ON
+(after the dry run into the scope), the upload is live, as the ILC's are,
+and CH1 is left ON (never-float).
 """
 import argparse, json, os, sys, time
 import numpy as np
@@ -37,6 +45,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 import ilc_bench as ib
+from eomilc import ilc
 from eomilc import polarimetry as pol
 from eomilc import monitor as mon_corr
 from eomilc.config import CHANNELS, HV_PER_MON
@@ -115,15 +124,30 @@ def main():
             raise SystemExit(f"{name} is {len(u)} points, expected {N}")
         print(f"\n=== {name}: {u.min():+.4f} .. {u.max():+.4f} V AWG")
 
-        awg = ib.make_awg(ib.load_module(
-            os.path.join(sib, "BK4063B-AWG-GUI", "bk4063b.py"), "bk4063b"))
+        ch = CHANNELS["EO1"]
+        rep = ilc.check_limits(u, tgt / ch.mon_scale, DT, ch, ch.limits)
+        print(f"  limit check: {rep}")
+        if not rep:
+            raise SystemExit(f"{name} fails the limit check -- not played")
+        ib._AWGMOD = ib.load_module(
+            os.environ.get("AWG_GUI", os.path.join(sib, "BK4063B-AWG-GUI", "bk4063b.py")), "bk4063b")
+        awg = ib.make_awg(ib._AWGMOD)
         awg.connect()
         try:
-            awg.set_output(1, False)
-            time.sleep(0.3)
-            awg.upload_arb(1, name.replace("_", "")[:11], u / FULL_SCALE,
-                           normalize=False, freq=1.0 / (N * DT))
-            awg.set_output(1, True)
+            problems, notes = ib.check_awg_channel(awg, 1, full_scale=FULL_SCALE,
+                                                   expect_period=N * DT)
+            for n_ in notes:
+                print("  ", n_)
+            if problems:
+                raise SystemExit("CH1 setup: " + "; ".join(problems)
+                                 + " -- fix it first (the ILC panel's Auto-set)")
+            if not awg.is_on(1):
+                raise SystemExit("CH1 output is OFF. This tool never switches an output: "
+                                 "dry-run the drive into the scope, switch CH1 ON yourself, "
+                                 "and run again.")
+            n_up, frac = ib.upload_drive(awg, 1, name.replace("_", "")[:11], u, FULL_SCALE)
+            print(f"  uploaded {n_up} pts live on CH1 ({100*frac:.1f}% of DAC range); "
+                  f"CH1 stays ON")
             time.sleep(0.5)
         finally:
             awg.close()
