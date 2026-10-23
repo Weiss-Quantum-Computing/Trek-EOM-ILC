@@ -126,6 +126,7 @@ def check_awg(awgmod):
         return _failed(exc)
     try:
         parts, det = [], [str(idn)]
+        states = 0                  # channels whose output state was read
         for ch in (1, 2):
             on = None
             try:
@@ -157,6 +158,7 @@ def check_awg(awgmod):
                         name = name.split("NAME,")[-1].split(",")[0]
                 except Exception:
                     pass
+            states += on is not None
             txt = f"CH{ch} {'ON' if on else 'OFF' if on is not None else '?'}"
             if frq is not None:
                 try:
@@ -168,6 +170,9 @@ def check_awg(awgmod):
             parts.append(txt)
             det.append(f"  {txt}")
         text = (str(idn).split(",")[1].strip() if "," in str(idn) else str(idn)[:20]) + ": " + " | ".join(parts)
+        if not states:
+            # it answered *IDN? and nothing else: not a green row (review G1-2)
+            return dict(ok=False, text=text + " (no channel answered)", detail="\n".join(det))
         return dict(ok=True, text=text, detail="\n".join(det))
     except Exception as exc:
         return dict(ok=False, text=f"answered but a readback failed: {exc}", detail=str(idn))

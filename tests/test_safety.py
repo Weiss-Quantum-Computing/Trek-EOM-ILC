@@ -387,6 +387,32 @@ def main():
             ilc_bench.make_scope = saved_ms
         check(r17["ok"] and "HRES" in r17["text"] and "CH3 ?" in r17["detail"]
               and "CH4 1 V/div" in r17["detail"], f"row {r17['text']!r}, detail marks CH3 only")
+
+        print("[18] Hardware tab: a generator that answers only *IDN? is not green (G1-2)")
+
+        class MuteAwg:
+            def connect(self):
+                return "B&K,4063B,SN,1.0"
+            def __getattr__(self, name):
+                def fail(*a, **k):
+                    raise IOError("timeout")
+                return fail
+            def close(self):
+                pass
+        saved_ma = ilc_bench.make_awg
+        ilc_bench.make_awg = lambda m: MuteAwg()
+        try:
+            r18 = ihw.check_awg(None)
+        finally:
+            ilc_bench.make_awg = saved_ma
+        check(not r18["ok"] and "CH1 ?" in r18["text"], f"row {r18['text']!r} is red")
+        awg18, _s, mod18 = sim_bench()
+        ilc_bench.make_awg = lambda m: awg18
+        try:
+            r18b = ihw.check_awg(mod18)
+        finally:
+            ilc_bench.make_awg = saved_ma
+        check(r18b["ok"], "the simulated generator's row stays green")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
