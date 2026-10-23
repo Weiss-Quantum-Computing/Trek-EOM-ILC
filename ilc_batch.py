@@ -2212,7 +2212,10 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
     mpath = manifest_path(plan, opts.simulate)
     plan["_run_dir"] = os.path.dirname(mpath)
     os.makedirs(plan["_run_dir"], exist_ok=True)
-    manifest = json.load(open(mpath)) if os.path.exists(mpath) else {"campaigns": {}}
+    manifest = {"campaigns": {}}
+    if os.path.exists(mpath):
+        with open(mpath) as f:
+            manifest = json.load(f)
     manifest.update(plan=plan["_path"], simulated=bool(opts.simulate))
     logf = open(os.path.join(plan["_run_dir"], f"batch_{plan.get('name') or 'plan'}.log"), "a")
 
