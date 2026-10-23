@@ -478,6 +478,17 @@ def main():
             check(False, "a 10.5 V drive refused")
         except ValueError:
             check(True, "a 10.5 V drive refused")
+
+        print("[22] the alignment cross-correlation by FFT gives np.correlate's answer (G1-44)")
+        rng22 = np.random.default_rng(3)
+        a22, v22 = rng22.normal(size=30000), rng22.normal(size=12000)
+        c_d, c_f = np.correlate(a22, v22, mode="valid"), scopeio._correlate_valid(a22, v22)
+        check(c_d.shape == c_f.shape and float(np.max(abs(c_d - c_f))) < 1e-9 * float(np.max(abs(c_d)))
+              and int(np.argmax(c_d)) == int(np.argmax(c_f)), "same lags, same values, same peak")
+        tt22 = np.arange(40000) * 0.5e-6 - 2e-3
+        y22 = np.interp(tt22 - 1.234e-3, np.arange(len(u7)) * 2e-6, u7, left=u7[0], right=u7[-1])
+        got22 = scopeio.measure_t_offset(tt22, y22, u7, 2e-6)
+        check(abs(got22 - 1.234e-3) < 10e-6, f"a drive placed at 1234 us is found at {got22*1e6:.1f} us (the check allows 10 us)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

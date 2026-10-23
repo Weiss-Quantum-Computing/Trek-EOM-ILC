@@ -11,14 +11,18 @@ suite shared the machine with it. The targets folder (the 28 Sep ramp
 suite's) is needed by the two batch suites, optical and tools; without it
 they are skipped and say so. Exit code 1 when anything failed.
 
-Lanes (12 Oct 2026, this PC, Anaconda python):
-  smoke      ~60-80 s with lazy canvas drawing (was ~300 s)
-  gui-batch  ~150 s, after test_batch (~60 s)
+Lanes (23 Oct 2026, this PC, Anaconda python, all lanes at once: ~6.5 min
+wall; it was ~21 min until the alignment cross-correlation went to FFT --
+np.correlate's direct sum took ~10 s a call, 415 s of test_batch alone):
+  smoke      ~250 s
+  batch      ~280 s, then gui-batch ~120 s
   library    corrections, diagnostics, monitor, polarimetry, rin, scope files,
-             protocol -- a few seconds each; optical (~10 s, the simulated
-             polarimeter: needs the ramp-polarimeter checkout and the targets)
-             tools (~12 s alone, the spin-echo target builder and card split:
-             needs the targets)
+             protocol -- seconds to a minute each; optical (~100 s, the
+             simulated polarimeter: needs the ramp-polarimeter checkout and the
+             targets), tools (~30 s, the spin-echo target builder and card
+             split: needs the targets), safety (~40 s, the never-float and
+             guard checks of the 15 Oct review)
+  finetune   ~70 s, eomilc_polarization_finetune's own unittest suite
 """
 import os
 import subprocess

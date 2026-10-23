@@ -189,8 +189,24 @@ def measure_t_offset(t: np.ndarray, y: np.ndarray, u_ref: np.ndarray,
     n = int(round(len(u_ref) * dt_ref / dt))
     ref = np.interp(np.linspace(0, len(u_ref) - 1, n),
                     np.arange(len(u_ref)), np.asarray(u_ref, float))
-    c = np.correlate(y - y.mean(), ref - ref.mean(), mode="valid")
+    c = _correlate_valid(y - y.mean(), ref - ref.mean())
     return float(t[int(np.argmax(c))])
+
+
+def _correlate_valid(a, v):
+    """np.correlate(a, v, mode="valid") by FFT. The direct sum is O(N M):
+    a 36k-point capture against a 34k-point reference took ~10 s per call,
+    which was most of the test suite's wall time (review G1-44, 40 calls =
+    415 s of test_batch) and a pause at every bench alignment check. Same
+    numbers to rounding; the direct form when v is the longer one."""
+    a = np.asarray(a, float)
+    v = np.asarray(v, float)
+    if len(v) > len(a) or len(v) < 64:
+        return np.correlate(a, v, mode="valid")
+    m = len(a) + len(v) - 1
+    n = 1 << (m - 1).bit_length()
+    c = np.fft.irfft(np.fft.rfft(a, n) * np.conj(np.fft.rfft(v, n)), n)
+    return c[:len(a) - len(v) + 1]
 
 
 def find_trigger_offset(t: np.ndarray, y: np.ndarray, frac: float = 0.5) -> float:
