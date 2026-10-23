@@ -281,6 +281,43 @@ def main():
             check(False, "refused")
         except ValueError:
             check(not os.path.exists(os.path.join(tmp, "nan.csv")), "refused, nothing written")
+
+        print("[13] the panel's Upload runs the limit and channel checks, and asks while ON (G1-30)")
+        import types
+        import ilc_gui
+        shutil.copy(FIXTURE, state)
+        sess = ilc_gui.load_session(state)
+        awg13, _sc13, mod13 = sim_bench()
+        answers = []
+        stub = types.SimpleNamespace(session=sess, _bench_modules=lambda: (None, mod13),
+                                     ask_user=lambda title, msg: (answers.append(title), answers[-1] == "yes")[1])
+        saved_make = ilc_bench.make_awg
+        ilc_bench.make_awg = lambda m: awg13
+        try:
+            def upload():
+                n0 = len(awg13.log)
+                with contextlib.redirect_stdout(io.StringIO()) as o:
+                    ilc_gui.App._upload_work(stub, 1, f"UP{len(awg13.log)}", sess.full_scale)
+                return [e for e in awg13.log[n0:] if e[0] == "upload"], o.getvalue()
+            ups, txt = upload()                       # FRQ still the simulator's 100 Hz
+            check(not ups and "FRQ is" in txt, "a channel at another record's FRQ: refused, nothing uploaded")
+            awg13.apply_channel(1, {"BSWV": {"FRQ": 1.0 / period}})
+            u_ok = sess.u.copy()
+            sess.u = u_ok.copy()
+            sess.u[0] = 0.5                           # past the 100 mV idle cap
+            ups, txt = upload()
+            check(not ups and "limit check" in txt, "a drive failing the limit check: refused")
+            sess.u = u_ok
+            ups, txt = upload()
+            check(len(ups) == 1, "a good drive into an OFF channel: uploaded")
+            awg13.set_output(1, True)
+            ups, txt = upload()
+            check(not ups and answers[-1] == "Output is ON", "output ON: asked, and a no uploads nothing")
+            stub.ask_user = lambda title, msg: True
+            ups, txt = upload()
+            check(len(ups) == 1, "output ON and a yes: uploaded")
+        finally:
+            ilc_bench.make_awg = saved_make
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

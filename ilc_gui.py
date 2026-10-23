@@ -5252,9 +5252,30 @@ class App:
                         f"record of the old samples.\n\nOverwrite?"):
                     print(f"upload cancelled: {clash} left as stored")
                     return
-            if awg.is_on(awg_ch):
-                print(f"note: CH{awg_ch} output is ON -- the new waveform "
-                      f"starts playing the moment it is selected")
+            # the guards every other path runs (review G1-30): the limit
+            # check (a `run_ilc step --force` drive FAILS it), and the
+            # channel set up for THIS record -- FRQ against N x dt (a record
+            # of another length plays time-scaled), AMP, OFST, DDS
+            rep = s.loop.check(s.u)
+            print("       limit check:", rep)
+            if not rep:
+                print(f"REFUSING to upload {wname}: the drive fails the limit check")
+                return
+            problems, notes = ilc_bench.check_awg_channel(
+                awg, awg_ch, full_scale=fs, expect_period=len(s.t) * s.loop.dt)
+            for note in notes:
+                print("      ", note)
+            if problems:
+                print(f"REFUSING to upload {wname}:")
+                for p in problems:
+                    print("  !", p)
+                return
+            if awg.is_on(awg_ch) and not self.ask_user(
+                    "Output is ON",
+                    f"CH{awg_ch} output is ON: {wname} starts playing the "
+                    f"moment it is selected.\n\nUpload it and play it now?"):
+                print(f"upload cancelled: CH{awg_ch} is ON and {wname} was not played")
+                return
             n, frac = ilc_bench.upload_drive(awg, awg_ch, wname, s.u, fs)
             print(f"uploaded {wname} to CH{awg_ch}: {n} pts, "
                   f"{100*frac:.1f}% of DAC range, peak "
