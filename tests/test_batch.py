@@ -35,6 +35,16 @@ def bench(channels=None):
     return awg, scope
 
 
+def parked(awg):
+    """Never-float (ilc_batch's park): no output was ever switched OFF, and
+    every channel the batch played on is ON with a flat PARK record."""
+    never_off = not any(e[0] == "output" and not e[2] for e in awg.log)
+    used = {e[1] for e in awg.log if e[0] == "upload"}
+    flat = all(awg.ch[c]["on"] and awg.ch[c]["name"].startswith("PARK")
+               and float(np.ptp(awg.ch[c]["wave"])) == 0.0 for c in used)
+    return never_off and flat and bool(used)
+
+
 def args(**kw):
     d = dict(plan=None, dry_run=False, simulate=True, allow_output_on=True, yes=True, redo=False, gui_names=False)
     d.update(kw)
@@ -63,20 +73,23 @@ def main():
         man = ilc_batch.cmd_run(args(plan=path), bench=(awg, scope))
         ev = awg.log
         check(not any(e[0] == "FRQ_UNDER_LIVE_OUTPUT" for e in ev), "FRQ never moved under a live output")
-        check(not awg.is_on(1) and not awg.is_on(2), "both outputs off at the end")
+        check(parked(awg), "never switched OFF; both outputs ON and parked flat at the end")
         for c in (1, 2):
-            names = [e[2] for e in ev if e[0] == "upload" and e[1] == c]
+            names = [e[2] for e in ev if e[0] == "upload" and e[1] == c and not e[2].startswith("PARK")]
             check(all(a != b for a, b in zip(names, names[1:])), f"CH{c} uploads alternate slots ({len(names)} uploads)")
             check(set(names) <= {f"BX{c}A", f"BX{c}B"}, f"CH{c} uses only its two slots")
-        # every FRQ write happens with both outputs off: replay the log
-        on = {1: False, 2: False}
-        ok = True
+        # every FRQ write under a live output is under its flat park: replay the log
+        on, name = {1: False, 2: False}, {1: "", 2: ""}
+        ok, live = True, 0
         for e in ev:
             if e[0] == "output":
                 on[e[1]] = e[2]
-            if e[0] == "frq" and (on[1] or on[2]):
-                ok = False
-        check(ok, "every FRQ write had BOTH outputs off")
+            if e[0] == "upload":
+                name[e[1]] = e[2]
+            if e[0] == "frq" and on[e[1]]:
+                live += 1
+                ok = ok and name[e[1]].startswith("PARK")
+        check(ok and live >= 2, f"FRQ moved under a live output only with its PARK record playing ({live} writes)")
         for stem in ("S25", "SW50"):
             c = man["campaigns"][stem]
             check(c["status"] == "done", f"{stem} done")
@@ -111,7 +124,7 @@ def main():
             return orig(wait_s)
         scope3.single = flaky
         ilc_batch.cmd_run(args(plan=path), bench=(awg3, scope3))
-        check(not awg3.is_on(1) and not awg3.is_on(2), "outputs off after the interrupt")
+        check(parked(awg3), "outputs parked ON after the interrupt, never OFF")
         import run_ilc
         it = int(run_ilc.load_state(os.path.join(tmp, "run", "sim", "drive_N175X1.state.npz"))["iteration"])
         awg4, scope4 = bench()
@@ -130,6 +143,7 @@ def main():
         check(man["campaigns"]["C25"]["status"] == "refused" and "AMP" in man["campaigns"]["C25"]["error"],
               "C25 refused for AMP")
         check(not any(e[0] == "output" and e[2] for e in awg5.log), "nothing switched on")
+        check(not any(e[0] == "output" and not e[2] for e in awg5.log), "nothing switched off")
 
         print("[6] without --allow-output-on nothing is switched on")
         path = write_plan(tmp, ["N20"])
@@ -137,6 +151,26 @@ def main():
         man = ilc_batch.cmd_run(args(plan=path, simulate=False, allow_output_on=False), bench=(awg6, scope6))
         check(man["campaigns"]["N20"]["status"] == "refused", "N20 refused")
         check(not any(e[0] == "output" and e[2] for e in awg6.log), "nothing switched on")
+
+        print("[6b] outputs already ON without --allow-output-on: refused before anything changes")
+        awg6b, scope6b = bench()
+        awg6b.set_output(1, True)
+        awg6b.set_output(2, True)
+        n6b = len(awg6b.log)
+        man = ilc_batch.cmd_run(args(plan=path, simulate=False, allow_output_on=False, redo=True),
+                                bench=(awg6b, scope6b))
+        check(man["campaigns"]["N20"]["status"] == "refused" and "--allow-output-on" in man["campaigns"]["N20"]["error"],
+              "N20 refused, naming --allow-output-on")
+        check(awg6b.log[n6b:] == [] and awg6b.is_on(1) and awg6b.is_on(2),
+              "nothing uploaded, no FRQ written, both outputs left ON")
+
+        print("[6c] --outputs-off-at-end: both OFF at the very end, parked before that")
+        path6c = write_plan(tmp, ["N20"], name="t6c", max_iterations=3, min_iterations=1)
+        awg6c, scope6c = bench()
+        ilc_batch.cmd_run(args(plan=path6c, outputs_off_at_end=True), bench=(awg6c, scope6c))
+        offs = [i for i, e in enumerate(awg6c.log) if e[0] == "output" and not e[2]]
+        check(not awg6c.is_on(1) and not awg6c.is_on(2) and len(offs) == 2
+              and offs[0] == len(awg6c.log) - 2, "both switched OFF, and only as the last two events")
 
         print("[7] Stop (the GUI's button) ends the batch cleanly, and the next run resumes")
         import threading
@@ -156,7 +190,7 @@ def main():
                                   on_event=lambda k, i: events.append(k), bench=(awg7, scope7))
         check(man["campaigns"]["S47"]["status"] == "stopped", "S47 marked stopped")
         check("N15" not in man["campaigns"], "N15 not started")
-        check(not awg7.is_on(1) and not awg7.is_on(2), "outputs off after Stop")
+        check(parked(awg7), "outputs parked ON after Stop, never OFF")
         check(events[0] == "batch" and events[-1] == "batch_end" and "iteration" in events,
               "events: batch ... iteration ... batch_end")
         plan = ilc_batch.load_plan(path)
@@ -264,8 +298,8 @@ def main():
         msgs = []
         man = ilc_batch.run_batch(plan, args(), log=msgs.append, stop=stop, on_event=stop_at_verify2,
                                   bench=(awg11, scope11))
-        check(man["campaigns"]["S25"]["status"] == "stopped" and not awg11.is_on(1) and not awg11.is_on(2),
-              "stopped in pass 2, outputs off")
+        check(man["campaigns"]["S25"]["status"] == "stopped" and parked(awg11),
+              "stopped in pass 2, outputs parked ON")
         odir = os.path.join(plan["_run_dir"], "optical")
         v1 = os.path.join(odir, "S25_opt1", "S25_opt1_scan.json")
         check(os.path.exists(os.path.join(odir, "S25_opt1_before", "S25_opt1_before_scan.json"))
@@ -286,7 +320,7 @@ def main():
               "pass 1 is not repeated (no scan of it, its verification scan untouched)")
         check(any("S25_opt2: on disk" in m and "resumed" in m for m in msgs),
               "pass 2's verification scan resumes from disk")
-        check(not awg11.is_on(1) and not awg11.is_on(2), "outputs off at the end")
+        check(parked(awg11), "outputs parked ON at the end, never OFF")
         if len(P) == 2:
             check(P[1]["scan"] == P[0]["verify_scan"] and P[1]["verdict_before"] == P[0]["verdict_after"],
                   "pass 2's correction comes from pass 1's verification")
@@ -463,7 +497,7 @@ def main():
               f"bridged simulation as {idle1['EO2']:+.4f} V)")
         check(any("X2 parked: CH2 plays PARK2" in m for m in msgs) and any("X1 parked: CH1 plays PARK1" in m for m in msgs),
               "the log names the parked channel")
-        check(not awg11b.is_on(1) and not awg11b.is_on(2), "outputs off at the end")
+        check(parked(awg11b), "outputs parked ON at the end, never OFF")
         for k in ("X1", "X2"):
             ch = c["channels"][k]
             with np.load(ch["state"], allow_pickle=True) as st:
@@ -576,7 +610,7 @@ def main():
                 clean = "base_target" not in st.files and "corrections" not in st.files
             check(ch["keeper_iteration"] == best["it"] and os.path.exists(ch["keeper_file"]) and clean,
                   f"{k}: electrical keeper i{best['it']:02d}, target untouched")
-        check(not awg12.is_on(1) and not awg12.is_on(2), "outputs off")
+        check(parked(awg12), "outputs parked ON, never OFF")
         plan = ilc_batch.load_plan(path, cfg=bench_cfg)
         msgs = []
         man = ilc_batch.run_batch(plan, args(redo=True, no_optical=True), log=msgs.append, bench=bench(bench_cfg))

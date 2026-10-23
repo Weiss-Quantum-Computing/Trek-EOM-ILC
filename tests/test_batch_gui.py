@@ -145,7 +145,9 @@ def main():
         app.do_batch_run("bench")
         check(pump(root, app), "bench batch finished")
         awg = opened[0]
-        check(not awg.is_on(1) and not awg.is_on(2), "outputs off at the end")
+        check(not any(e[0] == "output" and not e[2] for e in awg.log) and awg.is_on(1) and awg.is_on(2)
+              and awg.ch[1]["name"].startswith("PARK") and awg.ch[2]["name"].startswith("PARK"),
+              "never switched OFF: both outputs parked ON at the end")
         check(not any(e[0] == "FRQ_UNDER_LIVE_OUTPUT" for e in awg.log), "FRQ never under a live output")
         man = json.load(open(os.path.join(tmp, "run", "batch_gui.json")))
         check(all(man["campaigns"][s]["status"] == "done" for s in ("S25", "SW50", "N15")),

@@ -425,12 +425,17 @@ estimate -- run it on the lab PC, where the `run\` states it names exist.
 
 **Before the first run:** Auto-set once (AMP 20 Vpp, OFST 0, DDS, burst on the
 external trigger, HRES) with both outputs OFF; close the GUIs (they hold the
-VISA sessions). The batch then does, per campaign: both outputs OFF → FRQ =
-1/record on both channels → scope window and verticals → upload → channel
-check (refused on any mismatch, as in the GUI) → both outputs ON → alignment
-check on both drive channels (CH1, CH2) → iterate → both outputs OFF. It asks
-once, at the start, for a typed YES before it may switch outputs on; Ctrl-C,
-an error or the end of the plan switches both off.
+VISA sessions). The batch then does, per campaign: a live output parked (a
+flat record at its idle, `PARK1` / `PARK2`, output ON) → FRQ = 1/record on
+both channels (under the flat park, which plays the same at any FRQ) → scope
+window and verticals → upload → channel check (refused on any mismatch, as
+in the GUI) → outputs ON (those not already ON) → alignment check on both
+drive channels (CH1, CH2) → iterate → both parked. It asks once, at the
+start, for a typed YES before it may switch outputs on; Ctrl-C, an error or
+the end of the plan PARKS every channel it played on, outputs left ON
+(never-float: it never switches an output OFF on its own).
+`--outputs-off-at-end` switches both OFF at the very end instead, named in
+the typed confirmation -- only with every stage they feed bypassed.
 
 **Per channel it stops** at the first of: `max_iterations` (20); rms ≤
 `stop_rms_v` (0.8 V) after `min_iterations` (8); a plateau (the loop

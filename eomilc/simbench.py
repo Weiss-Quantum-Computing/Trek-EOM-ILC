@@ -61,7 +61,10 @@ class SimAWG:
     def apply_channel(self, c, blocks, log=lambda s: None):
         bswv = blocks.get("BSWV", {})
         if "FRQ" in bswv:
-            if self.ch[c]["on"]:
+            w = self.ch[c]["wave"]
+            if self.ch[c]["on"] and (w is None or float(np.ptp(w)) > 0.0):
+                # a live record that is not flat would play time-scaled; a
+                # flat park plays the same at any FRQ (never-float, ilc_batch)
                 self.log.append(("FRQ_UNDER_LIVE_OUTPUT", c, float(bswv["FRQ"])))
             self.ch[c]["frq"] = float(bswv["FRQ"])
             self.log.append(("frq", c, float(bswv["FRQ"])))

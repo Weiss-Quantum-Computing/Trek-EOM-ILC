@@ -38,14 +38,22 @@ never be resumed as if they had been measured on the bench.
 
 SAFETY POSTURE -- the GUI's rules, applied without a person at every step
 --------------------------------------------------------------------------
-  * FRQ moves only with BOTH outputs OFF. Every campaign has its own record
-    length, so FRQ changes between campaigns; the batch switches both outputs
-    off, sets FRQ, and reads the channel back before anything plays.
+  * Never float (memory awg-trek-safety; either output may feed a stage that
+    drives high, -4 to -5.7 kV, when its input floats): the batch never
+    switches an output OFF on its own. Between campaigns, after each stage,
+    on any error or Ctrl-C and at the end, every channel it played on PARKS:
+    a flat record at its drive's idle (optical.park_drive, AWG names
+    PARK1/PARK2), the output left ON. OFF at the end only with
+    --outputs-off-at-end, named in the typed confirmation.
+  * FRQ moves only under a FLAT record. Every campaign has its own record
+    length, so FRQ changes between campaigns; a live channel is parked first
+    (a flat record plays the same at any FRQ), then FRQ is set and read back
+    before anything plays. An output that is OFF is set up while OFF.
   * Switching ON is the direction that puts voltage into something. The batch
     does it only with --allow-output-on, after one typed confirmation for the
-    whole plan (or --yes), and only after the channel check below passed.
-  * Both outputs go OFF between campaigns, at the end, and on any error or
-    Ctrl-C (the finally block does it before closing the instruments).
+    whole plan (or --yes), and only after the channel check below passed;
+    without it a campaign whose outputs are already ON is refused before
+    anything is changed.
   * AMP, OFST, load, sample clock and burst setup are never written. Set them
     once with the GUI's Auto-set; ilc_bench.check_awg_channel verifies them
     before every campaign and the campaign is refused if they are wrong.
@@ -609,14 +617,64 @@ def nice_setting(value):
     return 10 * e
 
 
-def outputs_off(awg, runs, log=print):
+# per AWG channel, (id(awg), ch) -> (crystal key, record in AWG volts, full
+# scale, parked?): what this batch last put on the channel -- what a park at
+# an error or the end takes its idle and length from
+_PLAYED = {}
+
+
+def _played(awg, c, key, u, full_scale, parked=False):
+    _PLAYED[(id(awg), c)] = (key, np.asarray(u, float), float(full_scale), bool(parked))
+
+
+def park_channel(awg, c, key, u, full_scale, log=print, why=""):
+    """The never-float stop for one AWG channel (memory awg-trek-safety): a
+    flat record at the idle of `u` (optical.park_drive -- its first sample,
+    its length, so FRQ still fits) uploaded under the crystal's park name
+    and selected. The output is not touched: ON stays ON, so the stage
+    input never floats; OFF stays OFF. A channel that already plays its
+    park is left as it is (a playing waveform is never overwritten).
+    Raises if the upload fails."""
+    import ilc_bench
+    from eomilc import optical
+    rec = _PLAYED.get((id(awg), c))
+    if rec is not None and rec[3]:
+        log(f"  CH{c} already parked{' (' + why + ')' if why else ''}")
+        return
+    park = optical.park_drive(u)
+    name = optical.PARK_NAMES[key]
+    n, _frac = ilc_bench.upload_drive(awg, c, name, park, full_scale)
+    _played(awg, c, key, park, full_scale, parked=True)
+    log(f"  CH{c} parked{' (' + why + ')' if why else ''}: plays {name}, flat at its idle "
+        f"{float(park[0]):+.3f} V ({n} pts), output {'ON' if awg.is_on(c) else 'OFF'} left as it is")
+
+
+def park_runs(awg, runs, log=print, why=""):
+    """Park each run's channel at its drive's idle (park_channel). A park
+    that fails is reported and the output left as it is -- switching OFF is
+    the act the never-float rule forbids."""
     for cr in runs:
         c = cr.wiring["awg_ch"]
-        if awg.is_on(c):
-            awg.set_output(c, False)
-            log(f"  CH{c} output OFF")
-        if awg.is_on(c):
-            raise BatchError(f"CH{c} did not switch off")
+        try:
+            park_channel(awg, c, cr.key, cr.u, cr.full_scale, log, why)
+        except Exception as e:
+            log(f"  CH{c}: PARK FAILED ({type(e).__name__}: {e}) -- output left as it is "
+                f"(never-float); switch it OFF by hand only with its stage input bypassed")
+
+
+def park_all(awg, log, why):
+    """Every channel this batch played on parks at the idle of what it last
+    played (a refusal, an error, Stop, the end of the batch). A channel the
+    batch never touched is left alone."""
+    for c in (1, 2):
+        rec = _PLAYED.get((id(awg), c))
+        if rec is None:
+            continue
+        try:
+            park_channel(awg, c, rec[0], rec[1], rec[2], log, why)
+        except Exception as e:
+            log(f"CH{c}: PARK FAILED ({type(e).__name__}: {e}) -- output left as it is "
+                f"(never-float); switch it OFF by hand only with its stage input bypassed")
 
 
 _SLOT = {}     # per AWG channel, across the whole batch: the next slot to fill
@@ -638,23 +696,39 @@ def upload(awg, cr, gui_names, log=print):
         name = f"B{cr.key}{SLOTS[k % 2]}"
         _SLOT[(id(awg), c)] = k + 1
     n, frac = ilc_bench.upload_drive(awg, cr.wiring["awg_ch"], name, cr.u, cr.full_scale)
+    _played(awg, cr.wiring["awg_ch"], cr.key, cr.u, cr.full_scale)
     return name, n, frac
 
 
 def prepare_campaign(awg, scope, runs, plan, gui_names, allow_on, log=print):
-    """Outputs off -> FRQ -> scope window and verticals -> first uploads ->
-    channel checks -> outputs on -> alignment. Raises BatchError to refuse."""
+    """Park live outputs -> FRQ -> scope window and verticals -> first
+    uploads -> channel checks -> outputs on -> alignment. Raises BatchError
+    to refuse.
+
+    Never-float: an output that is ON is never switched off here. A live
+    channel first plays a flat park at the idle (a flat record plays the
+    same at any FRQ, so nothing time-scaled reaches the Trek while FRQ
+    moves), then FRQ is set, then the drive is uploaded live, as every
+    iteration's is. Without allow_on a campaign whose outputs are already ON
+    is refused before anything is changed."""
     import ilc_bench
     period = len(runs[0].t) * runs[0].loop.dt
-    outputs_off(awg, runs, log)
+    live = [cr for cr in runs if awg.is_on(cr.wiring["awg_ch"])]
+    if live and not allow_on:
+        raise BatchError(", ".join(f"CH{cr.wiring['awg_ch']}" for cr in live)
+                         + " ON and this run may not drive the outputs (pass --allow-output-on); "
+                           "nothing was changed")
+    for cr in live:
+        park_channel(awg, cr.wiring["awg_ch"], cr.key, cr.u, cr.full_scale, log, "FRQ moves under it")
     for cr in runs:
         c = cr.wiring["awg_ch"]
-        if awg.is_on(c):
-            raise BatchError(f"CH{c} is still on; FRQ must not move under a live output")
         missed = awg.apply_channel(c, {"BSWV": {"FRQ": 1.0 / period}}, log=lambda m: None)
         if missed:
             raise BatchError(f"CH{c}: FRQ did not take ({missed})")
-    log(f"  AWG FRQ {1.0/period:.6g} Hz on both channels (record {period*1e3:.4f} ms), outputs off")
+    log(f"  AWG FRQ {1.0/period:.6g} Hz on " + ", ".join(f"CH{cr.wiring['awg_ch']}" for cr in runs)
+        + f" (record {period*1e3:.4f} ms); "
+        + ("outputs off" if not live else
+           "live: " + ", ".join(f"CH{cr.wiring['awg_ch']}" for cr in live) + ", parked flat while it moved"))
     rng = nice_setting(1.3 * period)
     # position is trigger -> screen CENTRE: say so, because the polarimeter's
     # scans leave the reference at LEFT and the trigger then sits half a
@@ -705,7 +779,8 @@ def prepare_campaign(awg, scope, runs, plan, gui_names, allow_on, log=print):
         raise BatchError("outputs are off and this run may not switch them on "
                          "(pass --allow-output-on)")
     for cr in runs:
-        awg.set_output(cr.wiring["awg_ch"], True)
+        if not awg.is_on(cr.wiring["awg_ch"]):
+            awg.set_output(cr.wiring["awg_ch"], True)
         if not awg.is_on(cr.wiring["awg_ch"]):
             raise BatchError(f"CH{cr.wiring['awg_ch']} did not switch on")
     log("  outputs ON: " + ", ".join(f"CH{cr.wiring['awg_ch']}" for cr in runs))
@@ -1186,7 +1261,7 @@ def run_campaign(awg, scope, plan, camp, args, log=print, stop=None, emit=lambda
     resumed_at = {cr.key: cr.iteration for cr in runs}
     while any(cr.active for cr in runs):
         iterate_once(awg, scope, runs, plan, args, log, stop, emit, stem=camp["stem"])
-    outputs_off(awg, runs, log)
+    park_runs(awg, runs, log, "electrical stage done")
     final, opt_rec = {}, None
     if opt is not None and getattr(args, "no_optical", False):
         log("  optical stage: skipped (--no-optical)")
@@ -1426,7 +1501,7 @@ def _optical(what, fn, *a, stop=None, **kw):
 def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                   emit=lambda kind, **kw: None):
     """The optical close for one campaign whose electrical keepers are
-    chosen (outputs OFF on entry and on exit). Returns (record, final):
+    chosen (outputs parked on entry and on exit, never OFF). Returns (record, final):
     record is the manifest's "optical" block (also written to
     <outdir>/<stem>_optical.json, which a resumed run reads); final is
     {key: (it, rms_v, peak_v)}, the last measured iteration after the last
@@ -1543,7 +1618,8 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
             name, n, frac = upload(awg, cr, args.gui_names, log)
             log(f"  {cr.stem} i{cr.iteration:02d} uploaded as {name} ({n} pts, {100*frac:.1f}% of DAC range)")
         for cr in runs:
-            awg.set_output(cr.wiring["awg_ch"], True)
+            if not awg.is_on(cr.wiring["awg_ch"]):
+                awg.set_output(cr.wiring["awg_ch"], True)
             if not awg.is_on(cr.wiring["awg_ch"]):
                 raise BatchError(f"CH{cr.wiring['awg_ch']} did not switch on")
         log("  outputs ON: " + ", ".join(f"CH{cr.wiring['awg_ch']}" for cr in runs))
@@ -1644,6 +1720,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
                 park = optical.park_drive(pk.u)
                 pname = optical.PARK_NAMES[other]
                 n_, frac_ = ilc_bench.upload_drive(awg, pk.wiring["awg_ch"], pname, park, pk.full_scale)
+                _played(awg, pk.wiring["awg_ch"], other, park, pk.full_scale, parked=True)
                 log(f"  {other} parked: CH{pk.wiring['awg_ch']} plays {pname}, flat at its idle "
                     f"{float(park[0]):+.3f} V ({n_} pts; the output stays ON)")
                 prec["parked"][other] = dict(name=pname, idle_V=float(park[0]))
@@ -1842,7 +1919,7 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
         log(f"  optical stage FAILED: {e}")
     finally:
         try:
-            outputs_off(awg, runs, log)
+            park_runs(awg, runs, log, "optical stage over")
         finally:
             if dev is not None:
                 optical.close_devices(dev)
@@ -2054,6 +2131,8 @@ def open_bench(plan, simulate, log=print):
 
 
 def _all_off(awg, log, why):
+    """Both outputs OFF: only on the explicit --outputs-off-at-end (named in
+    the typed confirmation / the window's dialog). Everything else parks."""
     for c in (1, 2):
         try:
             if awg.is_on(c):
@@ -2076,7 +2155,10 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
     simulated pair they can inspect. The instruments are closed at the end.
 
     Switching outputs on needs opts.allow_output_on; asking the person is the
-    caller's job (the CLI's typed YES, the GUI's dialog)."""
+    caller's job (the CLI's typed YES, the GUI's dialog). Outputs are never
+    switched off: a refusal, an error, Stop and the end park every channel
+    the batch played on (park_all), unless opts.outputs_off_at_end (absent =
+    False) asks for both OFF at the very end."""
     mpath = manifest_path(plan, opts.simulate)
     plan["_run_dir"] = os.path.dirname(mpath)
     os.makedirs(plan["_run_dir"], exist_ok=True)
@@ -2113,6 +2195,8 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
     emit("batch", todo=todo, n=len(plan["campaigns"]), run_dir=plan["_run_dir"], simulated=bool(opts.simulate),
          plan_est=est, started=time.time())
     awg, scope = bench if bench is not None else open_bench(plan, opts.simulate, say)
+    for k in [k for k in _PLAYED if k[0] == id(awg)]:
+        del _PLAYED[k]                   # a fresh instrument: nothing known to be playing
     try:
         for i, camp in enumerate(plan["campaigns"]):
             stem = camp["stem"]
@@ -2140,20 +2224,20 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
             except BatchError as e:
                 entry.update(status="refused", error=str(e))
                 say(f"  REFUSED: {e}")
-                _all_off(awg, say, "campaign refused")
+                park_all(awg, say, "campaign refused")
             except (BatchStopped, KeyboardInterrupt):
                 entry["status"] = "stopped"
                 raise
             except Exception as e:
                 # an instrument or file error (a VISA timeout, a read that
-                # failed three times) ends THIS campaign, outputs off, and the
+                # failed three times) ends THIS campaign, parked, and the
                 # batch goes on to the next: an overnight run must not end on
                 # one bad read (14 Oct 2026)
                 entry.update(status="error", error=f"{type(e).__name__}: {e}")
                 say(f"  ERROR, campaign abandoned: {type(e).__name__}: {e}")
                 for line in traceback.format_exception(type(e), e, e.__traceback__):
                     say("    " + line.rstrip())
-                _all_off(awg, say, "campaign error")
+                park_all(awg, say, "campaign error")
             finally:
                 entry["minutes"] = round((time.time() - t0) / 60, 2)
                 manifest["campaigns"][stem] = entry
@@ -2162,7 +2246,10 @@ def run_batch(plan, opts, log=print, stop=None, on_event=None, bench=None):
     except (BatchStopped, KeyboardInterrupt):
         say("\nstopped -- states are saved after every iteration; run again to resume")
     finally:
-        _all_off(awg, say, "end of batch")
+        if getattr(opts, "outputs_off_at_end", False):
+            _all_off(awg, say, "end of batch, --outputs-off-at-end")
+        else:
+            park_all(awg, say, "end of batch")
         awg.close()
         scope.close()
         _write_json(mpath, manifest)
@@ -2185,8 +2272,12 @@ def cmd_run(a, bench=None):
     if a.simulate:
         a.allow_output_on = True
     elif a.allow_output_on and not a.yes:
-        print(f"This batch will switch AWG CH1 and CH2 ON for each of {len(plan['campaigns'])} campaigns "
-              f"(and OFF between them), driving the Treks with the planned ramps.")
+        print(f"This batch will switch AWG CH1 and CH2 ON for {len(plan['campaigns'])} campaigns, driving "
+              f"the Treks with the planned ramps. The outputs stay ON: between campaigns, on an error and "
+              f"at the end each channel parks on a flat record at its idle (never-float).")
+        if getattr(a, "outputs_off_at_end", False):
+            print("--outputs-off-at-end: at the very end BOTH CH1 and CH2 are switched OFF -- their inputs "
+                  "then float, so any stage they feed (X2's preconditioning stage) must be bypassed.")
         if input("Type YES to allow it: ").strip() != "YES":
             sys.exit("not confirmed; nothing was touched")
     return run_batch(plan, a, log=print, bench=bench)
@@ -2202,6 +2293,9 @@ def main():
     r.add_argument("--allow-output-on", action="store_true",
                    help="let the batch switch the AWG outputs on (after one typed confirmation)")
     r.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+    r.add_argument("--outputs-off-at-end", action="store_true",
+                   help="switch BOTH outputs OFF at the very end instead of parking them (their inputs "
+                        "then float: only with every stage they feed bypassed)")
     r.add_argument("--redo", action="store_true", help="repeat campaigns the manifest lists as done")
     r.add_argument("--no-optical", action="store_true",
                    help="skip the plan's optical stage (the campaigns end at their electrical keepers)")
