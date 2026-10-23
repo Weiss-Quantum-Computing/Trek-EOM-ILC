@@ -91,9 +91,17 @@ def check_scope(scopemod, channels_desc=""):
         for ch in (1, 2, 3, 4):
             sc = scope.try_get(f":CHANnel{ch}:SCALe")
             on = scope.try_get(f":CHANnel{ch}:DISPlay")
-            scales.append(f"CH{ch} {float(sc):g} V/div" + ("" if str(on).strip() in ("1", "ON") else " off")
-                          if sc is not None else f"CH{ch} ?")
-        rng_txt = f"{float(rng)*1e3:.4g} ms" if rng is not None else "?"
+            # one bad reply (a partial answer after a timeout) marks that
+            # channel, not the whole row (review G1-1)
+            try:
+                scales.append(f"CH{ch} {float(sc):g} V/div"
+                              + ("" if str(on).strip() in ("1", "ON") else " off"))
+            except (TypeError, ValueError):
+                scales.append(f"CH{ch} ?")
+        try:
+            rng_txt = f"{float(rng)*1e3:.4g} ms"
+        except (TypeError, ValueError):
+            rng_txt = "?"
         text = f"{idn.split(',')[1].strip() if ',' in idn else idn[:24]}: {acq}, window {rng_txt}"
         detail = f"{idn}\n  " + ", ".join(scales) + (f"\n  roles: {channels_desc}" if channels_desc else "")
         return dict(ok=acq.upper().startswith("HRES"), text=text + ("" if acq.upper().startswith("HRES") else " (loop needs HRES)"),

@@ -361,6 +361,32 @@ def main():
             check(False, "refused")
         except ilc_bench.Refused as e:
             check("flat" in str(e) and not isinstance(e, SystemExit), "Refused, a RuntimeError, says why")
+
+        print("[17] Hardware tab: one bad V/div reply marks that channel only (G1-1)")
+        import ilc_hardware as ihw
+
+        class FakeScope:
+            def __init__(self, replies):
+                self.r = replies
+            def connect(self):
+                return "KEYSIGHT,MSO-X 2014A,SN,1.0"
+            def try_get(self, q):
+                return self.r.get(q)
+            def close(self):
+                pass
+        rep17 = {":ACQuire:TYPE": "HRES", ":TIMebase:RANGe": "0.02"}
+        for c in (1, 2, 3, 4):
+            rep17[f":CHANnel{c}:SCALe"] = "1.0E+00"
+            rep17[f":CHANnel{c}:DISPlay"] = "1"
+        rep17[":CHANnel3:SCALe"] = "1.0E+0\n;:CHAN"            # a partial reply after a timeout
+        saved_ms = ilc_bench.make_scope
+        ilc_bench.make_scope = lambda m: FakeScope(rep17)
+        try:
+            r17 = ihw.check_scope(None)
+        finally:
+            ilc_bench.make_scope = saved_ms
+        check(r17["ok"] and "HRES" in r17["text"] and "CH3 ?" in r17["detail"]
+              and "CH4 1 V/div" in r17["detail"], f"row {r17['text']!r}, detail marks CH3 only")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
