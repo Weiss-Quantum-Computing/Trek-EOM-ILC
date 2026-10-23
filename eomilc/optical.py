@@ -777,24 +777,29 @@ def compare(folder, x1_state, x2_state, band_hz=5000.0, pd_delay_us=1.7, split=0
     summary["solo"] = solo
     keep = {None: ("EO1", "EO2"), "X1": ("EO1",), "X2": ("EO2",)}[solo]
     files, played, by_c = {}, {}, {}
-    plays = [p for p in summary["correction"]["files"] if p.endswith("_played.csv")]
+    played_all = {}
     for p in summary["correction"]["files"]:
         if not os.path.basename(p).startswith("corr_"):
             continue
         c = corrmod.read_correction(p)
         ch = str(c.meta.get("channel", ""))
-        if ch not in keep:
-            continue                      # the parked crystal's file is all zero
-        files[ch] = p
         tf = c.meta.get("target_file")
         if not (tf and os.path.exists(str(tf))):
             # corr_<name>_optical.csv sits beside target_<name>_played.csv
             stem = os.path.basename(p)[len("corr_"):-len("_optical.csv")]
             tf = os.path.join(os.path.dirname(p), f"target_{stem}_played.csv")
+        played_all[ch] = str(tf)
+        if ch not in keep:
+            continue                      # the parked crystal's file is all zero
+        files[ch] = p
         played[ch] = str(tf)
-    # compare writes them crystal by crystal, x1 first: played, corr, played, corr
-    for i, p in enumerate(plays[:2], 1):
-        by_c[i] = _read_played(p)
+    # the played targets by crystal (EO1 -> 1, EO2 -> 2), keyed by the channel
+    # each correction file names -- not by the order compare happened to write
+    # them, which put the driving crystal's file in slot 1 whenever the parked
+    # one's was missing (review G1-26). A crystal without one adds nothing.
+    for ch, tf in played_all.items():
+        if ch in ("EO1", "EO2") and os.path.exists(tf):
+            by_c[int(ch[-1])] = _read_played(tf)
     summary["files"], summary["played"] = files, played
     summary["states_compared"] = [os.path.abspath(x1), os.path.abspath(x2)]
     if extremes:
