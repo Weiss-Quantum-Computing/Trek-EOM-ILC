@@ -334,6 +334,25 @@ def main():
         want = ilc_bench.scopeio.scope_points_for(2.2 * len(z["t"]))
         check(code is None and asked and all(p == want for p in asked),
               f"alignment and capture both read {want} points ({len(asked)} reads)")
+
+        print("[15] the CLI's --resume keeps every state key and learns with the state's FRF (G1-6)")
+        z15 = {k: z[k] for k in z.files}
+        z15.update(model="frf", frf_path=FRFS[1], frf_use=15e3, frf_max=22e3, corr_from=2,
+                   scope_channels="{'3': 'MonX1'}", early_note="kept")
+        np.savez(state, **z15)
+        awg, scope, mod = sim_bench()
+        awg.apply_channel(1, {"BSWV": {"FRQ": 1.0 / period}})
+        awg.set_output(1, True)
+        code, out = run_cli(["--resume", state, "--awg-ch", "1", "--scope-ch", "3", "--iterations", "1",
+                             "--repeats", "16", "--outdir", tmp, "--awg-dir", os.path.join(tmp, "Waveforms")],
+                            awg, scope, mod)
+        with np.load(state, allow_pickle=True) as zz:
+            r15 = {k: zz[k] for k in zz.files}
+        lost = [k for k in z15 if k not in r15]
+        check(code is None and int(r15["iteration"]) == int(z["iteration"]) + 1, "one iteration saved")
+        check(not lost and str(r15["model"]) == "frf" and str(r15["early_note"]) == "kept"
+              and int(r15["corr_from"]) == 2, f"no key lost ({lost or 'all kept'})")
+        check("update uses the state's measured inverse" in out, "the update used the state's FRF")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

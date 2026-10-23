@@ -1004,14 +1004,16 @@ def main():
     scopemod = load_module(a.scope_grab, "scope_grab")
     _AWGMOD = load_module(a.awg_gui, "bk4063b_awg_gui")
 
-    # ---- target and loop: fresh from the model, or resumed from a state file
-    # the panel's keys every save carries through (run_ilc.PASS_THROUGH --
-    # not imported: run_ilc pulls in pandas, which this module avoids)
+    # ---- target and loop: fresh from the model, or resumed from a state file.
+    # A resumed save starts from EVERY key of the loaded state and replaces
+    # only what this run recomputes (run_ilc.carried -- not imported: run_ilc
+    # pulls in pandas, which this module avoids): a fixed list lost the
+    # panel's model / frf_* / scope_channels, the batch's corr_from, run ids,
+    # early-shot and optical keys (review G1-6).
     extra = {}
     if a.resume:
         st = {k: z for k, z in np.load(a.resume, allow_pickle=True).items()}
-        extra = {k: st[k] for k in ("base_target", "corr_total", "corrections",
-                                    "line_fit", "line_ref") if k in st}
+        extra = dict(st)
         line = (np.asarray(st["line_ref"], float).ravel()
                 if "line_ref" in st else None)
         if line is not None and line.size != len(st["t"]):
@@ -1077,7 +1079,20 @@ def main():
 
     if a.frf:
         loop.frf = ilc.FRF(a.frf, f_use=a.frf_use, f_max=a.frf_max)
+        extra.update(model="frf", frf_path=os.path.abspath(a.frf),
+                     frf_use=float(a.frf_use), frf_max=float(a.frf_max))
         print(f"update uses the measured inverse from {a.frf}")
+    elif a.resume and str(extra.get("model", "")) == "frf":
+        # the law the campaign was learning with, not the stored gain-only plant
+        fpath = str(extra.get("frf_path", "") or "")
+        if not fpath or not os.path.exists(fpath):
+            sys.exit(f"{a.resume} learns with a measured FRF "
+                     f"({fpath or 'no frf_path recorded'}) that is not on this "
+                     f"machine -- pass --frf <FRF.CSV> to name it")
+        kw = {k: float(extra[s]) for k, s in (("f_use", "frf_use"), ("f_max", "frf_max"))
+              if s in extra}
+        loop.frf = ilc.FRF(fpath, **kw)
+        print(f"update uses the state's measured inverse {fpath}")
 
     limit = getattr(_AWGMOD, "MAX_ARB_NAME", 11)
     if len(stem) + 4 > limit:                        # "_i00" is four more
@@ -1089,16 +1104,17 @@ def main():
           f"{len(v)} points at {dt*1e6:.3f} us")
 
     def save_state(iteration, u_now):
-        np.savez(state_path, t=t, target=v, u=u_now, dt=dt, channel=ch.name,
-                 gain=loop.plant.gain, tau=loop.plant.tau,
-                 offset=loop.plant.offset, tau2=loop.plant.tau2,
-                 fn=loop.plant.fn, zeta=loop.plant.zeta,
-                 full_scale=full_scale, name=stem, gamma=loop.gamma,
-                 f_cut=loop.f_cut, iteration=iteration, t_offset=t_off,
-                 history=np.array(loop.history, dtype=object),
-                 seed_path=seed_path, target_path=target_path,
-                 notches=np.asarray(loop.notches, float).reshape(-1, 2),
-                 **extra)
+        rec = dict(extra)
+        rec.update(t=t, target=v, u=u_now, dt=dt, channel=ch.name,
+                   gain=loop.plant.gain, tau=loop.plant.tau,
+                   offset=loop.plant.offset, tau2=loop.plant.tau2,
+                   fn=loop.plant.fn, zeta=loop.plant.zeta,
+                   full_scale=full_scale, name=stem, gamma=loop.gamma,
+                   f_cut=loop.f_cut, iteration=iteration, t_offset=t_off,
+                   history=np.array(loop.history, dtype=object),
+                   seed_path=seed_path, target_path=target_path,
+                   notches=np.asarray(loop.notches, float).reshape(-1, 2))
+        np.savez(state_path, **rec)
 
     # ---- instruments
     awg = make_awg(_AWGMOD)
