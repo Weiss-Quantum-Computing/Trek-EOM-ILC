@@ -318,6 +318,22 @@ def main():
             check(len(ups) == 1, "output ON and a yes: uploaded")
         finally:
             ilc_bench.make_awg = saved_make
+
+        print("[14] the CLI reads the scope at >= 2.2 points per record sample by default (G1-5)")
+        shutil.copy(FIXTURE, state)
+        awg, scope, mod = sim_bench()
+        awg.apply_channel(1, {"BSWV": {"FRQ": 1.0 / period}})
+        awg.set_output(1, True)
+        asked = []
+        real_wf = scope.waveform
+        scope.waveform = lambda ch, points_mode="RAW", points=None: (asked.append(points),
+                                                                      real_wf(ch, points_mode, points))[1]
+        code, out = run_cli(["--resume", state, "--awg-ch", "1", "--scope-ch", "3", "--iterations", "0",
+                             "--repeats", "16", "--outdir", tmp, "--awg-dir", os.path.join(tmp, "Waveforms")],
+                            awg, scope, mod)
+        want = ilc_bench.scopeio.scope_points_for(2.2 * len(z["t"]))
+        check(code is None and asked and all(p == want for p in asked),
+              f"alignment and capture both read {want} points ({len(asked)} reads)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

@@ -947,7 +947,9 @@ def main():
                     help="expected SRATE, only meaningful under TrueArb; under DDS "
                          "the record is resampled into one period and the point "
                          "grid is not literal")
-    ap.add_argument("--points", type=int, default=None, help="scope transfer points")
+    ap.add_argument("--points", type=int, default=None,
+                    help="scope transfer points (default: >= 2.2 per record sample, "
+                         "scope_points_for)")
     ap.add_argument("--wait", type=float, default=30.0)
     ap.add_argument("--model", default="resonant", choices=plantmod.MODELS)
     ap.add_argument("--gamma", type=float, default=0.6)
@@ -1131,6 +1133,11 @@ def main():
             sys.exit("\nRefusing to upload. Fix the setup in the GUI, or pass --skip-checks.")
 
     os.makedirs(a.outdir, exist_ok=True)
+    # the readout depth: >= 2.2 scope samples per grid step, as the panel and
+    # verify_alignment use. --points unset used to reach scope.waveform as
+    # None, read at the scope's default 5000 points -- 6.7 us apart on a
+    # 16667-point echo record, coarser than the 2 us grid (review G1-5)
+    pts = a.points or scopeio.scope_points_for(2.2 * len(t))
 
     uploaded_any = False
     u_played = None
@@ -1155,10 +1162,10 @@ def main():
             if k == k0:
                 time.sleep(0.5)          # let the new upload start playing
                 verify_alignment(scope, a.drive_scope_ch or a.awg_ch,
-                                 u, t, t_off, a.wait, points=a.points)
+                                 u, t, t_off, a.wait, points=pts)
 
             y = capture(scope, [a.scope_ch], f"CH{a.scope_ch}", t, t_off,
-                        repeats=a.repeats, wait_s=a.wait, points=a.points)
+                        repeats=a.repeats, wait_s=a.wait, points=pts)
             np.save(os.path.join(a.outdir, f"meas_{name}.npy"), y)
 
             m = loop.metrics(y)
