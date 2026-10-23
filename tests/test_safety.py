@@ -254,6 +254,12 @@ def main():
         at = lambda x, f0: float(spec(x)[np.argmin(abs(f9 - f0))])
         check(at(u9n, 150e3) < 0.05 * at(u9, 150e3), f"150 kHz seed content cut {at(u9, 150e3)/max(at(u9n, 150e3), 1e-12):.0f}x")
         check(abs(at(u9n, 5e3) - at(u9, 5e3)) <= 0.01 * at(u9, 5e3) + 1e-9, "content at 5 kHz untouched")
+
+        print("[10] plateau: best_it is the iteration number after the run_id filter (G1-12)")
+        hist = [dict(peak_err_hv=20.0 - i, update_rms=0.1, run_id=1.0) for i in range(10)]
+        hist += [dict(peak_err_hv=9.0 + (0 if i == 3 else 1), update_rms=0.1, run_id=2.0) for i in range(7)]
+        p10 = ilc.plateau(hist, run_id=2.0)
+        check(p10 is not None and p10["best_it"] == 13, f"best_it {p10 and p10['best_it']} (the run's i13)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

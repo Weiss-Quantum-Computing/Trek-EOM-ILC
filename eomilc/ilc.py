@@ -706,17 +706,21 @@ def plateau(history: list, n: int = 5, tol: float = 0.15, run_id=None):
     median update over those `n` is not below the median of the `n` before
     by more than `tol`.  Needs n+1 entries carrying `update_rms`; returns
     None before that.  Otherwise a dict with `flat`, the two bests, the two
-    update medians, `best_it` (which iteration's drive was best) and `n`.
+    update medians, `best_it` (which iteration's drive was best: its index
+    in the FULL history, i.e. the iteration number, also after the run_id
+    filter) and `n`.
     """
-    history = [h for h in history if isinstance(h, dict)]
+    kept = [(i, h) for i, h in enumerate(history) if isinstance(h, dict)]
     if run_id is not None:
         # Only this bench run's entries: the first measurement after a
         # restart differs from the last of the previous run by the chain's
         # drift while the output was off, and a window straddling that
         # reads the jump as the loop's doing. Entries without a run id
         # (states from before 3 Sep 2026, manual steps) stay in.
-        history = [h for h in history
-                   if h.get("run_id") in (run_id, None)]
+        kept = [(i, h) for i, h in kept
+                if h.get("run_id") in (run_id, None)]
+    index = [i for i, _h in kept]                  # where each entry sat (review G1-12)
+    history = [h for _i, h in kept]
     peaks = [h.get("peak_err_hv") for h in history]
     upds = [h.get("update_rms") for h in history]
     k = len(upds)                                  # trailing run that has it
@@ -733,7 +737,7 @@ def plateau(history: list, n: int = 5, tol: float = 0.15, run_id=None):
             and upd_recent >= (1 - tol) * upd_before)
     return dict(flat=bool(flat), n=int(n), best_recent=best_recent,
                 best_before=best_before, upd_recent=upd_recent,
-                upd_before=upd_before, best_it=int(np.argmin(peaks)),
+                upd_before=upd_before, best_it=int(index[int(np.argmin(peaks))]),
                 best=float(min(peaks)))
 
 
