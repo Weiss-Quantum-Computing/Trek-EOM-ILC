@@ -260,6 +260,19 @@ def main():
         hist += [dict(peak_err_hv=9.0 + (0 if i == 3 else 1), update_rms=0.1, run_id=2.0) for i in range(7)]
         p10 = ilc.plateau(hist, run_id=2.0)
         check(p10 is not None and p10["best_it"] == 13, f"best_it {p10 and p10['best_it']} (the run's i13)")
+
+        print("[11] a 0 Hz correction band is refused, not applied as zero (G1-13)")
+        try:
+            corrmod.lowpass(np.ones(100), 1e-6, 0.0)
+            check(False, "lowpass(f_cut=0) refused")
+        except ValueError:
+            check(True, "lowpass(f_cut=0) refused")
+        c11 = corrmod.Correction(t=tt, delta=np.zeros_like(tt), sigma=None, meta={})
+        try:
+            corrmod.gate(c11, tt, loop9.target * 1000.0, corrmod.GateSettings(band_hz=0.0))
+            check(False, "gate(band_hz=0) refused")
+        except ValueError:
+            check(True, "gate(band_hz=0) refused")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

@@ -188,7 +188,11 @@ def check_target(meta, target_out, dt):
 # ----------------------------------------------------------------- filters
 def lowpass(x, dt, f_cut):
     """Zero-phase low-pass: cosine roll-off from 0.7 f_cut to f_cut, on the
-    record mirrored so its ends do not wrap into each other."""
+    record mirrored so its ends do not wrap into each other. f_cut <= 0 is
+    refused: it divided by zero into NaN, which shrink() then made a silent
+    zero correction (review G1-13)."""
+    if not (np.isfinite(f_cut) and f_cut > 0):
+        raise ValueError(f"low-pass corner {f_cut!r} Hz: must be > 0")
     x = np.asarray(x, float)
     n = len(x)
     ext = np.r_[x, x[::-1]]
@@ -317,6 +321,9 @@ def gate(corr: Correction, t_grid, base_out, settings: GateSettings,
         notes.append(("note", f"resampled from {grid_dt*1e6:.3g} us onto the "
                               f"{dt*1e6:.3g} us record grid"))
     band = float(settings.band_hz)
+    if not (np.isfinite(band) and band > 0):
+        raise ValueError(f"correction band {settings.band_hz!r} Hz: it must be > 0 "
+                         f"(0 Hz would apply a silently zero correction)")
     fb = corr.meta.get("band_hz")
     if isinstance(fb, (int, float)) and fb > 0 and fb < band:
         band = float(fb)
