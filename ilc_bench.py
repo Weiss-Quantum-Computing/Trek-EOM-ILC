@@ -32,9 +32,14 @@ only:
 
   * uploads a waveform into user memory and selects it,
   * arms the scope and reads a trace back,
-  * switches the driven channel's output OFF when a run that actually played
-    something ends -- off is the harmless direction, and a finished run must
-    not leave the chain driving.
+  * PARKS the driven channel when a run that actually played something ends
+    (finished, refused, failed or Ctrl-C): a flat record at the drive's idle
+    (its first sample, same length, so FRQ still fits) is uploaded as
+    PARK1/PARK2 and selected, and the output is left as it is. It never
+    switches an output OFF on its own: either output may feed a stage that
+    drives high (-4 to -5.7 kV) when its input floats (memory
+    awg-trek-safety, never-float). --outputs-off-at-end switches it OFF
+    instead, after a typed confirmation at the start that names the channel.
 
 Before the first upload it VERIFIES the channel is configured the way the drive
 file assumes, and refuses to run if it is not.  A mismatch here silently
@@ -312,6 +317,24 @@ def as_float(x):
         return float(x)
     except (TypeError, ValueError):
         return None
+
+
+# the park records' AWG names, by channel -- eomilc.optical.PARK_NAMES by crystal
+PARK_NAMES = {"EO1": "PARK1", "EO2": "PARK2"}
+
+
+def park_output(awg, awg_ch, u, full_scale=10.0, name=None):
+    """The never-float stop (memory awg-trek-safety): upload a flat record at
+    the idle of `u` (its first sample) with u's length -- so the channel's
+    FRQ still fits it -- under `name` (default PARK<awg_ch>) and select it.
+    The output's ON/OFF state is not touched. Returns (name, idle V)."""
+    u = np.asarray(u, float).ravel()
+    if u.size < 2 or not np.isfinite(u[0]):
+        raise ValueError(f"no finite idle to park at (first sample {u[:1]})")
+    park = np.full_like(u, u[0])
+    name = name or f"PARK{awg_ch}"
+    upload_drive(awg, awg_ch, name, park, full_scale)
+    return name, float(u[0])
 
 
 def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
@@ -958,7 +981,17 @@ def main():
                          "check (default: same number as --awg-ch)")
     ap.add_argument("--skip-checks", action="store_true",
                     help="upload without verifying the channel setup. Don't.")
+    ap.add_argument("--outputs-off-at-end", action="store_true",
+                    help="switch the driven output OFF at the end instead of parking it "
+                         "(its input then floats: only with the stage it feeds bypassed; "
+                         "asks for a typed OFF first)")
     a = ap.parse_args()
+    if a.outputs_off_at_end:
+        print(f"--outputs-off-at-end: AWG CH{a.awg_ch} will be switched OFF when the run ends. "
+              f"Its input then floats -- a stage it feeds (X2's preconditioning stage) drives "
+              f"high. Only with that stage bypassed.")
+        if input(f"Type OFF to switch CH{a.awg_ch} off at the end: ").strip() != "OFF":
+            sys.exit("not confirmed; nothing was touched")
 
     global _AWGMOD
     scopemod = load_module(a.scope_grab, "scope_grab")
@@ -1095,6 +1128,7 @@ def main():
     os.makedirs(a.outdir, exist_ok=True)
 
     uploaded_any = False
+    u_played = None
     try:
         for k in range(k0, k0 + a.iterations + 1):
             rep = loop.check(u)
@@ -1104,7 +1138,7 @@ def main():
 
             name = f"{stem}_i{k:02d}"                    # <= MAX_ARB_NAME
             n, frac = upload_drive(awg, a.awg_ch, name, u, full_scale)
-            uploaded_any = True
+            uploaded_any, u_played = True, u
             print(f"\niter {k}: uploaded {name} ({n} pts, {100*frac:.1f}% of DAC range, "
                   f"peak {np.abs(u).max():.4f} V)")
             outputs.write_awg_csv(os.path.join(a.outdir, f"drive_{name}.csv"), t, u)
@@ -1130,15 +1164,25 @@ def main():
                 u = loop.update(u, y)
                 save_state(k + 1, u)
     finally:
-        # A finished (or died) run leaves nothing driving the chain. Only if
-        # something was actually played: a run refused at the setup checks
-        # leaves the bench exactly as it found it.
-        if uploaded_any:
+        # A finished (or died) run leaves the channel parked at its idle with
+        # the output as it was (never-float). Only if something was actually
+        # played: a run refused at the setup checks leaves the bench exactly
+        # as it found it.
+        if uploaded_any and a.outputs_off_at_end:
             try:
                 awg.set_output(a.awg_ch, False)
-                print(f"CH{a.awg_ch} output OFF (end of run)")
+                print(f"CH{a.awg_ch} output OFF (end of run, --outputs-off-at-end)")
             except Exception as e:
                 print(f"could not switch CH{a.awg_ch} output off: {e}")
+        elif uploaded_any:
+            try:
+                pname, idle = park_output(awg, a.awg_ch, u_played, full_scale,
+                                          PARK_NAMES.get(ch.name))
+                print(f"CH{a.awg_ch} parked (end of run): plays {pname}, flat at its idle "
+                      f"{idle:+.3f} V; output left as it is")
+            except Exception as e:
+                print(f"CH{a.awg_ch}: PARK FAILED ({type(e).__name__}: {e}) -- output left as it "
+                      f"is (never-float); switch it OFF by hand only with its stage bypassed")
         # both closes leave the shared ResourceManager standing (make_awg /
         # make_scope), so the order no longer matters
         awg.close()

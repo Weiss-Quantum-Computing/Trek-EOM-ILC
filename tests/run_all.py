@@ -44,7 +44,8 @@ LANES = {
                 ("protocol", "tests/test_protocol.py", []),
                 ("protocol-sr760", "tests/test_protocol_sr760.py", []),
                 ("optical", "tests/test_optical.py", ["TARGETS"]),
-                ("tools", "tests/test_tools.py", ["TARGETS"])],
+                ("tools", "tests/test_tools.py", ["TARGETS"]),
+                ("safety", "tests/test_safety.py", [])],
 }
 PASS_MARKS = ("ALL CHECKS PASSED", "failure(s)", "CHECKS PASSED", "checks passed", "scope files OK",
               "All 87 checks", "All 56 checks", "All 41 checks")
