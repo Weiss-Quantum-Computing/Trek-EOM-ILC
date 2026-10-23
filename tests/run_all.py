@@ -46,14 +46,18 @@ LANES = {
                 ("optical", "tests/test_optical.py", ["TARGETS"]),
                 ("tools", "tests/test_tools.py", ["TARGETS"]),
                 ("safety", "tests/test_safety.py", [])],
+    # joshimk's fine-tune package: its own unittest suite, run as it is
+    "finetune": [("finetune", "-m unittest", ["discover", "eomilc_polarization_finetune/tests"])],
 }
-PASS_MARKS = ("ALL CHECKS PASSED", "failure(s)", "CHECKS PASSED", "checks passed", "scope files OK",
+PASS_MARKS = ("ALL CHECKS PASSED", "failure(s)", "CHECKS PASSED", "checks passed", "scope files OK", "Ran ",
               "All 87 checks", "All 56 checks", "All 41 checks")
 FAIL_MARKS = ("Traceback", "AssertionError", "FAILED", "  FAIL ", "Error:")
 
 
 def run_one(name, script, args, targets, quiet, out):
-    argv = [PY, os.path.join(HERE, script)] + [targets if a == "TARGETS" else a for a in args]
+    # "-m <module>" runs a module (python -m unittest discover ...), else a script path
+    head = script.split() if script.startswith("-m ") else [os.path.join(HERE, script)]
+    argv = [PY] + head + [targets if a == "TARGETS" else a for a in args]
     if "TARGETS" in args and not (targets and os.path.isdir(targets)):
         out[name] = ("skipped", 0.0, "no targets folder given")
         return
