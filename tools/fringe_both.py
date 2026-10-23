@@ -14,6 +14,14 @@ splitting them would need different shapes per channel and answers a question
 production does not ask.
 
     python tools/fringe_both.py --peak-hv 5400
+
+SAFETY (review G1-34, 15 Oct 2026). Before anything is switched on, each
+channel must pass ilc_bench.check_awg_channel (FRQ = 1/(N dt), AMP 20 Vpp,
+OFST ~0, DDS), hold a fringe_sweep waveform (FRSW*; the generator cannot
+read its samples back, so the name is what is checked), and the raised
+cosine fringe_sweep builds for --peak-hv on that channel must pass the
+limit check. An output that is OFF is switched ON only after a typed ON
+that names it. Outputs are left ON at the end (never-float).
 """
 import argparse, json, os, sys, time
 import numpy as np
@@ -24,6 +32,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 import ilc_bench as ib
 import fringe_sweep as fs
+from eomilc import ilc
 from eomilc import polarimetry as pol
 from eomilc.config import CHANNELS, HV_PER_MON
 
@@ -51,8 +60,9 @@ def main():
 
     t_grid, u1, _ = fs.build(a.peak_hv, CHANNELS["EO1"].gain(5.0))
 
-    awg = ib.make_awg(ib.load_module(
-        os.path.join(sib, "BK4063B-AWG-GUI", "bk4063b.py"), "bk4063b"))
+    ib._AWGMOD = ib.load_module(
+        os.environ.get("AWG_GUI", os.path.join(sib, "BK4063B-AWG-GUI", "bk4063b.py")), "bk4063b")
+    awg = ib.make_awg(ib._AWGMOD)
     awg.connect()
     try:
         for c in (1, 2):
@@ -63,10 +73,30 @@ def main():
                   % (c, b.get("WVTP"), nm, b.get("AMP"), per * 1e3, awg.is_on(c)))
             if abs(per - len(t_grid) * fs.DT) > 1e-6:
                 raise SystemExit("CH%d period is wrong -- fix before driving" % c)
+            problems, _notes = ib.check_awg_channel(awg, c, full_scale=fs.FULL_SCALE,
+                                                    expect_period=len(t_grid) * fs.DT)
+            if problems:
+                raise SystemExit("CH%d setup: %s -- fix before driving" % (c, "; ".join(problems)))
+            if not str(nm or "").upper().startswith("FRSW"):
+                raise SystemExit("CH%d holds %r, not a fringe_sweep waveform (FRSW*): "
+                                 "upload it with fringe_sweep.py first" % (c, nm))
+            ch = CHANNELS["EO%d" % c]
+            g = ch.gain(5.0)
+            _t, u_c, _v = fs.build(a.peak_hv, g)
+            rep = ilc.check_limits(u_c, u_c * g, fs.DT, ch, ch.limits)
+            print("  CH%d limit check (the --peak-hv %.0f V raised cosine): %s" % (c, a.peak_hv, rep))
+            if not rep:
+                raise SystemExit("CH%d: the drive for --peak-hv %.0f V fails the limit check"
+                                 % (c, a.peak_hv))
         was_on = {c: awg.is_on(c) for c in (1, 2)}
-        for c in (1, 2):
-            if not was_on[c]:
-                awg.set_output(c, True)
+        off = [c for c in (1, 2) if not was_on[c]]
+        if off:
+            names = " and ".join("CH%d" % c for c in off)
+            print("  %s OFF: switching ON drives the Trek(s) with the selected waveforms." % names)
+            if input("  Type ON to switch %s on: " % names).strip() != "ON":
+                raise SystemExit("not confirmed; %s left OFF" % names)
+        for c in off:
+            awg.set_output(c, True)
         time.sleep(0.5)
         print("  outputs now:", {c: awg.is_on(c) for c in (1, 2)})
     finally:
