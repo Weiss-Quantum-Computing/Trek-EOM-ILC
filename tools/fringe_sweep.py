@@ -136,8 +136,9 @@ def main():
             # (CH2 sat at 10.602 ms for the Schroeder set) would stretch this
             # record and put the fringe on the wrong voltage axis.
             f_rec = 1.0 / (N * DT)
-            n = awg.upload_arb(a.awg_ch, f"FRSW{a.label}"[:11],
-                               u / FULL_SCALE, normalize=False, freq=f_rec)
+            # upload_drive refuses a peak past full scale (upload_arb clips it)
+            n, _frac = ib.upload_drive(awg, a.awg_ch, f"FRSW{a.label}"[:11], u,
+                                       FULL_SCALE, freq=f_rec)
             bs = awg.get_basic_wave(a.awg_ch)
             per = float(str(bs.get("PERI", "nan")).rstrip("Ss"))
             if abs(per - N * DT) > 1e-6:

@@ -465,6 +465,19 @@ def main():
         off = tool("awg_outputs_off")
         code, _o = run_main(lambda: off.main(ask=lambda q: "no"), ["awg_outputs_off.py"])
         check(code is not None and "not confirmed" in str(code), "awg_outputs_off without a typed OFF: nothing touched")
+
+        print("[21] the lab tools upload through upload_drive: past full scale is refused, not clipped (G1-35)")
+        for name in ("filter_check", "frf_optical", "fringe_sweep", "nulltest", "ringdown"):
+            src = open(os.path.join(HERE, "tools", name + ".py"), encoding="utf-8").read()
+            check("upload_arb(" not in src and "ib.upload_drive(" in src, f"tools/{name}.py: no raw upload_arb")
+        awg21, _s21, _m21 = sim_bench()
+        n, _f = ilc_bench.upload_drive(awg21, 1, "FRQTEST", np.zeros(10), 10.0, freq=90.0)
+        check(n == 10, "upload_drive passes freq= through")
+        try:
+            ilc_bench.upload_drive(awg21, 1, "BIG", np.full(10, 10.5), 10.0, freq=90.0)
+            check(False, "a 10.5 V drive refused")
+        except ValueError:
+            check(True, "a 10.5 V drive refused")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

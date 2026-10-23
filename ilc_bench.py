@@ -337,12 +337,13 @@ def park_output(awg, awg_ch, u, full_scale=10.0, name=None):
     return name, float(u[0])
 
 
-def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
+def upload_drive(awg, ch, name, u_awg, full_scale=10.0, freq=None):
     """Upload a drive in volts, using a FIXED mapping to the DAC.
 
     u/full_scale lands in -1..+1, uploaded with normalize=False, so a change of
     one millivolt between iterations is a change of one millivolt at the output
-    -- not a change that gets normalised away.
+    -- not a change that gets normalised away. `freq`, when given, goes with
+    the upload (upload_arb's FREQ: the tools that set FRQ with an OFF output).
     """
     u_awg = np.asarray(u_awg, float)
     if u_awg.size == 0 or not np.all(np.isfinite(u_awg)):
@@ -362,7 +363,8 @@ def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
         raise ValueError(f"waveform name {name!r} is {len(name)} chars; the 4063B "
                          f"stores it as {name}.bin and locks its front panel past "
                          f"{limit + 4} stored characters, so the cap is {limit}")
-    n = awg.upload_arb(ch, name, u_awg / full_scale, normalize=False)
+    kw = {} if freq is None else {"freq": freq}
+    n = awg.upload_arb(ch, name, u_awg / full_scale, normalize=False, **kw)
     return n, peak / full_scale
 
 

@@ -293,8 +293,9 @@ def main():
                 raise SystemExit(f"AWG CH{a.awg_ch} output is ON -- refusing to "
                                  f"upload into a live channel")
             f_rec = 1.0 / (N * DT)
-            n = awg.upload_arb(a.awg_ch, f"FRF{a.label}"[:11],
-                               u / FULL_SCALE, normalize=False, freq=f_rec)
+            # upload_drive refuses a peak past full scale (upload_arb clips it)
+            n, _frac = ib.upload_drive(awg, a.awg_ch, f"FRF{a.label}"[:11], u,
+                                       FULL_SCALE, freq=f_rec)
             bs = awg.get_basic_wave(a.awg_ch)
             per = float(str(bs.get("PERI", "nan")).rstrip("Ss"))
             if abs(per - N * DT) > 1e-6:

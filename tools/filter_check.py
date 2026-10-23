@@ -76,8 +76,9 @@ def main():
         try:
             if awg.is_on(a.awg_ch) is not False:
                 raise SystemExit(f"AWG CH{a.awg_ch} is ON -- refusing to upload")
-            n = awg.upload_arb(a.awg_ch, f"FILT{a.label}"[:11], u / FULL_SCALE,
-                               normalize=False, freq=1.0 / (N * DT))
+            # upload_drive refuses a peak past full scale (upload_arb clips it)
+            n, _frac = ib.upload_drive(awg, a.awg_ch, f"FILT{a.label}"[:11], u,
+                                       FULL_SCALE, freq=1.0 / (N * DT))
             b = awg.get_basic_wave(a.awg_ch)
             print(f"uploaded {n} pts, period {b.get('PERI')}, amp {b.get('AMP')}")
         finally:
