@@ -173,8 +173,8 @@ the parametric model from each iteration's own data as it steps.
    channel is set up the way the drive file assumes (AMP 20 Vpp, OFST ~0,
    DDS, HRES, enough repeats) and **refuses** on any mismatch — fix the
    setup rather than ticking *skip setup checks*. If the channel's output
-   is OFF it asks — a yes switches it ON for the run (and OFF again at the
-   end); a no cancels with nothing changed. On the first iteration it also
+   is OFF it asks — a yes switches it ON for the run (it stays ON at the
+   end, parked); a no cancels with nothing changed. On the first iteration it also
    cross-checks the trigger alignment against the drive it just uploaded
    and refuses if `t-offset` looks stale.
 5. Each iteration: upload → 64 HRES singles averaged in software (progress
@@ -183,8 +183,12 @@ the parametric model from each iteration's own data as it steps.
 6. **Stop** finishes cleanly: a stop mid-capture discards only that
    iteration; the state on disk is whatever was last completed. When any
    run that actually played something ends — finished, stopped, or died —
-   the driven channel's **output switches OFF** automatically; a run
-   refused at the setup checks leaves the bench exactly as it found it.
+   the driven channel is **parked**: a flat record at the drive's idle
+   (`PARK1` / `PARK2`, same length, so FRQ still fits) is uploaded and the
+   output is left ON (never-float: either output may feed a stage that
+   drives high when its input floats). The panel never switches an output
+   OFF on its own; Optical step 7 does, after asking. A run refused at the
+   setup checks leaves the bench exactly as it found it.
 7. **Hold** re-measures a drive — the *current* one, or any stored
    iteration typed in the **iter** box — `runs` times with `gap between runs s`
    between measurements, **without ever updating** — for thermalisation
@@ -194,7 +198,7 @@ the parametric model from each iteration's own data as it steps.
    iterations and from the 64 *repeats* averaged inside every single
    measurement. The state and iteration counter are untouched; repeated
    holds keep counting runs up. Setup checks, the output-ON confirmation
-   and the output-OFF-at-end policy all apply as in the bench loop.
+   and the park-at-end policy all apply as in the bench loop.
 
 ### Both chains at once (pair mode)
 
@@ -225,7 +229,8 @@ both moving; the batch has always trained them together. Tick **Pair
    frozen acquisition** on every shot (the offset dither on both), then for
    each chain: metrics, noise floor, stats sidecar, model check, update with
    its own loop, state saved, drive files written. Log lines carry `X1` /
-   `X2` in front. Both outputs go OFF at the end. **Hold** re-measures both
+   `X2` in front. Both outputs are parked at the end (ON, flat at their
+   idles). **Hold** re-measures both
    drives the same way, runs numbered per chain.
 
    **The PD rides along.** With a PD channel in the Scope channels map the
@@ -393,8 +398,8 @@ The **Model** combobox selects what the update divides the error by:
    survive the average of H, and read as *coherent* -- and at the top of the
    band, where the monitor tone is a tenth of a millivolt, it is what limits H.
 3. It writes `run\frf_<name>.csv`, points the **FRF** field at it, and
-   draws the FRF tab. Output OFF at the end; the probe stays the AWG's
-   selected waveform until the next bench upload or Auto-set.
+   draws the FRF tab. Parked at the end (flat at the session drive's idle,
+   output ON; a shortened record's FRQ is put back under that flat park).
 4. On the FRF tab, find where coherence dies. Set **taper to zero at**
    (`f_max`) at or below the last coherent tone, **full strength to**
    (`f_use`) ≈ ⅔ of it. Never taper past the measured band — and as of
@@ -625,7 +630,7 @@ leave this off there.
 |---|---|
 | **subtract the measured ripple…** *(state)* | Takes the fitted ripple out of every measurement before the update and the error metrics (`Loop.line`, state key `line_ref`, honoured by the CLIs too). The Error tabs show the error the loop acts on. Refuses (asks) when the fit's shots were not phase-coherent. |
 | **line Hz / harmonics / window ms** *(config)* | 60 Hz and 5 harmonics by default; the window of the bench measurement (100 ms = 6 periods — the record itself, ~11 ms, cannot tell 60 Hz from a slow drift, which is why it is measured separately). |
-| **Measure (drive off)** | Bench: AWG output OFF (asks if it is on, leaves it off), scope widened to the window on the same trigger (restored after), 8–32 dithered shots of the monitor, harmonics fitted to the mean, per-shot phase coherence reported (≥ 0.7 = line-synchronous). Times out with a hint if the scope triggers on the drive itself. |
+| **Measure (drive off)** | Bench: the drive PARKED -- a flat record at its idle with the output ON, what the chain sees between bursts (asks if the output is on; with it OFF the reference is taken off), scope widened to the window on the same trigger (restored after), 8–32 dithered shots of the monitor, harmonics fitted to the mean, per-shot phase coherence reported (≥ 0.7 = line-synchronous). Times out with a hint if the scope triggers on the drive itself. |
 | **Fit from captures…** | Offline: Scope Grab CSV/NPZ captures of the monitor (column = *monitor col*), drive off — or any capture whose undriven stretches are named in **fit only in ms** (`-12:0, 10:16.5`). Must use the same trigger as the ILC runs. Short stretches fit badly (the log says when). |
 | **Clear** | Forgets the fit and switches the subtraction off. |
 
@@ -654,8 +659,8 @@ leave this off there.
 | **keep verticals** *(config, Bench settings…)* | Auto-set leaves the scope's V/div and offset as they are (it still sets FRQ, AMP, OFST, load, burst, timebase and HRES, and prints the verticals it found). Tick it for a session whose target span differs from the campaign it is compared against — an edited endpoint, say — so the 8-bit lattice stays the same; untick and Auto-set re-ranges both channels from the session's own spans. |
 | **Upload `<stem>_iNN` to AWG** | Uploads the session's current drive into the generator's user memory and selects it — the manual-workflow counterpart of what the bench loop does each iteration, at the same fixed ±full-scale mapping (never normalised). Asks before overwriting a stored waveform of the same name; no dialog when the name is free. Warns in the log when the output is live (the new waveform plays the moment it is selected). |
 | **Auto-set instruments** | Writes the known-good setup from the session's own numbers: AWG arb frequency = 1/period, AMP = 2× full scale, OFST 0, DDS, load HZ, NCYC-1 EXT burst, and the session's current waveform selected if it is already in the generator's user memory (it never uploads — that is the bench loop's or the AWG GUI's job); scope window 1.3× the period (waveform at the left edge), HRES, verticals from the drive/target spans. Refuses on a live output; never switches outputs or touches the trigger. Waveform and burst readbacks are printed — believe those, not the writes. |
-| **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) switches it OFF on exit — off is the harmless direction, and a finished run must not leave the chain driving. |
-| **Run bench loop (X1 + X2)** *(pair mode)* | The same loop on both chains: both drives uploaded each iteration (CH1 X1, CH2 X2), one question for both outputs ON, alignment checked on each chain with a CmdXn channel, both monitors read from the **same** acquisition on every shot with the offset dither, then per chain the metrics, noise floor, stats sidecar, model check, update with its own model, limit check, state and drive files — `meas_<stem>X1_iNN.npy` and `…X2…` side by side. Log lines start `X1` / `X2`. Both outputs OFF at the end. The two states must share one grid (refused otherwise). *keep native-rate avg* is not kept in pair mode (the log says so). Auto-set sets both AWG channels and both chains' verticals and refuses while either output is ON; Hold re-measures both drives (the **iter** box applies to both) from one acquisition per shot. |
+| **Run / Stop** | Run executes upload → capture → update per iteration, saving state each time. If the channel's output is OFF, a confirmation dialog offers to switch it ON for the run — ON always asks, and a no cancels cleanly. Stop is graceful: between shots or iterations; a stop mid-capture discards only that iteration, and the state on disk is the last completed one. Any run that played something (or that switched the output on) ends parked: a flat record at the drive's idle, the output left ON (never-float). |
+| **Run bench loop (X1 + X2)** *(pair mode)* | The same loop on both chains: both drives uploaded each iteration (CH1 X1, CH2 X2), one question for both outputs ON, alignment checked on each chain with a CmdXn channel, both monitors read from the **same** acquisition on every shot with the offset dither, then per chain the metrics, noise floor, stats sidecar, model check, update with its own model, limit check, state and drive files — `meas_<stem>X1_iNN.npy` and `…X2…` side by side. Log lines start `X1` / `X2`. Both outputs parked at the end (ON, flat at their idles). The two states must share one grid (refused otherwise). *keep native-rate avg* is not kept in pair mode (the log says so). Auto-set sets both AWG channels and both chains' verticals and refuses while either output is ON; Hold re-measures both drives (the **iter** box applies to both) from one acquisition per shot. |
 
 | **Hold (runs / gap between runs s / iter)** | Re-measures the current drive `runs` times, `gap between runs s` apart, with **no update and no state change** — the thermalisation probe. Runs are tagged `iter k rN`, saved as `meas_<stem>_iNN_rMM.npy`, and numbered on from any earlier holds of the same iteration. Same setup checks, output confirmation and output-off-at-end as the bench loop; Stop works between shots and during the gap. The **iter** box picks which stored iteration to hold: blank is the current drive; a number loads that iteration's `drive_<stem>_iNN.csv` from beside the state, uploads it under its own name and tags the runs to it (`iter 9 r1…`), so an earlier drive can be re-measured without Init — which would restart the campaign at i00 under the same names. When a run lands, the panel ticks **runs** and adds the held iteration to the **Iterations** box if either would have hidden it, and says so in the log. |
 
@@ -725,9 +730,9 @@ another pair starts the steps over.
 | **gain** *(config)* | The fraction of the correction applied (0.7: the statistical sigma is small, leg-to-leg and up/down differences are not in it). |
 | **Apply to the targets** | `eomilc.optical.apply_correction` on each loop with the file held for its crystal (EO1's to X1, EO2's to X2; a chain with no file held is left alone), gated with the Corrections tab's limits (k sigma, floor, cap, end fade; active-only is off for these files, the light after the ramp being part of what is corrected, so the whole record is kept and faded 200 µs at the ends) at the band of the comparison the file came from, on top of the session's base target and layers — a file in the same slot **replaces** the last, because light − monitors is a fresh estimate of the whole error every time (moving the target moves the monitors with the light). Solo files take the `optical` slot at gain 1, each crystal's own error in full. A joint verification's files applied afterwards go beside them in their own slot (`joint2`, `joint3`, …) as the joint file **minus each crystal's split share of what is already applied on both** (`eomilc.optical.joint_residual_files`; the joint file says what the whole correction should be, not what is left): zero where the joint error is just the sum of the crystals' own, and otherwise the share the solo scans could not see. The log says which crystal's file came from which scan and which slot it went to. All or nothing: a refusal on either puts the other back, logs the notes and says why in a dialog. The base targets are kept in the states, the moved ones are saved, and the Corrections tab lists the shown session's layer. No confirmation: the step is the confirmation. |
 | **iterations** *(config)* | Iterations of Learn (5); repeats, trigger timeout and the skip tick are the Run tab's. |
-| **Learn** | The pair bench loop (§5) on the corrected targets with the outputs **already ON**: nothing is asked, an output found OFF refuses the run before anything is uploaded, and the outputs stay ON when it ends — finished, stopped or at a failed limit check (only a run that dies switches them OFF). It uploads both keepers, so afterwards both play (a parked chain is unparked). |
+| **Learn** | The pair bench loop (§5) on the corrected targets with the outputs **already ON**: nothing is asked, an output found OFF refuses the run before anything is uploaded, and the outputs stay ON when it ends — finished, stopped or at a failed limit check (a run that dies parks them, still ON). It uploads both keepers, so afterwards both play (a parked chain is unparked). |
 | **Verify (scan + compare)** | Needs both playing (step 1 with *both*, or Learn): the verification is always a **joint** scan, the light the atoms get. A scan named `<scan>_verify` (a solo scan's `_X1` / `_X2` dropped: `<stem>_optN_verify`, then `_verify2`, …) with the same settings, its comparison, and a before / after table in the log: per leg the ramp-top and first-ms-after-the-fall extremes of light − target, its rms, the ramp-top light − monitors, and the correction peaks. The Optical plot tab's *before / after* view draws the magnitudes; the status line says whether every leg's ramp-top light − target **halved**. Without a joint *before* (a pass measured one crystal at a time) there is no table: the log says so, the verdict lines stand alone and become the next pass's before. The verification then serves as the next pass's comparison: Apply takes its correction (replacing the last), Learn, Verify again — or measure each crystal alone again. |
-| **Outputs OFF (both)** | Both outputs OFF; the Bench line and the state line say so. Where every Optical session ends. |
+| **Outputs OFF (both)** | Asks first (the inputs then float: only with every stage they feed bypassed), then both outputs OFF; the Bench line and the state line say so. The one place the panel switches an output OFF. |
 | **Settings…** *(config)* | *points per shot* (20000) and beside it *sample us* (2.0): points blank = the screen span / sample spacing, computed by `optical.scan` (2 µs matches the ILC grid, so the light is read on the loop's own spacing whatever the record length); a number reads out that many points and the spacing is not used. *reference every* (a return to the reference angle every N steps, 9), *settle s* (before the first shot, bench only), *preset* (a polarimeter preset written before the scan; blank = none), *hold-null angles* (extra angles around the hold's null, from each target's peak: 90° × peak / V90 per crystal), *comparison figures* (the polarimeter's fig1–5 PNGs beside the comparison). |
 
 ## 11. Learned target corrections (the outer loop)

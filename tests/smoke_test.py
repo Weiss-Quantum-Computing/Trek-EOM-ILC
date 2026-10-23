@@ -2208,18 +2208,23 @@ try:
     assert all(_scope57.settings[f":CHANnel{c}:OFFSet"] != "0.0" for c in (2, 3, 4))
     assert _scope57.settings[":CHANnel1:OFFSet"] == "0.0"                    # the PD is not a chain's
 
-    # two iterations of the pair loop: one question, both ON, both OFF at the end
+    # two iterations of the pair loop: one question, both ON, both PARKED (still
+    # ON, flat at their idles) at the end -- never switched OFF (never-float)
     app.iters_var.set("2")
     app.repeats_var.set("16")
     app.wait_var.set("5")
     app.skip_var.set(False)
     app.keepnative_var.set(False)
     _n57 = len(_asked57)
+    _ev57 = len(_awg57.log)               # from here on the panel's own switching only
     _shots0 = _scope57.shots
     app.do_bench()
     _pump57()
     assert _asked57[_n57:] == ["Outputs are OFF"], _asked57[_n57:]
-    assert not _awg57.is_on(1) and not _awg57.is_on(2)
+    assert _awg57.is_on(1) and _awg57.is_on(2)
+    assert _awg57.ch[1]["name"] == "PARK1" and _awg57.ch[2]["name"] == "PARK2"
+    assert all(float(np.ptp(_awg57.ch[_c]["wave"])) == 0.0 for _c in (1, 2))
+    assert not any(e[0] == "output" and not e[2] for e in _awg57.log[_ev57:])
     assert not any(e[0] == "FRQ_UNDER_LIVE_OUTPUT" for e in _awg57.log)
     # one frozen acquisition per shot serves both monitors: 3 measurements x
     # 16 shots, plus X1's alignment shot (X2 has no CmdX2 channel)
@@ -2236,7 +2241,7 @@ try:
         assert _st["history"][-1]["model"] == {"X1": "3rd order", "X2": "2nd order"}[_k]
     _log57 = app.log_text.get("1.0", "end")
     assert re.search(r"^X2\s+error: peak", _log57, re.M) and re.search(r"^X1\s+error: peak", _log57, re.M)
-    assert "CH1 and CH2 output OFF (end of run)" in app.run_state.cget("text")
+    assert "CH1 and CH2 parked at idle (end of run)" in app.run_state.cget("text")
 
     # the shown switch: the Error plot redraws from the other session
     app.itersel_var.set("")
@@ -2267,8 +2272,9 @@ try:
     _shots0 = _scope57.shots
     app.do_hold()
     _pump57()
-    assert _asked57[_n57:] == ["Outputs are OFF"], _asked57[_n57:]
-    assert _scope57.shots - _shots0 == 16 and not _awg57.is_on(1) and not _awg57.is_on(2)
+    assert _asked57[_n57:] == [], _asked57[_n57:]         # still ON from the run: no question
+    assert _scope57.shots - _shots0 == 16 and _awg57.is_on(1) and _awg57.is_on(2)
+    assert _awg57.ch[1]["name"] == "PARK1" and _awg57.ch[2]["name"] == "PARK2"
     for _k, _s in app.pair.items():
         assert os.path.exists(os.path.join(ilc_gui.RUN_DIR, f"meas_{_s.stem}_i02_r01.npy"))
         assert _s.iteration == 2 and int(_ri57.load_state(_s.state_path)["iteration"]) == 2
@@ -2308,7 +2314,8 @@ try:
     app.do_bench()
     _pump57()
     assert app.session.iteration == 1 and os.path.exists(os.path.join(ilc_gui.RUN_DIR, "meas_SNGL_i01.npy"))
-    assert _scope57.shots - _shots0 == 2 * 16 + 1 and not _awg57.is_on(1)
+    assert _scope57.shots - _shots0 == 2 * 16 + 1 and _awg57.is_on(1) and _awg57.ch[1]["name"] == "PARK1"
+    assert not any(e[0] == "output" and not e[2] for e in _awg57.log[_ev57:])
     assert not any(e[1] == 2 and e[2].startswith("SNGL") for e in _awg57.log if e[0] == "upload")
 finally:
     _mb57.askyesno, _mb57.showerror, _mb57.showinfo, ilc_gui.AWG_WAVEFORMS = _saved57
@@ -2317,7 +2324,7 @@ finally:
 print("[57] pair mode: X1/X2 Init from one target name (a name with no X1 refused), each "
       "state with its own model; Auto-set refused with an output ON, then both channels; "
       "two pair iterations from one acquisition per shot (49 shots), both meas + stats "
-      "written, both at i02, outputs OFF; the shown switch redraws the Error plot from X2; "
+      "written, both at i02, outputs parked ON; the shown switch redraws the Error plot from X2; "
       "pair Hold (16 shots, both r01); X2's own Fit to FRF; Load brings both back; untick -> "
       "single mode runs as before")
 
@@ -3067,7 +3074,8 @@ try:
     _shots0 = _scope61.shots
     app.do_bench()
     _pump61()
-    assert not _awg61.is_on(1) and not _awg61.is_on(2)
+    assert _awg61.is_on(1) and _awg61.is_on(2) and _awg61.ch[1]["name"] == "PARK1"
+    assert not any(e[0] == "output" and not e[2] for e in _awg61.log)
     assert _scope61.shots - _shots0 == 2 * 16 + 1, _scope61.shots - _shots0    # the PD costs no shot
     _pdf = [os.path.join(ilc_gui.RUN_DIR, f"meas_PAIRPD_i{_i:02d}.npy") for _i in (0, 1)]
     assert all(os.path.exists(_f) and os.path.exists(_dg61.stats_path(_f)) for _f in _pdf), _pdf

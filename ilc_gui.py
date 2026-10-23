@@ -909,7 +909,8 @@ class BatchWindow:
             "AWG CH1/CH2 drive X1/X2; scope CH1/CH2 read the drives, CH3/CH4 the "
             "monitors. Close the AWG GUI and Scope Grab first.\n"
             "Set AMP/OFST/load/burst once (Auto-set); the batch only checks them. "
-            "Outputs go ON after one confirmation, OFF between campaigns.\n"
+            "Outputs go ON after one confirmation and stay ON: between campaigns "
+            "and at the end they park flat at the idle.\n"
             "Double-click a campaign to load its state (the followed channel) "
             "in the panel. Simulate writes to run/sim, never to run.\n"
             "Preview draws every campaign's targets on the Batch plot tab; with "
@@ -1762,8 +1763,8 @@ class App:
         ttk.Button(more, text="Bench settings...", command=self.do_bench_settings).pack(
             side="left", fill="x", expand=True, padx=(4, 0))
         ttk.Label(tab_run, text="Close the AWG GUI and Scope Grab first (both hold "
-                                "VISA). Outputs switch OFF when a run that played "
-                                "anything ends.",
+                                "VISA). A run that played anything ends parked: "
+                                "flat at the drive's idle, the output left ON.",
                   foreground="#666666", wraplength=470, justify="left").pack(
             fill="x")
 
@@ -2685,8 +2686,10 @@ class App:
         self._refresh_summary()
 
     def do_line_measure(self):
-        """Bench: the monitor with the drive OFF, on the run's own trigger,
-        over a window of several line periods, ripple fitted."""
+        """Bench: the monitor with the drive parked (a flat record at its
+        idle, output ON -- what the chain sees between bursts, and never-
+        float), on the run's own trigger, over a window of several line
+        periods, ripple fitted."""
         if self.session is None:
             return messagebox.showerror("Line ripple",
                                         "load or init a session first -- the "
@@ -2708,26 +2711,37 @@ class App:
                                f"is 6 at 60 Hz)")
         reps = max(8, min(int(f["repeats"]), 32))
         t_off = self.session.t_off
+        sess = self.session
         self.run_worker(lambda: self._line_measure_work(
             int(f["awg_ch"]), int(f["scope_ch"]), reps, f["wait"],
-            f["f_line"], int(f["harm"]), f["win"] * 1e-3, t_off),
-            "measuring line ripple, drive off...")
+            f["f_line"], int(f["harm"]), f["win"] * 1e-3, t_off, sess),
+            "measuring line ripple, drive parked...")
 
     def _line_measure_work(self, awg_ch, scope_ch, repeats, wait_s, f_line,
-                           harmonics, win_s, t_off):
+                           harmonics, win_s, t_off, s=None):
         awg, scope = self._connect_pair()
         tb, shots, t0 = {}, [], None
+        how = "drive off"
         try:
             if awg.is_on(awg_ch):
                 if not self.ask_user(
                         "Line ripple",
                         f"AWG CH{awg_ch} output is ON. The reference is the "
-                        f"monitor with the drive OFF -- switch the output off "
-                        f"now? (It stays off afterwards, as after any run.)"):
-                    print("line ripple NOT measured: the output was left on")
+                        f"monitor with the drive PARKED: a flat record at its "
+                        f"idle, the output left ON (never-float) -- what the "
+                        f"chain sees between bursts. Park CH{awg_ch} now? "
+                        f"(The next run uploads its drive again.)"):
+                    print("line ripple NOT measured: the drive was left playing")
                     return
-                awg.set_output(awg_ch, False)
-                print(f"CH{awg_ch} output OFF")
+                s = s or self.session
+                if awg_ch not in self._park_outputs(
+                        awg, {awg_ch: (s.u, s.full_scale, s.loop.channel.name)},
+                        "line-ripple reference"):
+                    print("line ripple NOT measured: the park did not take")
+                    return
+                how = "drive parked at its idle"
+            else:
+                print(f"CH{awg_ch} output is OFF: the reference is taken with it off")
             for k in (":TIMebase:REFerence", ":TIMebase:RANGe", ":TIMebase:POSition"):
                 tb[k] = scope.get(k)
             scope.put(":TIMebase:REFerence", "CENTer")
@@ -2771,7 +2785,7 @@ class App:
             print("instruments closed")
         fit, meta = self._fit_line_shots(t0 - t_off, np.asarray(shots),
                                          f_line, harmonics, None)
-        meta["source"] = f"bench, drive off, CH{scope_ch}"
+        meta["source"] = f"bench, {how}, CH{scope_ch}"
         self.msgs.put(("call", lambda: self._set_line_fit(fit, meta)))
 
     def do_line_from_files(self, files=None):
@@ -5452,12 +5466,8 @@ class App:
             print(f"hold finished: state untouched, iteration still {it}")
         finally:
             if played or switched_on:
-                try:
-                    awg.set_output(awg_ch, False)
-                    print(f"CH{awg_ch} output OFF (end of hold)")
-                    self._bench_note(f"CH{awg_ch} output OFF (end of hold)")
-                except Exception as e:
-                    print(f"could not switch CH{awg_ch} output off: {e}")
+                self._park_outputs(awg, {awg_ch: (u, s.full_scale, s.loop.channel.name)},
+                                   "end of hold")
             awg.close()
             scope.close()
             print("instruments closed")
@@ -5593,6 +5603,7 @@ class App:
         awg, scope = self._connect_pair()
         uploaded_any = False
         switched_on = False
+        u_played = None
         try:
             problems, notes = ilc_bench.check_awg_channel(
                 awg, awg_ch, full_scale=s.full_scale,
@@ -5636,7 +5647,7 @@ class App:
                 wname = f"{s.stem}_i{k:02d}"
                 n, frac = ilc_bench.upload_drive(awg, awg_ch, wname, u,
                                                  s.full_scale)
-                uploaded_any = True
+                uploaded_any, u_played = True, u
                 print(f"\niter {k}: uploaded {wname} ({n} pts, "
                       f"{100*frac:.1f}% of DAC range, peak {np.abs(u).max():.4f} V)")
                 s.u = u
@@ -5682,17 +5693,15 @@ class App:
                     s.iteration = k + 1
                     save_session(s)
         finally:
-            # a finished (or died) run leaves nothing driving the chain --
-            # but a run refused at the setup checks leaves the bench as
-            # found. "Played anything OR we switched it on" covers the gap
-            # where the on-switch succeeded and the first upload did not.
+            # a finished (or died) run leaves the chain parked at the idle of
+            # what it played, output left ON (never-float) -- but a run
+            # refused at the setup checks leaves the bench as found. "Played
+            # anything OR we switched it on" covers the gap where the
+            # on-switch succeeded and the first upload did not.
             if uploaded_any or switched_on:
-                try:
-                    awg.set_output(awg_ch, False)
-                    print(f"CH{awg_ch} output OFF (end of run)")
-                    self._bench_note(f"CH{awg_ch} output OFF (end of run)")
-                except Exception as e:
-                    print(f"could not switch CH{awg_ch} output off: {e}")
+                self._park_outputs(
+                    awg, {awg_ch: (u_played if u_played is not None else s.u,
+                                   s.full_scale, s.loop.channel.name)}, "end of run")
             # both closes leave the shared ResourceManager standing
             awg.close()
             scope.close()
@@ -6278,11 +6287,12 @@ class App:
         finally:
             w.flush()
 
-    def _ensure_outputs_on(self, awg, chans, until="Switched OFF again when the run ends."):
+    def _ensure_outputs_on(self, awg, chans, until="They stay ON when the run ends, parked "
+                                                   "flat at the drives' idle (never-float)."):
         """_ensure_output_on for several channels with ONE question.
         Returns (proceed, the channels this call switched on); the caller's
-        cleanup switches every played channel off regardless. `until` is
-        the question's last line: when the outputs go OFF again."""
+        cleanup parks every played channel regardless (_park_outputs).
+        `until` is the question's last line: what happens at the end."""
         off = [c for c in chans if not awg.is_on(c)]
         if not off:
             return True, []
@@ -6305,8 +6315,46 @@ class App:
         self._bench_note(f"{names} output ON")
         return True, done
 
+    def _park_outputs(self, awg, parks, why):
+        """Worker side, the never-float end of a run (memory awg-trek-safety:
+        either output may feed a stage that drives high when its input
+        floats): each channel of `parks` ({awg ch: (drive, full scale,
+        channel name)}) plays a flat record at its drive's idle -- same
+        length, so FRQ still fits (ilc_bench.park_output, AWG names
+        PARK1/PARK2) -- and its output is left as it is. The panel never
+        switches an output OFF on its own: Optical step 7 does, after
+        asking. A park that fails is reported and that output left alone.
+        Returns the channels parked."""
+        done = []
+        for c in sorted(parks):
+            u, fs, cname = parks[c]
+            try:
+                name, idle = ilc_bench.park_output(awg, c, u, fs, ilc_bench.PARK_NAMES.get(cname))
+                done.append(c)
+                print(f"CH{c} parked ({why}): plays {name}, flat at its idle {idle:+.3f} V; "
+                      f"output {'ON' if awg.is_on(c) else 'OFF'}, left as it is")
+            except Exception as e:
+                print(f"CH{c}: PARK FAILED ({why}): {type(e).__name__}: {e} -- output left as "
+                      f"it is (never-float); switch it OFF by hand only with its stage bypassed")
+        if done:
+            self._bench_note(" and ".join(f"CH{c}" for c in done) + f" parked at idle ({why})")
+            self._opt_mark_outputs("parked", why)
+        return done
+
+    def _pair_parks(self, ss, wires, chans):
+        """_park_outputs' map for pair runs: each channel's crystal, parked at
+        the idle of what it last played (else its session's drive)."""
+        out = {}
+        for k in PAIR_KEYS:
+            c = wires[k]["awg_ch"]
+            if c in chans:
+                u = (self._pair_playing.get(k) or {}).get("u")
+                out[c] = (ss[k].u if u is None else u, ss[k].full_scale, ss[k].loop.channel.name)
+        return out
+
     def _outputs_off(self, awg, chans, why):
-        """Worker side: the played channels OFF, each on its own."""
+        """Worker side: the played channels OFF, each on its own -- only for
+        an explicit, confirmed act (Optical step 7). Runs end parked."""
         done = []
         for c in sorted(set(chans)):
             try:
@@ -6563,8 +6611,8 @@ class App:
             # except the Optical tab's Learn, which ends with the light still
             # on unless it died
             if (played or switched) and not (keep_on and finished):
-                self._outputs_off(awg, set(played) | set(switched),
-                                  "Learn died" if keep_on else "end of run")
+                self._park_outputs(awg, self._pair_parks(ss, wires, set(played) | set(switched)),
+                                   "Learn died" if keep_on else "end of run")
             elif keep_on and played:
                 print("outputs left ON for the Optical steps (OFF at step 7)")
             awg.close()
@@ -6695,7 +6743,8 @@ class App:
             print("hold finished: states untouched")
         finally:
             if played or switched:
-                self._outputs_off(awg, set(played) | set(switched), "end of hold")
+                self._park_outputs(awg, self._pair_parks(ss, wires, set(played) | set(switched)),
+                                   "end of hold")
             awg.close()
             scope.close()
             print("instruments closed")
@@ -6781,7 +6830,7 @@ class App:
         5: "the pair loop learns the moved targets; the outputs stay ON",
         6: "a second scan and comparison; before / after in the log and on "
            "the Optical plot tab",
-        7: "both outputs OFF -- where every session ends",
+        7: "both outputs OFF -- asks first (their inputs float); runs end parked",
     }
     # the before / after rows, per leg (eomilc.optical.verdict's keys)
     OPT_ROWS = (("top_lt_mdeg", "ramp top, light - target"),
@@ -7268,7 +7317,8 @@ class App:
                                             self._refresh_optical())))
         finally:
             if switched and not ok_end:
-                self._outputs_off(awg, switched, "Play keepers failed")
+                self._park_outputs(awg, self._pair_parks(ss, wires, set(switched)),
+                                   "Play keepers failed")
             awg.close()
             scope.close()
             print("instruments closed")
@@ -7768,6 +7818,15 @@ class App:
         if w is None:
             return
         chans = [w[k]["awg_ch"] for k in PAIR_KEYS]
+        names = " and ".join(f"CH{c}" for c in chans)
+        if not messagebox.askyesno(
+                "Outputs OFF",
+                f"Switch {names} OFF?\n\nTheir inputs then float, and a stage "
+                f"they feed (X2's preconditioning stage) drives its output "
+                f"high (-4 to -5.7 kV). Only with every such stage bypassed.\n\n"
+                f"Every run already ends parked (flat at the idle, outputs ON).",
+                parent=self.root):
+            return
 
         def work():
             awg, scope = self._connect_pair()
@@ -8397,13 +8456,15 @@ class App:
             lp = plan["loop"]
             if not messagebox.askyesno("Run the batch on the bench", (
                     f"{len(todo)} campaign(s): {', '.join(todo)}\n\n"
-                    f"For each one: both AWG outputs OFF, FRQ set, both drives "
-                    f"uploaded and the channel setup checked (AMP, OFST, load, "
-                    f"burst), then CH1 and CH2 switched ON to drive both Treks, "
-                    f"trained for up to {lp['max_iterations']} iterations, and "
-                    f"switched OFF again before the next.\n\n"
+                    f"For each one: a live output parked flat at its idle, FRQ "
+                    f"set, both drives uploaded and the channel setup checked "
+                    f"(AMP, OFST, load, burst), then CH1 and CH2 switched ON "
+                    f"(if they are not already) to drive both Treks, trained "
+                    f"for up to {lp['max_iterations']} iterations, and parked "
+                    f"again before the next. The outputs are never switched "
+                    f"OFF (never-float).\n\n"
                     + (f"At most ~{est/3600:.1f} h (from Check plan). " if est else "")
-                    + "Stop ends it at the next shot: outputs off, states "
+                    + "Stop ends it at the next shot: outputs parked ON, states "
                     "kept, and running again resumes.\n\n"
                     "Switch the outputs ON for this batch?"), parent=w.win):
                 return
@@ -9072,15 +9133,13 @@ class App:
             self.msgs.put(("call", lambda: self._adopt_frf(path)))
         finally:
             if uploaded or switched_on:
-                try:
-                    awg.set_output(awg_ch, False)
-                    print(f"CH{awg_ch} output OFF (end of run)")
-                    self._bench_note(f"CH{awg_ch} output OFF (end of run)")
-                except Exception as e:
-                    print(f"could not switch CH{awg_ch} output off: {e}")
+                # parked on the session's record length at its drive's idle:
+                # a flat record plays the same at any FRQ, so the FRQ restore
+                # below happens under it, never under the probe
+                self._park_outputs(awg, {awg_ch: (s.u, s.full_scale, s.loop.channel.name)},
+                                   "end of run")
             if retune:
-                # output is off again -- put the bench back the way the
-                # session's drives expect it
+                # put the bench back the way the session's drives expect it
                 try:
                     missed = awg.apply_channel(
                         awg_ch, {"BSWV": {"FRQ": 1.0 / t_sess}},
@@ -9251,14 +9310,15 @@ class App:
     def _ensure_output_on(self, awg, awg_ch):
         """Worker-side: switching ON is the direction that puts voltage into
         something, so it asks first. Returns (proceed, we_switched_it_on);
-        the caller's cleanup switches it back off regardless of who did."""
+        the caller's cleanup parks it regardless of who did (_park_outputs)."""
         if awg.is_on(awg_ch):
             return True, False
         if not self.ask_user(
                 "Output is OFF",
                 f"CH{awg_ch} output is OFF, and the measurement needs it "
                 f"driving.\n\nTurn CH{awg_ch} ON and run?\n\n"
-                f"(It is switched OFF again when the run ends.)"):
+                f"(It stays ON when the run ends, parked flat at the drive's "
+                f"idle: never-float.)"):
             print(f"run cancelled: CH{awg_ch} output left OFF")
             return False, False
         awg.set_output(awg_ch, True)
