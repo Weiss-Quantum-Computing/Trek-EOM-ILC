@@ -3409,7 +3409,8 @@ class App:
                         # including on the exception path.
                         out.flush()
             except (SystemExit, ilc_bench.Refused) as e:   # a bench helper's refusal
-                self.msgs.put(("log", f"ABORTED: {e}"))
+                # the class too, so a refusal is told from a stray sys.exit (G1-32)
+                self.msgs.put(("log", f"ABORTED ({type(e).__name__}): {e}"))
             except Exception:
                 self.msgs.put(("log", traceback.format_exc()))
             finally:
