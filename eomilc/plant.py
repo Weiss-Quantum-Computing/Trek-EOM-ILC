@@ -72,6 +72,10 @@ class Plant:
         calling this on measured data -- raw 8-bit scope grass through d2/dt2
         will bury the correction.  `Loop.update` does exactly that.
         """
+        # tau, tau2, then the resonance: the reverse of forward()'s order.
+        # Harmless -- all three are LTI and commute -- but a port to a
+        # non-commuting form must keep each the inverse of its own stage
+        # (review G1-14).
         u = np.asarray(x, float) / self.gain
         if self.tau > 0:
             u = u + self.tau * np.gradient(u, self.dt)
