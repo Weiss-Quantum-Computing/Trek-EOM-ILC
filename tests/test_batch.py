@@ -699,7 +699,10 @@ def main():
         finally:
             ilc_batch.read_waveform = read0
         c = man["campaigns"]["S25"]
-        check(c["status"] == "refused" and "only 0 of 6 shots were read" in c.get("error", ""),
+        # the alignment check reads through the same retry now (G1-22), so it is
+        # the first to refuse when every read fails
+        check(c["status"] == "refused" and ("only 0 of 6 shots were read" in c.get("error", "")
+                                            or "could not be read" in c.get("error", "")),
               f"reads that keep failing refuse the campaign ({c.get('error', '')[:60]})")
 
         print("[17] the progress tracker: fraction, elapsed and time left from synthetic events")
@@ -912,6 +915,42 @@ def main():
               and rows and all("pd_peak_v" not in r and r["shots"] == 6 and not r["early"] for r in rows)
               and not any(m.startswith("  PD:") for m in msgs),
               f"no PD role: done, no PD files, {len(rows)} records of 6 shots, no PD lines")
+
+        print("[18] the alignment check re-reads a bad block; a clipped monitor refuses (G1-22, G1-23)")
+        path18 = write_plan(tmp, ["S25"], name="t18", max_iterations=2, min_iterations=1)
+        raw = json.load(open(path18))
+        raw["run_dir"] = os.path.join(tmp, "run18")
+        json.dump(raw, open(path18, "w"))
+        awg18, scope18 = bench()
+        wf0 = scope18.waveform
+        bad = {"n": 0}
+
+        def bad_first_drive_read(channel, points_mode="RAW", points=None):
+            if channel in (1, 2) and bad["n"] == 0:      # the alignment check's first read
+                bad["n"] += 1
+                raise ValueError("invalid literal for int() with base 10: b''")
+            return wf0(channel, points_mode, points)
+        scope18.waveform = bad_first_drive_read
+        msgs = []
+        man = ilc_batch.run_batch(ilc_batch.load_plan(path18), args(), log=msgs.append, bench=(awg18, scope18))
+        check(bad["n"] == 1 and man["campaigns"]["S25"]["status"] == "done"
+              and any("alignment X1: drive starts" in m for m in msgs),
+              f"one bad alignment block: re-read, campaign {man['campaigns']['S25']['status']}")
+        raw["run_dir"] = os.path.join(tmp, "run18b")
+        json.dump(raw, open(path18, "w"))
+        awg18b, scope18b = bench()
+        put0 = scope18b.put
+
+        def narrow(scpi, value):                    # every monitor screen a quarter of what was asked
+            if scpi in (":CHANnel3:SCALe", ":CHANnel4:SCALe"):
+                value = f"{float(value) / 4:.6g}"
+            put0(scpi, value)
+        scope18b.put = narrow
+        msgs = []
+        man = ilc_batch.run_batch(ilc_batch.load_plan(path18), args(), log=msgs.append, bench=(awg18b, scope18b))
+        c18 = man["campaigns"]["S25"]
+        check(c18["status"] == "refused" and "clipped" in c18.get("error", ""),
+              f"monitors past the screen: refused ({c18.get('error', '')[:80]})")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

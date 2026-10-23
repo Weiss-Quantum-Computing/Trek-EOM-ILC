@@ -803,7 +803,15 @@ def check_alignment(scope, runs, plan, log=print):
                 f"Scope channels map (the drive is not read back)")
             continue
         pts = scopeio.scope_points_for(2.2 * len(cr.t))
-        got[cr.key] = scope.waveform(cr.wiring["drive_ch"], points=pts)
+        # with the capture's retry: one bad block (~1 in 30 on the bench)
+        # must not abandon the campaign (review G1-22); reads that keep
+        # failing refuse it, as the capture's do
+        try:
+            got[cr.key] = read_waveform(scope, cr.wiring["drive_ch"], pts)
+        except Exception as e:
+            scope.run()
+            raise BatchError(f"alignment check: scope CH{cr.wiring['drive_ch']} could not be read "
+                             f"({type(e).__name__}: {e})") from e
     scope.run()
     for cr in runs:
         if cr.key not in got:
@@ -886,6 +894,20 @@ def capture_monitors(scope, runs, plan, log=print, stop=None, repeats=None):
     if pd is not None:
         stacks["PD"] = []
     dropped = 0
+    # the monitors' screens, for the clipping check: a shot whose samples
+    # reach within one ADC code of +/-4 div of that shot's offset read the
+    # rail, not the chain, and the loop would learn the clipped error
+    # (review G1-23; the verticals come from the target span + 12.5 %)
+    screen = {}
+    for cr in runs:
+        c = cr.wiring["mon_ch"]
+        sc = scope.try_get(f":CHANnel{c}:SCALe")
+        off = scope.try_get(f":CHANnel{c}:OFFSet")
+        try:
+            screen[cr.key] = (c, float(sc), float(off))
+        except (TypeError, ValueError):
+            log(f"  CH{c}: clipping check SKIPPED -- the scope did not answer SCALe / OFFSet")
+    dith = {c: (off0, span) for c, off0, span in plan_d}
     try:
         for i in range(repeats):
             _stopped(stop)
@@ -916,6 +938,20 @@ def capture_monitors(scope, runs, plan, log=print, stop=None, repeats=None):
                 scope.run()
                 continue
             scope.run()
+            for cr in runs:
+                if cr.key not in screen:
+                    continue
+                c, sc, off = screen[cr.key]
+                if c in dith:
+                    off0, span = dith[c]
+                    off = off0 + span * ((i + 0.5) / repeats - 0.5)
+                edge = (4.0 - ADC_CODE_PER_VDIV) * sc
+                vs = np.asarray(shot[cr.key][1], float)
+                if vs.size and (vs.max() >= off + edge or vs.min() <= off - edge):
+                    raise BatchError(
+                        f"{cr.key} monitor CH{c} clipped on repeat {i+1}: {vs.min():+.4g}..{vs.max():+.4g} V "
+                        f"against a {sc:g} V/div screen at offset {off:+.4g} V -- the shot overshoots the "
+                        f"verticals set from the target; widen CH{c} (or the first shot) and run again")
             for cr in runs:
                 ts, vs = shot[cr.key]
                 stacks[cr.key].append(scopeio.resample(np.asarray(ts), np.asarray(vs), cr.t, t_offset=cr.t_off))
