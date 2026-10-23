@@ -3408,7 +3408,7 @@ class App:
                         # sitting in the writer's buffer and thrown away --
                         # including on the exception path.
                         out.flush()
-            except SystemExit as e:      # ilc_bench helpers refuse via sys.exit
+            except (SystemExit, ilc_bench.Refused) as e:   # a bench helper's refusal
                 self.msgs.put(("log", f"ABORTED: {e}"))
             except Exception:
                 self.msgs.put(("log", traceback.format_exc()))

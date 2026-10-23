@@ -367,6 +367,13 @@ def upload_drive(awg, ch, name, u_awg, full_scale=10.0):
 
 
 # ------------------------------------------------------------------- scope
+class Refused(RuntimeError):
+    """A bench helper's refusal (the alignment check): the CLI turns it into
+    its exit message, the panel's run_worker into 'ABORTED: ...'. Raised
+    rather than sys.exit, which a worker thread's `except Exception` would
+    not catch (review G1-8)."""
+
+
 def verify_alignment(scope, drive_ch, u, t_grid, t_off, wait_s, points=None):
     """One shot of the DRIVE channel, cross-correlated against the drive we
     just uploaded. A stale --t-offset poisons every measurement invisibly -- a
@@ -384,20 +391,20 @@ def verify_alignment(scope, drive_ch, u, t_grid, t_off, wait_s, points=None):
     """
     got = scope.single(wait_s=wait_s)
     if got is not True:
-        sys.exit("alignment check: no trigger -- is the burst running?")
+        raise Refused("alignment check: no trigger -- is the burst running?")
     ts, vs = scope.waveform(
         drive_ch, points=points or scopeio.scope_points_for(2.2 * len(t_grid)))
     scope.run()
     if float(np.ptp(vs)) < 0.5:
-        sys.exit(f"alignment check: scope CH{drive_ch} is flat -- is the AWG "
-                 f"output on, and is the drive really on that channel?")
+        raise Refused(f"alignment check: scope CH{drive_ch} is flat -- is the AWG "
+                      f"output on, and is the drive really on that channel?")
     dt = float(np.median(np.diff(t_grid)))
     meas = scopeio.measure_t_offset(ts, vs, u, dt)
     if abs(meas - t_off) > 10e-6:
-        sys.exit(f"alignment check: the drive on scope CH{drive_ch} starts at "
-                 f"{meas*1e6:+.1f} us, but t-offset says {t_off*1e6:+.1f} us. "
-                 f"Fix --t-offset (measured 0 on this bench) or the trigger "
-                 f"wiring before iterating.")
+        raise Refused(f"alignment check: the drive on scope CH{drive_ch} starts at "
+                      f"{meas*1e6:+.1f} us, but t-offset says {t_off*1e6:+.1f} us. "
+                      f"Fix --t-offset (measured 0 on this bench) or the trigger "
+                      f"wiring before iterating.")
     print(f"       alignment: drive starts {meas*1e6:+.1f} us, "
           f"t-offset {t_off*1e6:+.1f} us -- OK")
 
@@ -1191,6 +1198,8 @@ def main():
             if k < k0 + a.iterations:
                 u = loop.update(u, y)
                 save_state(k + 1, u)
+    except Refused as e:
+        sys.exit(str(e))                 # the finally below still parks
     finally:
         # A finished (or died) run leaves the channel parked at its idle with
         # the output as it was (never-float). Only if something was actually

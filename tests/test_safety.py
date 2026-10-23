@@ -353,6 +353,14 @@ def main():
         check(not lost and str(r15["model"]) == "frf" and str(r15["early_note"]) == "kept"
               and int(r15["corr_from"]) == 2, f"no key lost ({lost or 'all kept'})")
         check("update uses the state's measured inverse" in out, "the update used the state's FRF")
+
+        print("[16] verify_alignment raises Refused, not SystemExit (G1-8)")
+        awg, scope, mod = sim_bench()                # output OFF: the drive reads flat
+        try:
+            ilc_bench.verify_alignment(scope, 1, u7, np.asarray(z["t"], float), 0.0, 1.0)
+            check(False, "refused")
+        except ilc_bench.Refused as e:
+            check("flat" in str(e) and not isinstance(e, SystemExit), "Refused, a RuntimeError, says why")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
