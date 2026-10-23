@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Validate the ILC loop against a plant the model does NOT perfectly describe.
 
+SUPERSEDED (review G1-37, 15 Oct 2026): the truth below is the 2.2-3.0 kHz,
+zeta 0.21 resonance that the 25 Aug FRF probes showed to be a large-signal
+artefact of the ramp fits, so "converges here => converges on the bench" no
+longer holds. The current simulator is eomilc/simbench.py (the measured
+wide-probe FRFs, run/frf_WIDE_X1/X2.csv), used by `ilc_batch.py run
+--simulate`, the panel's simulated bench and the test suites. Kept for the
+record of the one-pole vs second-order comparison.
+
 The truth here is the SECOND-ORDER plant measured on 2026-08-21 -- perturbed in
 gain, fn and zeta by more than the sweep's own scatter -- driven through the
 measured scope quantisation and noise.  If the loop converges under these
