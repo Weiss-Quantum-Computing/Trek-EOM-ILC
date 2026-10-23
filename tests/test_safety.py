@@ -439,6 +439,32 @@ def main():
         check(r19["ok"] and abs(r19["deg"]) < 1e-9 and all(abs(a) < 10 for a in mount.asked),
               f"3600 deg goes as 0 ({r19['text']}; the mount was sent {mount.asked})")
         check(not r19n["ok"] and len(mount.asked) <= 2, "NaN refused before the mount is opened")
+
+        print("[20] tools/awg_park.py parks both channels, outputs untouched; awg_outputs_off asks (G1-36)")
+        import importlib.util
+
+        def tool(name):
+            spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, "tools", name + ".py"))
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            return m
+        park = tool("awg_park")
+        awg20, _s20, _m20 = sim_bench()
+        awg20.set_output(2, True)
+        n20 = len(awg20.log)
+        with contextlib.redirect_stdout(io.StringIO()):
+            park.main(["--state1", FIXTURE, "--idle2", "0.08"], awg=awg20)
+        ev = awg20.log[n20:]
+        check([e for e in ev if e[0] == "upload"] == [("upload", 1, "PARK1"), ("upload", 2, "PARK2")]
+              and not any(e[0] == "output" for e in ev), "PARK1 and PARK2 uploaded, no output switched")
+        check(abs(awg20.ch[1]["wave"][0] * 10 - float(z["u"][0])) < 1e-3 and abs(awg20.ch[2]["wave"][0] * 10 - 0.08) < 1e-3
+              and float(np.ptp(awg20.ch[1]["wave"])) == 0.0, "flat at the state's idle / the typed idle")
+        with contextlib.redirect_stdout(io.StringIO()):
+            park.main(["--on"], awg=awg20, ask=lambda q: "ON")
+        check(awg20.is_on(1) and awg20.is_on(2), "--on with a typed ON switches the OFF channel on, parked")
+        off = tool("awg_outputs_off")
+        code, _o = run_main(lambda: off.main(ask=lambda q: "no"), ["awg_outputs_off.py"])
+        check(code is not None and "not confirmed" in str(code), "awg_outputs_off without a typed OFF: nothing touched")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
