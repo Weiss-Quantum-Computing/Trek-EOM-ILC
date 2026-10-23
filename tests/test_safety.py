@@ -413,6 +413,32 @@ def main():
         finally:
             ilc_bench.make_awg = saved_ma
         check(r18b["ok"], "the simulated generator's row stays green")
+
+        print("[19] Move: the analyzer angle is wrapped and range-checked first (G1-3)")
+
+        class FakeMount:
+            def __init__(self):
+                self.pos, self.asked = 0.0, []
+            def goto(self, deg, tol=0.05, settle=0.0):
+                self.asked.append(deg)
+                self.pos = deg % 360.0
+            def move_by(self, d):
+                self.pos = (self.pos + d) % 360.0
+            def position(self):
+                return self.pos
+            def close(self):
+                pass
+        mount = FakeMount()
+        saved_open = ihw.open_ell14
+        ihw.open_ell14 = lambda cfg=None, pcfg=None: mount
+        try:
+            r19 = ihw.move_ell14(3600.0, pcfg={"ell_port": "COMX"}, log=lambda s: None)
+            r19n = ihw.move_ell14(float("nan"), pcfg={"ell_port": "COMX"}, log=lambda s: None)
+        finally:
+            ihw.open_ell14 = saved_open
+        check(r19["ok"] and abs(r19["deg"]) < 1e-9 and all(abs(a) < 10 for a in mount.asked),
+              f"3600 deg goes as 0 ({r19['text']}; the mount was sent {mount.asked})")
+        check(not r19n["ok"] and len(mount.asked) <= 2, "NaN refused before the mount is opened")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))

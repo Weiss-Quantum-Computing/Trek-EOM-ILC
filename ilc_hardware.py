@@ -299,6 +299,16 @@ def move_ell14(deg, cfg=None, pcfg=None, log=print):
     dict(ok, text, detail, deg, in_use): in_use True when the port did not open
     because another program holds it (the polarimeter window on COM3); the
     move is then refused with nothing touched."""
+    try:
+        asked = float(deg)
+    except (TypeError, ValueError):
+        asked = float("nan")
+    if asked != asked or asked in (float("inf"), float("-inf")):
+        return dict(ok=False, text=f"not an angle: {deg!r}", detail="", deg=float("nan"),
+                    in_use=False)
+    # on (-180, 180] before anything moves: a typed 3600 is 0, not 3597 on
+    # the fallback path (review G1-3)
+    deg = wrap_deg(asked)
     pcfg = polarimeter_config() if pcfg is None else pcfg
     port = ell_port(pcfg)
     try:
@@ -314,7 +324,9 @@ def move_ell14(deg, cfg=None, pcfg=None, log=print):
         got = wrap_deg(dev.position())
         miss = wrap_deg(got - float(deg))
         return dict(ok=True, text=f"moved to {got:+.2f} deg", deg=got, in_use=False,
-                    detail=f"asked {float(deg):+.2f} deg, read back {got:+.2f} deg "
+                    detail=f"asked {asked:+.2f} deg"
+                           + (f" (= {deg:+.2f})" if deg != asked else "")
+                           + f", read back {got:+.2f} deg "
                            f"({miss:+.3f} deg) on {port}, approached from below")
     except Exception as exc:
         r = _failed(exc, f"{port}: move failed: ")
