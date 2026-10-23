@@ -49,6 +49,10 @@ def write_bk_waveform(path: str, u_awg: np.ndarray, name: str,
     here drop straight into its `Waveforms` library and preview like any other.
     """
     u = np.asarray(u_awg, float).ravel()
+    if u.size == 0 or not np.all(np.isfinite(u)):
+        # `peak > 1.0` is False for NaN: a NaN drive was written as 'nan'
+        # lines into the AWG GUI's library (review G1-16)
+        raise ValueError(f"{name}: the drive has non-finite samples (NaN/inf); not written")
     s = u / full_scale
     peak = float(np.abs(s).max())
     if peak > 1.0:

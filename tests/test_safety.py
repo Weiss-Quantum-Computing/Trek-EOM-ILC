@@ -273,6 +273,14 @@ def main():
             check(False, "gate(band_hz=0) refused")
         except ValueError:
             check(True, "gate(band_hz=0) refused")
+
+        print("[12] write_bk_waveform refuses a NaN drive (G1-16)")
+        from eomilc import outputs
+        try:
+            outputs.write_bk_waveform(os.path.join(tmp, "nan.csv"), bad, "NAN", 10.0)
+            check(False, "refused")
+        except ValueError:
+            check(not os.path.exists(os.path.join(tmp, "nan.csv")), "refused, nothing written")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
