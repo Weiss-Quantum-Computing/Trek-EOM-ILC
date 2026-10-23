@@ -134,7 +134,10 @@ def code_fold(y, resid, code, nbins=24, sem_t=None, detrend_n=None):
     if detrend_n and int(detrend_n) > 1:
         k = int(detrend_n)
         pad = np.r_[np.full(k, resid[0]), resid, np.full(k, resid[-1])]
-        slow = np.convolve(pad, np.ones(k) / k, mode="same")[k:-k]
+        # centred for even k too (k + 1 taps, half-weight ends; review G1-29):
+        # mode="same" with an even boxcar sits half a sample off
+        ker = np.ones(k) / k if k % 2 else np.r_[0.5, np.ones(k - 1), 0.5] / k
+        slow = np.convolve(pad, ker, mode="same")[k:-k]
         resid = resid - slow
     phase = np.mod(y, code) / code
     idx = np.minimum((phase * nbins).astype(int), nbins - 1)
