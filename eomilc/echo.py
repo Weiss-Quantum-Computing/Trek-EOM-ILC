@@ -72,11 +72,12 @@ def awg_max_pts():
 def read_target(path):
     """(comment lines without '#', t_us, v) of an ILC target CSV."""
     comments = []
-    for line in open(path):
-        if line.startswith("#"):
-            comments.append(line[1:].strip())
-        elif line.strip():
-            break
+    with open(path) as fh:            # closed at the break, not by the GC (review G1-28)
+        for line in fh:
+            if line.startswith("#"):
+                comments.append(line[1:].strip())
+            elif line.strip():
+                break
     t, v = _card().read(path)
     return comments, t, v
 
