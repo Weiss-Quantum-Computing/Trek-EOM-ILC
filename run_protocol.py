@@ -401,6 +401,18 @@ def check_span_table(sr760_mod):
 
 # ------------------------------------------------------------------ manifest
 
+def _finished(sr760_mod, snap, state):
+    """{"finished": ...} for record_stats: a LINEAR average (AVGM 0) that set
+    its own completion bit (wait_done answered "done"). The count is then
+    capped at what NAVG and the overlap can hold -- the clock overcounts at
+    wide spans (Spectrum-grab review G7 SG-1; spectrum_grab.py passes the
+    same). A record_stats without the keyword (an older sr760.py) gets {}."""
+    import inspect
+    if "finished" not in inspect.signature(sr760_mod.record_stats).parameters:
+        return {}
+    return {"finished": state == "done" and sr760_mod.code_of(snap, "AVGM") == 0}
+
+
 def manifest_entry(path, spec: TraceSpec, snap, notes, mset: MeasurementSet,
                    pinned, v_dc, sr760_mod):
     """One segment, in the shape `load_segments` turns into a rin.Segment.
@@ -418,7 +430,8 @@ def manifest_entry(path, spec: TraceSpec, snap, notes, mset: MeasurementSet,
         sr760_mod.code_of(snap, "SPAN"), float(notes.get("measure time (s)", 0)),
         navg=sr760_mod.code_of(snap, "NAVG"),
         ovlp=sr760_mod.value_of(snap, "OVLP"),
-        averaged=sr760_mod.code_of(snap, "AVGO", 0) == 1)
+        averaged=sr760_mod.code_of(snap, "AVGO", 0) == 1,
+        **_finished(sr760_mod, snap, notes.get("measurement")))
     return {
         "path": os.path.basename(path),
         "label": spec.name(),
@@ -654,7 +667,8 @@ def run_set(mset: MeasurementSet, outdir, addr=None, navg_override=None,
                 sr.code_of(snap, "SPAN"), elapsed,
                 navg=sr.code_of(snap, "NAVG"),
                 ovlp=sr.value_of(snap, "OVLP"),
-                averaged=sr.code_of(snap, "AVGO", 0) == 1)))
+                averaged=sr.code_of(snap, "AVGO", 0) == 1,
+                **_finished(sr, snap, state))))
 
             freqs, amps, used_binary = an.trace(snap=snap, log=lambda m: log(m))
 

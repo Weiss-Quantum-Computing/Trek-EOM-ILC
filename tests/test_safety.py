@@ -489,6 +489,19 @@ def main():
         y22 = np.interp(tt22 - 1.234e-3, np.arange(len(u7)) * 2e-6, u7, left=u7[0], right=u7[-1])
         got22 = scopeio.measure_t_offset(tt22, y22, u7, 2e-6)
         check(abs(got22 - 1.234e-3) < 10e-6, f"a drive placed at 1234 us is found at {got22*1e6:.1f} us (the check allows 10 us)")
+
+        print("[23] run_protocol tells record_stats whether a linear average finished (SG-1 follow-up)")
+        import run_protocol
+        sr23 = types.SimpleNamespace(record_stats=lambda span, el, navg=None, ovlp=None, averaged=True,
+                                     finished=False: None,
+                                     code_of=lambda snap, key, default=None: snap.get(key, default))
+        check(run_protocol._finished(sr23, {"AVGM": 0}, "done") == {"finished": True}
+              and run_protocol._finished(sr23, {"AVGM": 1}, "done") == {"finished": False}
+              and run_protocol._finished(sr23, {"AVGM": 0}, "timeout") == {"finished": False},
+              "finished only for a linear average that reported done")
+        old23 = types.SimpleNamespace(record_stats=lambda span, el, navg=None, ovlp=None, averaged=True: None,
+                                      code_of=sr23.code_of)
+        check(run_protocol._finished(old23, {"AVGM": 0}, "done") == {}, "an older sr760 is not handed the keyword")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
