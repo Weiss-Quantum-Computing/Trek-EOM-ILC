@@ -130,6 +130,40 @@ def passthrough(state) -> dict:
     return {k: state[k] for k in PASS_THROUGH if k in state}
 
 
+def carried(state, **rewritten) -> dict:
+    """What a CLI save writes: EVERY key of the loaded state, with the ones
+    this save recomputes replaced. A batch or panel state carries keys the
+    CLI never sets (the batch's corr_from, the panel's model / frf_path /
+    frf_use / frf_max, scope_channels, run ids, the optical keys...); a save
+    that rebuilt the file from a fixed list dropped them, and a batch resume
+    then scored pre-correction iterations against the corrected target and
+    fell back to the plan's model (review G1-19 / G1-6, 15 Oct 2026)."""
+    out = dict(state)
+    out.update(rewritten)
+    return out
+
+
+def state_frf(state):
+    """The measured inverse a state says its loop learns with (model 'frf'
+    and its frf_path / frf_use / frf_max, as the panel and the batch save
+    them), or None for a parametric state. Raises when the state names an
+    FRF file that is not there: stepping it with the parametric plant
+    instead would silently change the update law."""
+    if str(state.get("model", "")) != "frf":
+        return None
+    path = str(state.get("frf_path", "") or "")
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError(
+            f"the state learns with a measured FRF ({path or 'no frf_path recorded'}) "
+            f"that is not on this machine -- pass --frf <FRF.CSV> to name it")
+    kw = {}
+    if "frf_use" in state:
+        kw["f_use"] = float(state["frf_use"])
+    if "frf_max" in state:
+        kw["f_max"] = float(state["frf_max"])
+    return ilc.FRF(path, **kw)
+
+
 def state_line(state):
     """The line ripple a state says to take out of every measurement
     (monitor V on the record grid), or None."""
@@ -211,9 +245,18 @@ def cmd_init(a):
 def cmd_step(a):
     st = load_state(a.state)
     loop = build_loop(st)
+    frf_keys = {}
     if a.frf:
         loop.frf = ilc.FRF(a.frf, f_use=a.frf_use, f_max=a.frf_max)
-        print(f"update uses the measured inverse from {a.frf} "
+        frf_keys = dict(model="frf", frf_path=os.path.abspath(a.frf),
+                        frf_use=float(a.frf_use), frf_max=float(a.frf_max))
+    else:
+        try:
+            loop.frf = state_frf(st)      # the law the campaign was learning with
+        except (OSError, ValueError, KeyError) as e:
+            sys.exit(str(e))
+    if loop.frf is not None:
+        print(f"update uses the measured inverse from {a.frf or st['frf_path']} "
               f"({loop.frf.f[0]:.0f}-{loop.frf.f[-1]:.0f} Hz, "
               f"tapered off {loop.frf.f_use/1e3:g}-{loop.frf.f_max/1e3:g} kHz)")
     if a.f_cut:
@@ -279,17 +322,17 @@ def cmd_step(a):
     gui = os.path.join(a.awg_dir, wname + ".csv")
     os.makedirs(a.awg_dir, exist_ok=True)
     outputs.write_bk_waveform(gui, u_next, wname, float(st["full_scale"]))
-    save_state(a.state, t=t, target=st["target"], u=u_next, dt=loop.dt, channel=str(st["channel"]),
-               gain=loop.plant.gain, tau=loop.plant.tau, offset=loop.plant.offset,
-               tau2=loop.plant.tau2, fn=loop.plant.fn, zeta=loop.plant.zeta,
-               full_scale=float(st["full_scale"]), name=str(st["name"]),
-               gamma=loop.gamma, f_cut=loop.f_cut,
-               iteration=it + 1, t_offset=t_off,
-               history=np.array(loop.history, dtype=object),
-               seed_path=str(st["seed_path"]) if "seed_path" in st else "",
-               target_path=str(st["target_path"]) if "target_path" in st else "",
-               notches=np.asarray(loop.notches, float).reshape(-1, 2),
-               **passthrough(st))
+    save_state(a.state, **carried(
+        st, t=t, target=st["target"], u=u_next, dt=loop.dt, channel=str(st["channel"]),
+        gain=loop.plant.gain, tau=loop.plant.tau, offset=loop.plant.offset,
+        tau2=loop.plant.tau2, fn=loop.plant.fn, zeta=loop.plant.zeta,
+        full_scale=float(st["full_scale"]), name=str(st["name"]),
+        gamma=loop.gamma, f_cut=loop.f_cut,
+        iteration=it + 1, t_offset=t_off,
+        history=np.array(loop.history, dtype=object),
+        seed_path=str(st["seed_path"]) if "seed_path" in st else "",
+        target_path=str(st["target_path"]) if "target_path" in st else "",
+        notches=np.asarray(loop.notches, float).reshape(-1, 2), **frf_keys))
     print(f"\n{loop.report()}\n\nwrote {out}\n      {gui}  (GUI-ready, normalised)")
 
 

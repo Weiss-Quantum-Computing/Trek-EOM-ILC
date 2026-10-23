@@ -53,6 +53,35 @@ def run_cli(argv, awg, scope, mod, stdin=""):
     return code, out.getvalue()
 
 
+def run_main(fn, argv, stdin=""):
+    """fn() with sys.argv = argv; returns (exit, printed)."""
+    saved = (sys.argv, sys.stdin)
+    sys.argv, sys.stdin = list(argv), io.StringIO(stdin)
+    out, code = io.StringIO(), None
+    try:
+        with contextlib.redirect_stdout(out):
+            try:
+                fn()
+            except SystemExit as e:
+                code = e.code
+    finally:
+        sys.argv, sys.stdin = saved
+    return code, out.getvalue()
+
+
+def write_capture(path, z, gain=0.98):
+    """A scope CSV (time_s, CH3) of the state's target x gain, 1 us apart,
+    spanning the record with 0.5 ms to spare -- what `run_ilc step` reads."""
+    t = np.asarray(z["t"], float)
+    tc = np.arange(-0.5e-3, t[-1] + 0.5e-3, 1e-6)
+    v = np.interp(tc, t, np.asarray(z["target"], float) * gain)
+    with open(path, "w") as f:
+        f.write("time_s,CH3\n")
+        for a, b in zip(tc, v):
+            f.write(f"{a:.9e},{b:.6e}\n")
+    return path
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="ilcsafety_")
     try:
@@ -112,6 +141,33 @@ def main():
                              "--outputs-off-at-end"], awg, scope, mod, stdin="OFF\n")
         check(not awg.is_on(1) and "CH1 output OFF (end of run, --outputs-off-at-end)" in out,
               "confirmed: CH1 OFF at the end, and the log says why")
+
+        print("[5] run_ilc step keeps every key it does not rewrite, and learns with the state's FRF (G1-19)")
+        import run_ilc
+        st5 = os.path.join(tmp, "drive_K5.state.npz")
+        z5 = {k: z[k] for k in z.files}
+        z5.update(corr_from=3, model="frf", frf_path=FRFS[1], frf_use=15e3, frf_max=22e3,
+                  scope_channels="{'3': 'MonX1'}", run_id=1234.5, optical_note="kept")
+        np.savez(st5, **z5)
+        meas = write_capture(os.path.join(tmp, "cap_K5.csv"), z)
+        code, out = run_main(run_ilc.main, ["run_ilc.py", "step", "--state", st5, "--measured", meas,
+                                            "--mon-col", "CH3", "--out", os.path.join(tmp, "drive_K5_iter7.csv"),
+                                            "--awg-dir", os.path.join(tmp, "Waveforms"), "--force"])
+        check(code is None, f"the step ran (exit {code})")
+        r5 = run_ilc.load_state(st5)
+        check(int(r5["iteration"]) == int(z["iteration"]) + 1, "iteration advanced")
+        lost = [k for k in z5 if k not in r5]
+        check(not lost, f"no key lost ({lost or 'all ' + str(len(z5)) + ' kept'})")
+        check(int(r5["corr_from"]) == 3 and str(r5["model"]) == "frf" and str(r5["frf_path"]) == FRFS[1]
+              and float(r5["frf_max"]) == 22e3 and str(r5["optical_note"]) == "kept",
+              "corr_from, model, frf_* and an unknown key carried as they were")
+        check("update uses the measured inverse from" in out,
+              "the step learned with the state's own FRF, not the gain-only plant")
+        z5["frf_path"] = os.path.join(tmp, "gone.csv")
+        np.savez(st5, **z5)
+        code, out = run_main(run_ilc.main, ["run_ilc.py", "step", "--state", st5, "--measured", meas,
+                                            "--mon-col", "CH3", "--awg-dir", os.path.join(tmp, "Waveforms")])
+        check(code is not None and "--frf" in str(code), "an FRF state whose file is gone is refused, naming --frf")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(fails)} failure(s)" + ("".join(f"\n  {f}" for f in fails)))
