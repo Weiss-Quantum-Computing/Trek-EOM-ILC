@@ -1239,9 +1239,12 @@ def iterate_once(awg, scope, runs, plan, args, log=print, stop=None,
             cr.loop.history.append({**m, "run_id": cr.run_id})
             if why == "diverged":
                 kb = keeper(cr, lp)
-                cr.u = cr.drives[kb[0]].copy()
-                changed.append(cr)
-                log(f"  {cr.stem}: back to its best drive, i{kb[0]:02d}")
+                if kb is None:
+                    log(f"  {cr.stem}: no measured iteration to go back to; keeps its drive")
+                else:
+                    cr.u = cr.drives[kb[0]].copy()
+                    changed.append(cr)
+                    log(f"  {cr.stem}: back to its best drive, i{kb[0]:02d}")
             save_state(cr)
             continue
         u_new = cr.loop.update(cr.u, y)
@@ -1308,6 +1311,15 @@ def run_campaign(awg, scope, plan, camp, args, log=print, stop=None, emit=lambda
     for cr in runs:
         targets[cr.key] = cr.target_path
         kb = final.get(cr.key) or keeper(cr, lp)
+        if kb is None:
+            # a resumed campaign whose per-iteration files are gone: no keeper
+            # to write, recorded as such (it raised a TypeError here and ended
+            # the campaign as 'error' after training already stood -- G1-24)
+            result["channels"][cr.key] = dict(state=cr.state_path, stop=cr.reason, iterations=cr.iteration,
+                                              resumed_at=resumed_at[cr.key], keeper_iteration=None,
+                                              keeper_file=None, history=[])
+            log(f"  {cr.stem}: no keeper (no measured iteration on disk), stopped: {cr.reason}")
+            continue
         u_keep = cr.drives[kb[0]]
         kdir = os.path.join(plan["_run_dir"], "keep")
         os.makedirs(kdir, exist_ok=True)
@@ -1639,6 +1651,8 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
     # the keepers play
     for cr in runs:
         kb = final.get(cr.key) or keeper(cr, lp)
+        if kb is None:
+            raise BatchError(f"{cr.stem}: no keeper to play (no measured iteration on disk)")
         _advance(cr, cr.drives[kb[0]], run_dir)
         log(f"  {cr.stem}: {'pass ' + str(p0) + ' ' if cr.key in final else ''}keeper i{kb[0]:02d} "
             f"(rms {kb[1]:.2f} V, peak {kb[2]:.1f} V) plays as i{cr.iteration:02d}")
