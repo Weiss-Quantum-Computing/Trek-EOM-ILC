@@ -1291,7 +1291,13 @@ def live_scan(folder, cache=None, load_capture=None, cfg=None):
     if len(th) < 3:
         out["note"] = f"{len(th)} angle(s) so far -- the rotation needs 3"
         return out
-    fit = an.harmonic_fit(th, I, sem)
+    try:
+        fit = an.harmonic_fit(th, I, sem)
+    except ValueError as e:
+        # the polarimeter refuses angles that are fewer than 3 mod 180
+        # (0:359:90 is 0 and 90 twice): show the traces, say why no rotation
+        out["note"] = f"{len(th)} angles, no rotation: {e}"
+        return out
     psi = an.unwrap_psi(fit["psi"])
     rest_m = t < 0
     rest = float(np.median(psi[rest_m])) if rest_m.any() else float(np.median(psi[: max(1, len(psi) // 50)]))

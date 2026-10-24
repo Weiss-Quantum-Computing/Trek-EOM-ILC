@@ -163,6 +163,11 @@ def main():
         except optical.ScanRefused as e:
             check("scanned with no light" in str(e) and "delete" in str(e),
                   f"a dark scan on disk refuses to resume: {str(e)[:60]}")
+        # 0:359:90 is two angles mod 180: the live view shows the traces and
+        # says why there is no rotation, instead of failing outright
+        lv = optical.live_scan(os.path.join(scans, f"{STEM}_darkres"))
+        check(lv["rotation_deg"] is None and len(lv["theta"]) == 4 and "mod 180" in lv["note"],
+              f"live_scan on 0:359:90: {lv['note'][:70]}")
 
         print("[3] compare")
         # the simulated PD has no delay: 1.7 us (the bench's) would read as up
