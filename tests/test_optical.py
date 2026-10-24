@@ -317,7 +317,7 @@ def main():
         edev = optical.open_devices(None, cfg, log=log, simulate=True, pcfg={})
         edev.sim.rot_err = 0.5
         optical.sim_play(edev, {"EO1": eruns["X1"].u, "EO2": eruns["X2"].u}, dt=edt)
-        efolder = optical.scan(edev, scans, "S47E2_opt0", et, log=log, angles="0:359:90", shots=2)
+        efolder = optical.scan(edev, scans, "S47E2_opt0", et, log=log, angles="0:359:45", shots=2)
         es = optical.compare(efolder, eruns["X1"].state_path, eruns["X2"].state_path, band_hz=5000.0,
                              pd_delay_us=0.0, split=0.5, log=log, figs=False)
         tr = es.get("transports") or []
