@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate ilc_validation.png -- why the plant model form decides convergence.
 
-    python simulation/make_validation_fig.py --target waveforms/target_MKJX1.csv
+    python docs/history/simulation/make_validation_fig.py --target docs/history/waveforms/target_MKJX1.csv
 
 Four panels, all driven through the shipping Loop rather than a reimplementation
 of it: convergence, the contraction factor that explains it, the plant response
@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import bilinear, lfilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)          # repo root: eomilc and waveforms/ live there
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))   # repo root (this file is in docs/history/simulation)
 sys.path.insert(0, ROOT)
 from eomilc import ilc
 from eomilc.config import CHANNELS, HV_PER_MON
@@ -52,7 +52,7 @@ def label(ax, x, y, text, dx=7, dy=0, size=8.5):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target",
-                    default=os.path.join(ROOT, "waveforms", "target_MKJX1.csv"))
+                    default=os.path.join(ROOT, "docs", "history", "waveforms", "target_MKJX1.csv"))
     ap.add_argument("--channel", default="EO1")
     ap.add_argument("--iterations", type=int, default=6)
     ap.add_argument("--out", default=os.path.join(HERE, "ilc_validation.png"))

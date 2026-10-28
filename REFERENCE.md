@@ -227,7 +227,7 @@ interleave freely. The raw captures stay out of the repository (`scope_data\EOM 
 ### 2.1 Building a target
 
 ```
-C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO1 --peak-hv 5200 --step 2 --out waveforms\target_MKJX1.csv
+C:\ProgramData\anaconda3\python.exe tools\make_target.py --channel EO1 --peak-hv 5200 --step 2 --out run\target_MKJX1.csv
 ```
 
 (and `--channel EO2 ... target_MKJX2.csv`). A target is in volts **at the EOM**, which makes two channels with different
@@ -238,7 +238,7 @@ negligible against the old ~5 V hardware-average floor; against the ~0.5-1 V HRE
 tracks the decimated target exactly, so it is a departure from the 0.1 us source shape and not an error the loop sees. The
 grid arithmetic is in `docs/history/2026-08_MKJ_FULL_NOTES.md`. The other target builders are `tools\make_ramp_target.py`,
 `tools\make_soft_split.py` (a series split with a soft handover), `tools\make_v90_targets.py` (rescales the 5200 V ramp
-targets of `waveforms\` to each channel's measured 90-degree point) and `tools\make_echo_target.py` (section 7).
+targets of `docs\history\waveforms\` to each channel's measured 90-degree point) and `tools\make_echo_target.py` (section 7).
 
 ### 2.2 `run_ilc.py`
 
@@ -303,7 +303,7 @@ state and the state is saved back every iteration:
 C:\ProgramData\anaconda3\python.exe ilc_bench.py --resume run\drive_MKJX1.state.npz --awg-ch 1 --scope-ch 3 --iterations 2
 ```
 
-or from scratch with `--channel EO1 --target waveforms\target_MKJX1.csv --name MKJX1 --awg-ch 1 --scope-ch 3 --t-offset 0
+or from scratch with `--channel EO1 --target docs\history\waveforms\target_MKJX1.csv --name MKJX1 --awg-ch 1 --scope-ch 3 --t-offset 0
 --iterations 3`. Each iteration: upload (fixed +-10 V mapping, never normalised), **`--repeats` 64** HRES singles averaged in
 software, update, save the state; drives land in `run\` and previewable copies in the AWG library.
 
@@ -342,7 +342,7 @@ drive grass tripled every iteration. `f_cut` 5 kHz froze that but left a repeata
 inverse is not fixed by iterating on it. The probes showed the fitted resonance was a large-signal effect of edges near the
 Trek's slew limit, absent at probe level; the fits did get the group delay right (tau ~28 us = 2 zeta / omega_n), which is why
 the model-based first shot worked. Contraction numbers per band: `docs/history/2026-08_report/REPORT.md` sections 4-5;
-`simulation/simulate.py` and `simulation/make_validation_fig.py` reproduce the simulations that rejected the one-pole model.
+`docs/history/simulation/simulate.py` and `make_validation_fig.py` beside it reproduce the simulations that rejected the one-pole model.
 
 ### 3.2 The ladder
 
@@ -599,7 +599,7 @@ drive letter.
 | field | what it does |
 |---|---|
 | **Pair (X1 + X2)** *(config)* | Pair mode, section 5.2. Remembered between launches; the startup reload then loads the pair. |
-| **State** *(config)* | Path to a `drive_<stem>.state.npz`. **Load state** rebuilds the whole campaign from it: target, current drive, plant, gamma, `f_cut`, t-offset, iteration counter, error history and the model record (which rung, and for the measured FRF the file and taper, restored into the panel and the loop). It puts the state's own target file back in **Target** (recorded as `target_path` by Init; a state from before that is matched by content against `waveforms\` and `run\`, and one that matches nothing leaves the box alone and says so), recalls every `meas_*.npy` sharing the stem beside it into the plots, and fills the channel defaults (AWG and scope channels, monitor column, the wide FRF with its 50/75 kHz taper) from the state's channel. The remembered state reloads at launch. |
+| **State** *(config)* | Path to a `drive_<stem>.state.npz`. **Load state** rebuilds the whole campaign from it: target, current drive, plant, gamma, `f_cut`, t-offset, iteration counter, error history and the model record (which rung, and for the measured FRF the file and taper, restored into the panel and the loop). It puts the state's own target file back in **Target** (recorded as `target_path` by Init; a state from before that is matched by content against `run\`, `docs\history\waveforms\` and the state's own folder, and one that matches nothing leaves the box alone and says so), recalls every `meas_*.npy` sharing the stem beside it into the plots, and fills the channel defaults (AWG and scope channels, monitor column, the wide FRF with its 50/75 kHz taper) from the state's channel. The remembered state reloads at launch. |
 | **Target** *(config)* | CSV of the desired waveform: first column time (`time_us` or `time_s`), second column the value in **output units** (EOM volts on EO1/EO2, measured volts on GEN; divided by the channel's `mon_scale` on load). `#` starts a comment. It plots itself on selection. The box always shows the target the loaded campaign's iterations were measured against. |
 | **Build...** | Generates a target from scratch. Fields: *shape* (cosine-edged ramp up-hold-return, or half-sine pulse), *peak* in output units, *lead / rise / hold / fall / tail* in ms (lead and tail are flat zero, the level the AWG idles on), *dt* in us (the loop grid; 2 us is the campaign standard). |
 | **Plot** | Re-draws the target preview: file contents on top, and below the AWG output the flat first shot would produce, against the +-full-scale rails (AMP = 2 times full scale, OFST 0), with the DAC-range percentage and a clipping warning. Sends nothing. |

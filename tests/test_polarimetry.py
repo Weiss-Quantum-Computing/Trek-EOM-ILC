@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eomilc import polarimetry as pol            # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TARGET = os.path.join(ROOT, "waveforms", "target_PARX1.csv")
+TARGET = os.path.join(ROOT, "docs", "history", "waveforms", "target_PARX1.csv")
 
 V_PI = 5200.0
 N_EOM = 2

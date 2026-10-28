@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eomilc.config import CHANNELS
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WAVEFORMS = os.path.join(HERE, "waveforms")
+WAVEFORMS = os.path.join(HERE, "docs", "history", "waveforms")   # the early targets, filed 28 Oct 2026
 
 
 def read_target(path):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rescale the 5200 V ramp targets to each channel's measured 90-degree point.
 
-The four targets in waveforms\\ were built to 5200 V per EOM. The optical
+The four targets in docs\\history\\waveforms\\ were built to 5200 V per EOM. The optical
 calibration of 31 Aug - 1 Sep 2026 put the 90-degree rotation point at
 5128.3 V (X1) and 5137.4 V (X2) at the Trek monitor (`Channel.v90_hv` in
 eomilc/config.py), so the 5200 V peak overshoots the rotation by about 2
@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eomilc.config import CHANNELS
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WAVEFORMS = os.path.join(HERE, "waveforms")
+WAVEFORMS = os.path.join(HERE, "docs", "history", "waveforms")   # the early targets, filed 28 Oct 2026
 TARGETS = {"PARX1": "EO1", "PARX2": "EO2", "SERX1": "EO1", "SERX2": "EO2"}
 
 

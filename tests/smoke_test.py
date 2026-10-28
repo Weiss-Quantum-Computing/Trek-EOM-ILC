@@ -325,7 +325,7 @@ print(f"[8] state round-trips through run_ilc.load_state, iteration "
 # init a brand-new session from the real target into scratch dirs (the
 # model is the launch-default measured FRF, whose stored plant is the gain
 # alone -- typed here, as a fresh panel would have it)
-app.target_var.set(os.path.join(REPO, "waveforms", "target_MKJX1.csv"))
+app.target_var.set(os.path.join(REPO, "docs", "history", "waveforms", "target_MKJX1.csv"))
 app.channel_var.set("EO1")
 app.stem_var.set("TSTX1")
 if not app.pgain_var.get().strip():
@@ -1441,7 +1441,7 @@ print(f"[41b] Measure FRF dialog: {len(_rows)} rows, hold V / hold ms visible, n
 # the state records which inverse drives the campaign, the summary shows
 # it, and Load restores the panel to it
 app.model_var.set("measured FRF (nonparametric)"); app._update_model_fields()
-app.target_var.set(os.path.join(REPO, "waveforms", "target_MKJX1.csv"))
+app.target_var.set(os.path.join(REPO, "docs", "history", "waveforms", "target_MKJX1.csv"))
 app.channel_var.set("EO1")
 app.stem_var.set("FRFREC")
 app.shotgain_var.set("0.8"); app.pgain_var.set("0.56")
@@ -1466,8 +1466,8 @@ assert app.frf_var.get() == fpath and app.fuse_var.get() == "100000"
 assert app.session.loop.frf is not None, "loop resumed without its inverse"
 # [42c] Load restores the Target box to the state's own target: the path
 # Init recorded, or -- for a state from before the path was recorded --
-# the CSV in waveforms\ / run\ whose content matches the state's target.
-_tgt = os.path.join(REPO, "waveforms", "target_MKJX1.csv")
+# the CSV in run\ / docs\history\waveforms\ whose content matches the state's target.
+_tgt = os.path.join(REPO, "docs", "history", "waveforms", "target_MKJX1.csv")
 assert os.path.normcase(app.target_var.get()) == os.path.normcase(_tgt), app.target_var.get()
 assert str(st_rec["target_path"] if "target_path" in st_rec else
            ilc_gui.run_ilc.load_state(app.state_var.get())["target_path"]).endswith("target_MKJX1.csv")

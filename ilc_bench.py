@@ -6,7 +6,7 @@ Reuses the instrument layers already written for Scope Grab and the AWG GUI --
 rather than reimplementing SCPI that has already been debugged against the
 hardware.
 
-    python ilc_bench.py --channel EO1 --target waveforms/target_MKJX1.csv \
+    python ilc_bench.py --channel EO1 --target docs/history/waveforms/target_MKJX1.csv \
         --name MKJX1 --awg-ch 1 --scope-ch 3 --t-offset 0 --iterations 3
 
     python ilc_bench.py --resume run/drive_MKJX1.state.npz --awg-ch 1 \

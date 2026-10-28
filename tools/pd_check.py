@@ -115,7 +115,7 @@ def main():
     ap.add_argument("--scale", type=float, default=None,
                     help="V/div to set on the PD channel before capturing "
                          "(default: leave as found, after forcing DC coupling)")
-    ap.add_argument("--target", default=os.path.join(ROOT, "waveforms",
+    ap.add_argument("--target", default=os.path.join(ROOT, "docs", "history", "waveforms",
                                                      "target_PARX1.csv"))
     ap.add_argument("--expect-vdc", type=float, default=None,
                     help="detector output in V; reports the expected 0.2%% divider loss")

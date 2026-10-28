@@ -42,4 +42,4 @@ inverse); everything else here is untracked scratch.
   files, the seed states, and the 14 figure scripts (still runnable there;
   they carry copies of the MKJ states/measurements they read).
 * `../archive/duplicates/` — byte-identical copies that used to shadow
-  `waveforms/target_*.csv` and the report's figure PNGs.
+  `waveforms/target_*.csv` (now `docs/history/waveforms/`) and the report's figure PNGs.

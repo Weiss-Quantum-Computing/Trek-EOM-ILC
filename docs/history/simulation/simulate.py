@@ -25,7 +25,7 @@ from __future__ import annotations
 import argparse, sys, os
 import numpy as np, pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for eomilc
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))  # repo root, for eomilc
 from eomilc.plant import Plant
 from eomilc.ilc import Loop
 from eomilc.config import CHANNELS, HV_PER_MON

@@ -30,7 +30,7 @@ from eomilc.config import CHANNELS, HV_PER_MON
 
 N, DT, FULL_SCALE = 5501, 2e-6, 10.0
 DRIVE = os.path.join(ROOT, "run", "drive_PRFRX1B_i17.csv")
-TARGET = os.path.join(ROOT, "waveforms", "target_PARX1.csv")
+TARGET = os.path.join(ROOT, "docs", "history", "waveforms", "target_PARX1.csv")
 OUT = os.path.join(ROOT, "run", "polarimetry")
 
 

@@ -41,11 +41,9 @@ folder).
 | `eomilc/` | the library: `config` (calibration), `channels` (scope roles), `plant` (models and fits), `ilc` (the loop), `corrections` and `optical` (the optical close), `echo` (spin-echo records), `supertime` (chunk export), `mains`, `monitor`, `diagnostics`, `polarimetry`, `progress`, `rin`, `scope` (capture reader), `outputs`, `simbench` (the simulated bench) |
 | `tools/` | command-line scripts: target builders (`make_target`, `make_ramp_target`, `make_soft_split`, `make_v90_targets`, `make_echo_target`), system ID (`sysid_make`, `sysid_fit`), card and Supertime export (`split_for_card`, `supertime_chunks`), campaign reports (`campaign_report`, `campaign_figures`), the AWG safety nets (`awg_park`, `awg_outputs_off`), and the August-September polarimetry campaign scripts (`pd_check`, `fringe_sweep`, `fringe_both`, `frf_optical`, `filter_check`, `nulltest`, `phase4`, `ringdown`, `pol_scout`, `pol_segments`, `lock_figures`) |
 | `tests/` | the offline suites and `run_all.py` |
-| `simulation/` | the off-bench validation of the parametric-era loop (`simulate.py`, `make_validation_fig.py`) |
 | `characterisation/` | the 20-21 August 2026 analysis behind every constant in `eomilc/config.py` |
-| `waveforms/` | the checked-in targets and iteration-0 drives of the early ramps (MKJ, PAR, SER, with the `_V90` rescaled targets) |
 | `run/` | the active campaign workspace: states, drives, measurements, measured FRFs. Only its README and the two production FRFs `frf_WIDE_X1.csv` / `frf_WIDE_X2.csv` are tracked |
-| `docs/` | `ANALYSIS_PROMPT.md`, `handbook/` (screenshots) and `history/` |
+| `docs/` | `ANALYSIS_PROMPT.md`, `handbook/` (screenshots) and `history/` (finished campaigns, the early targets in `history/waveforms/`, the parametric-era simulation) |
 | `eomilc_polarization_finetune/` | a separate, older standalone optical panel with its own README, left as it is |
 | `archive/` | superseded bench outputs kept for the record (not tracked), including `report-era/`, the frozen 24-25 August analysis scripts behind the report's figures; it has its own README |
 | `.gitignore` | keeps data, captures and `archive/` out of the repository; `.claude/`, `.pytest_cache/` and `__pycache__/` are tooling |

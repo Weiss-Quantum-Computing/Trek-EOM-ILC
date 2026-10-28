@@ -4033,8 +4033,7 @@ class App:
         self._show_fig(self.fig_wave)
 
     def _browse_target(self):
-        self._browse(self.target_var, "Target CSV", "*.csv",
-                     os.path.join(HERE, "waveforms"))
+        self._browse(self.target_var, "Target CSV", "*.csv", RUN_DIR)
         if os.path.exists(self.target_var.get().strip()):
             self.do_preview_target()
 
@@ -4179,7 +4178,7 @@ class App:
                                             parent=dlg)
             path = filedialog.asksaveasfilename(
                 parent=dlg, title="Save target CSV",
-                initialdir=os.path.join(HERE, "waveforms"),
+                initialdir=RUN_DIR,
                 initialfile="target_NEW.csv",
                 defaultextension=".csv", filetypes=(("CSV", "*.csv"),))
             if not path:
@@ -4236,7 +4235,7 @@ class App:
         g = ttk.Frame(fr); g.pack(fill="x")
         self._path_row(g, 0, "Source X1", v["source"],
                        lambda: self._browse(v["source"], "Target CSV", "target_*X1.csv",
-                                            os.path.dirname(src) if src else os.path.join(HERE, "waveforms")))
+                                            os.path.dirname(src) if src else RUN_DIR))
         self._path_row(g, 1, "Write to", v["out"],
                        lambda: v["out"].set(filedialog.askdirectory(
                            parent=self._echo_win, title="Folder for the echo targets",
@@ -4362,7 +4361,7 @@ class App:
         if not (tp and os.path.exists(tp)):
             found = find_target_file(
                 s.loop.target, s.loop.channel.mon_scale,
-                (os.path.join(HERE, "waveforms"), RUN_DIR,
+                (RUN_DIR, os.path.join(HERE, "docs", "history", "waveforms"),
                  os.path.dirname(os.path.abspath(path))))
             how = ("matched by content -- the state predates the recorded "
                    "path" if not tp else
@@ -4378,7 +4377,7 @@ class App:
         else:
             self.log(f"  NOTE: the state's target file is not known "
                      f"({'recorded ' + s.target_path + ' is missing' if s.target_path else 'no path recorded'}) "
-                     f"and no CSV in waveforms\\ or run\\ matches its "
+                     f"and no CSV in run\\ or docs\\history\\waveforms\\ matches its "
                      f"content -- the Target box is left as it was")
         self.log(f"loaded {path}")
         self.log(f"  {s.channel} iteration {s.iteration}, stem {s.stem}, "

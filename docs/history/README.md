@@ -12,6 +12,8 @@ every field, file and plan key read `REFERENCE.md` beside it.
 | 24-25 Aug 2026 | `2026-08_report/REPORT.md` and its `figures/` | the campaign that replaced the parametric inverse with the measured FRF: the capture ladder (HRES singles over AVER), the probe, the model-form comparison, the final numbers and the instrument catalog. The panel's FRF overlay still cites its section 5 |
 | 25 Aug 2026 | `2026-08_MKJ_FULL_NOTES.md` | what the original MKJ waveform was, its headroom arithmetic and how the generator's DDS mode plays it |
 | 1-2 Sep 2026 | `2026-09_ramp_edit_plan/PLAN.md` and its `analysis/` CSVs | the September methods plan: one-pole baselines, the second-order rung on X1, edited-drive transfer, warm start, with the band tables the phases were costed from |
+| Aug-Sep 2026 | `waveforms/` | the early targets and iteration-0 drives (MKJ, PAR, SER and the `_V90` rescaled targets); the smoke and polarimetry suites still read `target_MKJX1.csv` and `target_PARX1.csv` from here |
+| Aug 2026 | `simulation/` | the parametric-era validation of the loop (`simulate.py`, `make_validation_fig.py`, its figure); superseded by `eomilc/simbench.py`, kept for the one-pole vs second-order comparison |
 | 13 Oct 2026 | `2026-10_OPTICAL_CLOSE_DESIGN.md` | the design the optical close was built to (library, pair mode, batch stage, Optical tab) and its addendum on per-crystal measurement. The code comments in `ilc_gui.py` and `ilc_batch.py` still point here for the contracts |
 
 Superseded bench outputs (iteration drives, scratch campaigns, the probe-era
