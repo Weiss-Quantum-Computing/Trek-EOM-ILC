@@ -92,6 +92,7 @@ from matplotlib.figure import Figure
 from eomilc import scope as scopeio, plant as plantmod, ilc, outputs
 from eomilc import corrections as corrmod, mains
 from eomilc import optical     # the optical close (needs rampol only when used)
+from eomilc import supertime as stmod   # the closed drives as Supertime custom-ramp chunks
 from eomilc.config import CHANNELS, LIMITS, HV_PER_MON
 from eomilc import channels as chanmap   # scope channel ROLES, shared with the polarimeter
 from eomilc import diagnostics as dg     # per-measurement stats, folds, floors
@@ -901,6 +902,12 @@ class BatchWindow:
         b = ttk.Button(r, text="Preview", command=app.do_batch_preview)
         b.pack(side="left", padx=(0, 4))
         self.btns.append(b)
+        # Export for Supertime: the closed drives of the selected (or every
+        # done) campaign cut into custom-ramp chunks, with the table of step,
+        # start and end voltage (eomilc.supertime, 28 Oct 2026)
+        b = ttk.Button(r, text="Export for Supertime...", command=self.do_supertime_export)
+        b.pack(side="left", padx=(0, 4))
+        self.btns.append(b)
         self.stop_btn = ttk.Button(r, text="Stop", command=app.stop_evt.set)
         self.stop_btn.pack(side="left")
         self.status = ttk.Label(r, text="", font=MONO)
@@ -1169,6 +1176,94 @@ class BatchWindow:
     # -- new plan -------------------------------------------------------------
     def new_plan(self):
         PlanDialog(self)
+
+    # -- Export for Supertime ------------------------------------------------
+    def done_stems(self):
+        """The campaigns the manifest lists as done, in plan order."""
+        if self.plan is None:
+            return []
+        man = ilc_batch.read_manifest(self.plan, self.view_sim)
+        return [c["stem"] for c in self.plan["campaigns"]
+                if (man["campaigns"].get(c["stem"]) or {}).get("status", "").startswith("done")]
+
+    def do_supertime_export(self):
+        if self.plan is None:
+            self.status.configure(text="no plan loaded")
+            return None
+        return SupertimeDialog(self)
+
+
+class SupertimeDialog:
+    """Export for Supertime...: where to write, which campaigns; the export
+    runs in the worker (file work only, no instrument) and logs each record."""
+
+    def __init__(self, bw):
+        self.bw = bw
+        d = self.win = tk.Toplevel(bw.win)
+        d.title("Export for Supertime")
+        d.transient(bw.win)
+        fr = ttk.Frame(d, padding=8)
+        fr.pack(fill="both", expand=True)
+        default = stmod.default_out()
+        if default:
+            default = os.path.join(default, os.path.basename(bw.plan.get("_path", "") or "").replace(".json", "") or "export")
+        else:
+            default = os.path.join(bw._run_base(), "supertime")
+        self.folder = tk.StringVar(value=default)
+        sel = bw.tree.selection()
+        self.which = tk.StringVar(value="selected" if sel else "done")
+        ttk.Label(fr, text="Write to").grid(row=0, column=0, sticky="w")
+        e = ttk.Entry(fr, textvariable=self.folder, width=64)
+        e.grid(row=0, column=1, sticky="we", padx=4)
+        ttk.Button(fr, text="...", width=3, command=self.browse).grid(row=0, column=2)
+        ttk.Radiobutton(fr, text=f"the selected campaign ({sel[0] if sel else 'none selected'})",
+                        variable=self.which, value="selected",
+                        state="normal" if sel else "disabled").grid(row=1, column=1, sticky="w")
+        ttk.Radiobutton(fr, text=f"every campaign the manifest lists as done ({len(bw.done_stems())})",
+                        variable=self.which, value="done").grid(row=2, column=1, sticky="w")
+        ttk.Label(fr, foreground="#666666", justify="left", text=(
+            "Per channel and leg: up / hold / down / after chunks of the closed drive (index, AWG volts; "
+            "no header),\nevery boundary on a 10 us grid, plus ramp_table.md / .csv with duration, step, points "
+            "and the start / end\nvoltage of each chunk as AWG volts, degrees at the EOM and Supertime card volts "
+            "(derived: confirm with a\ntest ramp), and a README mapping the chunks onto the sequence edges. The "
+            "flash drive's Ramps folder is the\ndefault when it is plugged in.")).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(6, 4))
+        r = ttk.Frame(fr)
+        r.grid(row=4, column=0, columnspan=3, sticky="e")
+        ttk.Button(r, text="Export", command=self.go).pack(side="left", padx=(0, 4))
+        ttk.Button(r, text="Close", command=d.destroy).pack(side="left")
+        fr.columnconfigure(1, weight=1)
+
+    def browse(self):
+        p = filedialog.askdirectory(parent=self.win, title="Export for Supertime: folder",
+                                    initialdir=self.folder.get() or RUN_DIR)
+        if p:
+            self.folder.set(p)
+
+    def go(self):
+        bw, app = self.bw, self.bw.app
+        out = self.folder.get().strip()
+        if not out:
+            return messagebox.showerror("Export for Supertime", "give a folder to write to", parent=self.win)
+        if self.which.get() == "selected":
+            stems = list(bw.tree.selection())
+        else:
+            stems = bw.done_stems()
+        if not stems:
+            return messagebox.showerror("Export for Supertime", "nothing to export: no campaign selected and "
+                                        "none done", parent=self.win)
+        plan, run_dir = bw.plan, bw._run_base()
+        self.win.destroy()
+
+        def work():
+            log = lambda m: app.msgs.put(("log", m))           # noqa: E731
+            log(f"Export for Supertime: {len(stems)} campaign(s) -> {out}")
+            rows = stmod.export(plan, stems, out, log=log, run_dir=run_dir)
+            n = len({r["record"] for r in rows})
+            app.msgs.put(("status", f"Supertime export: {len(rows)} chunks for {n} record(s) in {out}"))
+            app.msgs.put(("call", lambda: bw.status.configure(
+                text=f"exported {n} record(s), {len(rows)} chunks -> {out}") if bw.win.winfo_exists() else None))
+        app.run_worker(work, "exporting for Supertime...")
 
 
 class PlanDialog:

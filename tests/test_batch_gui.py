@@ -204,7 +204,10 @@ def main():
               f"optical table: {[r[1] for r in rows]}, zero {rows[1][7] if len(rows) > 1 else ''}")
         check(len(app.ax_optp.lines) >= 3 and len(ticks) >= 1,
               f"passes view drawn ({len(app.ax_optp.lines)} lines), live view drawn {len(ticks)} time(s)")
-        bw.otree.selection_set("1")
+        kids = bw.otree.get_children()
+        check(len(kids) == 2, f"the table lists the before and the verify scan ({len(kids)} rows: "
+                              f"{[bw.otree.item(k, 'values')[1] for k in kids]})")
+        bw.otree.selection_set(kids[-1])
         root.update()
         check(app.status.cget("text").startswith("optical review: verify") and bool(app.ax_optva.lines),
               "a verification row draws the before / after view")
@@ -215,6 +218,32 @@ def main():
         check(not app.batchfollow_var.get() and "follow off" in bw.status.cget("text"),
               "reviewing another campaign than the running one switches follow off")
         app.busy = False
+
+        print("[9] Export for Supertime writes the chunks and the table")
+        bw.tree.selection_set("S25")
+        exp = os.path.join(tmp, "supertime")
+        dlg = bw.do_supertime_export()
+        dlg.win.withdraw()
+        check(dlg.which.get() == "selected" and dlg.folder.get(), "the dialog offers the selected campaign and a folder")
+        dlg.folder.set(exp)
+        dlg.go()
+        check(pump(root, app), "export finished")
+        files = sorted(os.listdir(os.path.join(exp, "S25")))
+        chunks = [f for f in files if "_leg1_" in f]
+        # one transport with a 200 us tail: up, hold and down per channel; an "after" chunk only when the
+        # tail past the fall is at least 100 us on the 10 us grid
+        check(len(chunks) in (6, 8) and all(f"S25_{k}_leg1_{c}.csv" in files for k in ("X1", "X2") for c in ("up", "hold", "down"))
+              and "S25_X1_full_keeper.csv" in files, f"up, hold and down per channel and the full keepers: {len(files)} files")
+        head = open(os.path.join(exp, "S25", "S25_X1_leg1_up.csv")).readline().strip()
+        check(head.startswith("1,"), f"chunk format index,value without a header: {head[:30]}")
+        import csv as _csv
+        rows9 = list(_csv.DictReader(open(os.path.join(exp, "ramp_table.csv"), encoding="utf-8")))
+        up = next(r for r in rows9 if r["channel"] == "X1" and r["chunk"] == "up")
+        check(len(rows9) == len(chunks) and float(up["duration_us"]) % 10 == 0 and float(up["end_deg"]) > 80
+              and float(up["start_deg"]) < 5 and os.path.exists(os.path.join(exp, "README.md")),
+              f"table: {len(rows9)} rows, X1 up {up['duration_us']} us from {up['start_deg']} to {up['end_deg']} deg, README written")
+        check("Supertime export" in app.status.cget("text") or "exported" in bw.status.cget("text"),
+              "the status lines report the export")
     finally:
         root.destroy()
         shutil.rmtree(tmp, ignore_errors=True)
