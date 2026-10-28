@@ -3,11 +3,9 @@
 Status of the workflow: 28 October 2026. For a lab colleague who has not used the panel.
 
 This handbook is a short, task-ordered guide. It tells you what to press, in what order, and what you should see.
-It is distilled from three longer documents, which stay the reference when you need a detail:
-
-- `WORKFLOW_GUI.md`: every tab, field and plot of the panel.
-- `WORKFLOW.md`: the physics of the bench measurement, the batch plan format and the runner's stops.
-- `docs\OPTICAL_CLOSE_DESIGN.md`: how the optical close was designed.
+For a detail this guide leaves out, look in `REFERENCE.md`: the full grammar of every tab, field, flag, plan key and
+file, the physics of the bench measurement, the batch plan format and the runner's stops. The design of the optical
+close is in `docs\history\2026-10_OPTICAL_CLOSE_DESIGN.md`.
 
 The campaign of 14-15 October 2026 (31 spin-echo records) is the worked example throughout. Its brief, plans,
 report and figures are on OneDrive in `Share Data\Ramps\campaign-20261014\`.
@@ -77,7 +75,7 @@ shares its stem. Nothing opens an instrument at launch.
 
 ### 1.2 The window
 
-![The panel with the S47E2 campaign loaded](handbook/panel_overview.png)
+![The panel with the S47E2 campaign loaded](docs/handbook/panel_overview.png)
 
 The left column holds the settings in seven tabs, in the order a campaign uses them. Under the tabs are the session
 summary, the log and the status line. They are always visible. The right side is the plot notebook.
@@ -86,11 +84,11 @@ summary, the log and the status line. They are always visible. The right side is
 |---|---|
 | Hardware | one look at the rack: Scope, AWG, ELL14 analyzer, DS345. |
 | Session | load a state file, or start a new campaign. The **Pair (X1 + X2)** tick and the **Echo...** button are here. |
-| [Model](handbook/tab_model.png) | what the update divides the error by (the model ladder, gain, `f_cut`, notches, the measured FRF). |
+| [Model](docs/handbook/tab_model.png) | what the update divides the error by (the model ladder, gain, `f_cut`, notches, the measured FRF). |
 | Scope | the scope channel roles (which scope channel is the PD, the monitors and the drives), the capture settings and the mains-ripple switch. There is no tab called Settings. |
 | Run | the bench loop: Auto-set, Upload, Run, Hold, and the buttons for **Batch...**, **Manual step...** and **Bench settings...**. |
 | Optical | the optical close by hand, in seven numbered steps. Pair mode only. |
-| [Corrections](handbook/tab_corrections.png) | learned changes to the target, from a measurement made elsewhere. |
+| [Corrections](docs/handbook/tab_corrections.png) | learned changes to the target, from a measurement made elsewhere. |
 
 The right-hand plot notebook has the tabs Waveforms, Error, Convergence, Drive, Diagnostics, Table, Inputs, Optical and
 Batch. Several of them have a view bar on top (for example Error has error, spectrum and legs). Above the notebook:
@@ -104,11 +102,11 @@ To look at a finished campaign: tick **Pair (X1 + X2)** on the Session tab, put 
 (`run\campaign-20261014\drive_S47E2X1.state.npz`) and press **Load state**. The X2 file is found by name
 (the last `X1` becomes `X2`).
 
-![The Session tab](handbook/tab_session.png)
+![The Session tab](docs/handbook/tab_session.png)
 
 ### 1.3 The Hardware tab
 
-![The Hardware tab before any check](handbook/tab_hardware.png)
+![The Hardware tab before any check](docs/handbook/tab_hardware.png)
 
 Each row has a **Check** button. A check opens the device, asks its identity and how it stands, then closes it again.
 The answer and the time are written into the row: green when it answered, red when it did not.
@@ -184,7 +182,7 @@ trigger rate.
 
 On the **Scope** tab the four channels are roles, not numbers. The bench as wired since 5 October:
 
-![The Scope tab: scope channel roles](handbook/tab_scope.png)
+![The Scope tab: scope channel roles](docs/handbook/tab_scope.png)
 
 | channel | role | carries |
 |---|---|---|
@@ -197,7 +195,7 @@ The **Defaults** button sets exactly this. **Copy from polarimeter** takes the p
 channels is refused. With no `CmdX2`, X2's trigger alignment is not verified, and the Run tab's Bench line says so
 ("readback none (alignment not verified)"). That is the present wiring.
 
-![The Run tab and its Bench line](handbook/tab_run.png)
+![The Run tab and its Bench line](docs/handbook/tab_run.png)
 
 ### 2.5 Safety rules for the AWG and the Treks
 
@@ -257,7 +255,7 @@ are trained in one record, at the echo's spacing, and the loop learns leg 2 in t
 
 ### 3.3 Building an echo record: the Echo... dialog
 
-![The Echo... dialog](handbook/dialog_echo.png)
+![The Echo... dialog](docs/handbook/dialog_echo.png)
 
 On the Session tab, **Echo...** is next to the Target box.
 
@@ -303,7 +301,7 @@ A batch plan builds the same record itself, from its `"echo"` key (section 4.2).
 
 Run tab, **Batch...** opens the window. It can be closed and reopened while a batch runs.
 
-![The Batch window with S47E2 selected](handbook/batch_window.png)
+![The Batch window with S47E2 selected](docs/handbook/batch_window.png)
 
 Top to bottom:
 
@@ -322,7 +320,7 @@ Double-click a campaign to load its state in the panel.
 
 ### 4.1 New plan...
 
-![The New batch plan dialog](handbook/dialog_new_plan.png)
+![The New batch plan dialog](docs/handbook/dialog_new_plan.png)
 
 1. **Targets folder**: a folder of target pairs. The dialog lists the pairs it finds.
 2. **X1 trained like / X2 trained like**: a state file whose model, gain, `f_cut`, notches and FRF the plan copies. The
@@ -396,7 +394,7 @@ hours for 31 campaigns at the cap). The numbers typed in the window are used but
 
 **Preview.** Draws the plan on the **Batch** plot tab. Check here what the batch will fit to before anything runs.
 
-![Preview with nothing selected: every campaign in the plan](handbook/plot_batch_preview_all.png)
+![Preview with nothing selected: every campaign in the plan](docs/handbook/plot_batch_preview_all.png)
 
 With nothing selected: one small panel per campaign, both targets in kilovolts at the EOM against ms, titled with the
 stem, number of points, period and AWG frequency, plus `optical` and `echo of <source>`. A campaign with a problem
@@ -404,7 +402,7 @@ carries it in red. Under the grid are each channel's model line and the total ti
 
 Select a campaign row first and Preview draws that campaign alone:
 
-![Preview of one campaign](handbook/plot_batch_preview_one.png)
+![Preview of one campaign](docs/handbook/plot_batch_preview_one.png)
 
 Top: its targets with the ramp's start, top, hold end and fall end marked, and each channel's V90 dotted. Bottom: the
 first drive each channel will play (the flat first shot, or the state's current drive when the campaign resumes) with the
@@ -611,10 +609,10 @@ A state is loadable in the panel with **Load state** and can be continued by han
 The Optical tab runs the same stages one at a time on the loaded pair (pair mode only): **1 Play** (both, X1 alone or X2 alone),
 **2 Scan**, **3 Compare**, **4 Apply to the targets**, **5 Learn**, **6 Verify**, **7 Outputs OFF**. Each step is greyed, with the
 reason in orange under it, until the step before has a result. The outputs go ON at step 1 and stay ON until step 7, which
-asks first. Section 11 of `WORKFLOW_GUI.md` has the full procedure. The batch runs the same code over every campaign of a
+asks first. `REFERENCE.md`, section 8, has the full procedure and every field of the tab. The batch runs the same code over every campaign of a
 plan.
 
-![The Optical tab](handbook/tab_optical.png)
+![The Optical tab](docs/handbook/tab_optical.png)
 
 ---
 
@@ -661,7 +659,7 @@ the Optical plot tab's view bar.
 
 **passes.** The campaign's optical stage at a glance.
 
-![Optical passes for S47E2](handbook/plot_optical_passes.png)
+![Optical passes for S47E2](docs/handbook/plot_optical_passes.png)
 
 Top: light minus target over the record, for the before scan (grey) and after every pass (one colour each; thin is raw,
 thick is low-passed at 5 kHz; the legend carries each scan's ramp-top, after-the-fall and rms numbers). The base target is
@@ -676,7 +674,7 @@ when no scan is running.
 
 **legs.** The spin echo's second leg against its first, for the light:
 
-![Optical legs for S47E2, scan opt3](handbook/plot_optical_legs.png)
+![Optical legs for S47E2, scan opt3](docs/handbook/plot_optical_legs.png)
 
 Top: the rotation of light and monitors on leg 1 (solid) and leg 2 (dashed) with the target. Bottom: leg 2 minus leg 1 of
 the light, of the monitors and of light minus monitors, low-passed at the band, with each one's mean over the ramp top,
@@ -689,14 +687,14 @@ record's end are left out.
 **rotation, correction, before / after.** A scan's light, monitors and target in degrees with light minus monitors below
 it:
 
-![Optical rotation view](handbook/plot_optical_rotation.png)
+![Optical rotation view](docs/handbook/plot_optical_rotation.png)
 
-![Optical correction view](handbook/plot_optical_correction.png)
+![Optical correction view](docs/handbook/plot_optical_correction.png)
 
 The before / after view compares the ramp-top, after-the-fall and rms numbers of a verification against the joint scan
 before it:
 
-![Optical before / after view](handbook/plot_optical_before_after.png)
+![Optical before / after view](docs/handbook/plot_optical_before_after.png)
 
 ### 7.4 Error -> legs
 
@@ -704,7 +702,7 @@ The electrical counterpart on the Error tab. For a two-leg record it plots, per 
 over leg 1 (solid) and leg 2 (dashed), and below it the measured monitor's leg 2 minus leg 1 and the drive's leg 2 minus
 leg 1.
 
-![Error -> legs](handbook/plot_error_legs.png)
+![Error -> legs](docs/handbook/plot_error_legs.png)
 
 The same drive on both legs leaves only the chain's memory of leg 1 in the measured difference. The drive difference is
 what the loop learned to undo. After an optical correction the measured difference is the per-leg correction the light
@@ -715,19 +713,19 @@ asked for.
 Every iteration measured after an optical correction took effect is drawn in warm colours and tagged `[optN]` in the legend,
 N being the optical pass. Electrical iterations keep a cool scale (purple to green).
 
-![Error tab, warm colours for the optical iterations](handbook/plot_error.png)
+![Error tab, warm colours for the optical iterations](docs/handbook/plot_error.png)
 
 On Convergence the same iterations carry hollow red diamonds, with a dashed line labelled `optical pass N applied` where each
 pass took effect:
 
-![Convergence](handbook/plot_convergence.png)
+![Convergence](docs/handbook/plot_convergence.png)
 
 ### 7.6 Diagnostics -> pd
 
 The analyzer photodiode per stored iteration (top) and each iteration's PD minus the last one in mV (bottom), with each
 iteration's monitor rms in the legend.
 
-![Diagnostics -> pd](handbook/plot_diag_pd.png)
+![Diagnostics -> pd](docs/handbook/plot_diag_pd.png)
 
 At a fixed analyzer angle the PD reads the cosine squared of the light's rotation, so its change tracks how the light
 answered each update. It is most sensitive with the analyzer about 45 degrees from the polarization, and blind at extinction
@@ -802,7 +800,7 @@ C:\ProgramData\anaconda3\python.exe tools\campaign_figures.py "<plan>.json" S47E
 | fig7 echo legs | the second transport against the first, for monitors and light |
 | fig8 data quality | PD screen use, fit residuals, shots, analyzer zero |
 
-![Figure 1 of the S47E2 set](handbook/campaign_fig1_example.png)
+![Figure 1 of the S47E2 set](docs/handbook/campaign_fig1_example.png)
 
 The README beside the figures carries the numbers (electrical rms by iteration, the optical table, the leg differences, the
 data-quality lines).
@@ -833,7 +831,7 @@ window's **Export for Supertime...** cuts the closed drives of a campaign into t
 
 ### 9.1 In the panel
 
-![The Export for Supertime dialog](handbook/dialog_export_supertime.png)
+![The Export for Supertime dialog](docs/handbook/dialog_export_supertime.png)
 
 1. In the Batch window, select a campaign (or none).
 2. Press **Export for Supertime...**.

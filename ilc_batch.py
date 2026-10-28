@@ -176,7 +176,8 @@ DEFAULT_SETTINGS = {
     "X2": dict(model="frf", frf="run/frf_WIDE_X2.csv", f_use=50e3, f_max=75e3,
                gamma=0.6, f_cut=40e3),
 }
-# The optical stage's settings (docs/OPTICAL_CLOSE_DESIGN.md section 3): band
+# The optical stage's settings (REFERENCE.md section 6.12; the design is
+# docs/history/2026-10_OPTICAL_CLOSE_DESIGN.md section 3): band
 # 5 kHz for the 0.3 ms ramp-top feature, PD delay 1.7 us (the bench's; 0 in
 # simulation unless the plan says otherwise), split 0.5 for parallel shapes.
 # cap_v: the gate's cap at the EOM (V), None = the panel's 300 V. sim_rot_err:
@@ -205,8 +206,9 @@ class BatchError(RuntimeError):
 
 
 class BatchStopped(Exception):
-    """Stop was asked for (the GUI's Stop): the batch ends after switching the
-    outputs off. States are saved every iteration, so the next run resumes."""
+    """Stop was asked for (the GUI's Stop): the batch ends after parking the
+    outputs (a flat idle record, output ON; never-float). States are saved
+    every iteration, so the next run resumes."""
 
 
 def _stopped(stop):
@@ -1566,8 +1568,8 @@ def optical_stage(awg, scope, runs, plan, camp, args, s, log=print, stop=None,
     verification scan is complete on disk and recorded done is not
     repeated. Stop raises BatchStopped (the scan on disk resumes).
 
-    attribution "separate" (docs/OPTICAL_CLOSE_DESIGN.md, addendum section
-    5): the correction is measured per crystal in every pass. The before is
+    attribution "separate" (REFERENCE.md section 6.13; the design note is
+    docs/history/2026-10_OPTICAL_CLOSE_DESIGN.md, addendum section 5): the correction is measured per crystal in every pass. The before is
     the previous pass's verification, or on the first pass a joint scan
     <name>_before (joint_before; compared jointly, NOT applied); then X1
     alone (X2's channel plays optical.park_drive of its drive, uploaded as

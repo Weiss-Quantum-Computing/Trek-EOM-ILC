@@ -115,7 +115,7 @@ from eomilc import plant as plantmod    # plantmod.identify(u, y, dt, model=...)
 
 ## What already exists (do not re-plot it)
 
-The GUI (`ilc_gui.py`, manual `WORKFLOW_GUI.md`) already draws: waveforms,
+The GUI (`ilc_gui.py`; its views are described in `REFERENCE.md` section 4, its fields in section 5) already draws: waveforms,
 drive corrections + their spectrum, drive updates u_k − u_(k−1), error +
 error spectrum (both spectra with Welch averaging), convergence,
 FRF viewer, cross-campaign overlays (Compare box), and an iteration table

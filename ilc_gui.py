@@ -1893,7 +1893,7 @@ class App:
 
         # ---- plot notebook -------------------------------------------
         # deliberately terse -- the grammar of every field is in
-        # WORKFLOW_GUI.md section 10, and width here is contested
+        # REFERENCE.md section 5, and width here is contested
         sel = ttk.Frame(right)
         sel.pack(fill="x", pady=(0, 2))
         # pair mode: which of the two sessions the plots, the summary and
@@ -2993,7 +2993,7 @@ class App:
                         variable=self.corract_var).pack(side="left")
         ttk.Label(gf, text=(
             "Volts at the output, as in a target CSV; the Trek limits, the "
-            "AWG rail and full scale are always checked (WORKFLOW_GUI.md 10)."),
+            "AWG rail and full scale are always checked (REFERENCE.md 8.4)."),
             foreground="#666666", wraplength=440, justify="left").grid(
             row=2, column=0, sticky="w")
         gf.columnconfigure(0, weight=1)
@@ -6911,7 +6911,8 @@ class App:
             print("instruments closed")
 
     # -------------------------------------------------------------- optical
-    # The optical close by hand (docs/OPTICAL_CLOSE_DESIGN.md, part 4). The
+    # The optical close by hand (REFERENCE.md section 8; the design is
+    # docs/history/2026-10_OPTICAL_CLOSE_DESIGN.md, part 4). The
     # loop makes the MONITORS follow the target; the experiment needs the
     # LIGHT, which leaves the monitors at the ramp top and after the fall.
     # Seven steps on the Optical tab, both chains at once: play the keepers
@@ -6959,7 +6960,7 @@ class App:
     def _build_optical_tab(self, parent):
         """The Optical tab: a state line and the seven numbered steps, each
         greyed until the step before it has a result. The rarely changed
-        numbers are in Settings... (WORKFLOW_GUI.md 10, 11)."""
+        numbers are in Settings... (REFERENCE.md 8.3)."""
         oc = self.cfg.get("optical") or {}
         self._opt_vars = {}
         # {X1/X2: {wname, u[, parked]}}: what the AWG was last given
@@ -11319,7 +11320,8 @@ class App:
 
         # Overlay the current parametric model, if one is selected and filled
         # in: this is the model-vs-chain comparison that decided the campaign
-        # (see docs/REPORT.md section 5) and it is what shows how much each
+        # (see docs/history/2026-08_report/REPORT.md section 5) and it is what
+        # shows how much each
         # rung of the model ladder explains.
         key = self._model_key(c)
         overlay = None

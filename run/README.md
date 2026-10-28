@@ -30,8 +30,8 @@ inverse); everything else here is untracked scratch.
 * The AWG GUI's `Waveforms/` library (sibling repo) gets a normalised,
   upload-ready copy of every drive, so it appears in that GUI's memory list
   and previews — same waveform, different consumer.
-* `docs/figures/` holds the committed report figures; the scripts that made
-  them are archived with their data in `../archive/report-era/`.
+* `docs/history/2026-08_report/figures/` holds the committed report figures; the
+  scripts that made them are archived with their data in `../archive/report-era/`.
 * Raw scope captures never come here at all — they live in
   `..\..\scope_data\`, outside the repo.
 
@@ -42,4 +42,4 @@ inverse); everything else here is untracked scratch.
   files, the seed states, and the 14 figure scripts (still runnable there;
   they carry copies of the MKJ states/measurements they read).
 * `../archive/duplicates/` — byte-identical copies that used to shadow
-  `waveforms/target_*.csv` and `docs/figures/*.png`.
+  `waveforms/target_*.csv` and the report's figure PNGs.

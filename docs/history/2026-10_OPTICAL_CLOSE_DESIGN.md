@@ -194,7 +194,7 @@ Smoke block [58] on the simulated devices.
   results back through `self.msgs` (`("call", fn)`); plots through
   `self._draw(fig)`; buttons into `self._actions`.
 - Plot titles are data records; interpretation goes in `_plot_note`. The
-  experiment traps neutral atoms; never write "ion".
+  experiment traps neutral atoms; the word for a charged atom never appears.
 
 # Addendum (13 Oct 2026): separate per-crystal measurement
 
@@ -232,7 +232,7 @@ the next pass measures solo again. Cost: three scans per pass instead of two.
     caller says which played.
   - `tests/test_optical.py` [7].
 
-## 5. Batch stage, attribution (agent B: `ilc_batch.py`, `tests/test_batch.py`, `WORKFLOW.md`)
+## 5. Batch stage, attribution (agent B: `ilc_batch.py`, `tests/test_batch.py`, `WORKFLOW.md`, since merged into `REFERENCE.md` section 6)
 
 Settings: `DEFAULT_OPTICAL` gains `"attribution": "joint"` (today's flow)
 and `"joint_before": true`; `optical_settings` refuses anything but "joint"
@@ -278,7 +278,7 @@ idle; outputs off at the end; `attribution: "sideways"` refused by
 `optical_settings`. `joint_before: false` -> no `_before` folder and
 `verdict_before` None. [11] and [12] unchanged.
 
-## 6. Optical tab, solo play (agent D: `ilc_gui.py`, `tests/smoke_test.py`, `WORKFLOW_GUI.md`)
+## 6. Optical tab, solo play (agent D: `ilc_gui.py`, `tests/smoke_test.py`, `WORKFLOW_GUI.md`, since merged into `REFERENCE.md` sections 5 and 8)
 
 - Step 1: a radio `play: both | X1 alone | X2 alone` (`self.optplay_var`,
   values "both" / "X1" / "X2") beside the button, now "Play (outputs ON)".
@@ -325,7 +325,7 @@ idle; outputs off at the end; `attribution: "sideways"` refused by
   both targets moved, one optical layer each, log names both scans; learn 1
   -> playing both; verify -> joint, no table but the verdict logged; off ->
   both OFF. [58] passes unchanged (`tests\smoke_block.py 58 60`).
-- `WORKFLOW_GUI.md`: the Optical tab section gains the radio and the solo
+- `WORKFLOW_GUI.md` (now `REFERENCE.md` section 8): the Optical tab section gains the radio and the solo
   flow (1 X1 alone, 2, 3; 1 X2 alone, 2, 3; 4; 5; 6; 7).
 
 Both agents: a worktree each, CRLF files, `git add` by name, one commit

@@ -85,7 +85,7 @@ versus the 0.1 µs source shape — not an error the loop sees or chases.
 Why not learn at 10 MSa/s directly: the 2 µs grid's Nyquist is 250 kHz,
 comfortably above the 75 kHz the measured-inverse campaign ended up correcting
 to. (The "20 kHz Q filter" ceiling this note originally cited belonged to the
-parametric era and is long superseded — see REPORT.md — but the conclusion
+parametric era and is long superseded — see 2026-08_report/REPORT.md — but the conclusion
 survives the change.) The scope samples at 160 ns, so interpolating
 measurements up to a 100 ns grid invents structure that isn't there. And every
 iteration would write a 106020-line file for no gain.
@@ -95,7 +95,7 @@ interpolating: at the 5301-point / 2 µs record the steepest part steps by about
 **6.6 V** at the EOM (peak slew 3.30 V/µs at 5200 V) — well above the 0.5–1 V
 measurement floor and the 2.4 V residual the campaign reached.
 
-**Answered 25 Aug: it interpolates.** The wide-probe detail capture (REPORT.md,
+**Answered 25 Aug: it interpolates.** The wide-probe detail capture (2026-08_report/REPORT.md,
 "the wide probe as actually played") shows the generator reconstructing
 smoothly between the stored 2 µs samples — its reconstruction *attenuates* the
 fastest content rather than stepping — and the corrected ramps' 2.4 V peak

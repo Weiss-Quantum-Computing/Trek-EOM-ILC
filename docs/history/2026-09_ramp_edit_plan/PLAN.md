@@ -463,7 +463,7 @@ is closed with the one-pole rung. 10 min.
 if run), the error amplitude spectrum at k = 16 of i15 to i20, band rms in
 3 to 10, 10 to 25, 25 to 33, 33 to 40, 40 to 60 kHz, and the per-band growth
 factor per iteration over i10 to i20. Output:
-`docs\analysis\phase2_bands.csv` with columns
+`analysis\phase2_bands.csv` with columns
 `stem, iteration, band_lo_Hz, band_hi_Hz, rms_mV_mon, k, window, dt_us`.
 
 ### Phase 3, edited-drive transfer
@@ -497,7 +497,7 @@ measurement in V at the EOM; whole-record rms and peak; rms in windows
 [new corner - 300 µs, new corner + 300 µs], the hold interior (corner +
 300 µs to exit - 20 µs), the ramps; the plateau level error as the mean of
 e over the hold interior; each also for the bracket runs. Output:
-`docs\analysis\phase3_windows.csv` with columns `stem, run, window_name,
+`docs\history\2026-09_ramp_edit_plan\analysis\phase3_windows.csv` with columns `stem, run, window_name,
 t_lo_us, t_hi_us, rms_V, peak_V, mean_V, n_samples, target_file,
 drive_file, bracket_before_rms_V, bracket_after_rms_V`.
 
@@ -567,7 +567,7 @@ Rule per Section 3. About 25 min.
 
 - Every quoted number names its file: `run\meas_<stem>_iNN[_rMM].npy` for a
   measurement, `run\drive_<stem>.state.npz` for a history entry,
-  `run\iterations_<stem>.csv` for a Table figure, `docs\analysis\*.csv` for
+  `run\iterations_<stem>.csv` for a Table figure, `docs\history\2026-09_ramp_edit_plan\analysis\*.csv` for
   a windowed or spectral figure.
 - Predicted values in this plan are labelled *predicted* when quoted next
   to a measurement. Values derived by subtraction (bracket-corrected) are

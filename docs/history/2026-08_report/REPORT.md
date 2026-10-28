@@ -506,4 +506,4 @@ day 4`, states and measurements in `EOM-ILC/run`). All errors quoted in volts
 at the EOM; all measurements 64-shot software-averaged HRES captures unless
 noted. Figure sources: `run/make_report_figs*.py`, `run/make_quant_fig.py`.
 This file is the repository copy of the published report artifact; the figures
-are the same PNGs, committed under `docs/figures/`.*
+are the same PNGs, committed under `figures/` beside this file.*
